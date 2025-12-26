@@ -201,6 +201,12 @@ export const login = async (req: Request, res: Response) => {
 };
 
 // 9. Update Avatar
+import fs from 'fs';
+import path from 'path';
+
+// ... (imports)
+
+// 9. Update Avatar
 export const updateAvatar = async (req: Request, res: Response) => {
     try {
         const { email, avatar } = req.body;
@@ -210,10 +216,46 @@ export const updateAvatar = async (req: Request, res: Response) => {
             return res.status(400).json({ message: 'Email is required' });
         }
 
-        // Allow avatar to be null/empty (for removal)
-        await pool.query('UPDATE users SET avatar = $1 WHERE email = $2', [avatar || null, email]);
+        let avatarPath = null;
 
-        res.status(200).json({ message: 'Avatar updated successfully' });
+        if (avatar) {
+            // Expecting Base64 string: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+            const matches = avatar.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+
+            if (!matches || matches.length !== 3) {
+                return res.status(400).json({ message: 'Invalid image format' });
+            }
+
+            const imageBuffer = Buffer.from(matches[2], 'base64');
+            const userResult = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+
+            if (userResult.rows.length === 0) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+
+            const userId = userResult.rows[0].id;
+            const filename = `avatar_${userId}_${Date.now()}.jpg`;
+            const uploadDir = path.join(__dirname, '../../../../uploads/avatars');
+            const filepath = path.join(uploadDir, filename);
+
+            // Ensure directory exists (redundant if created manually but safe)
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+
+            // Write file
+            fs.writeFileSync(filepath, imageBuffer);
+
+            // Set public URL path
+            // Assuming server runs on same host/port, client will prepend base URL if needed
+            // Or we can store full URL if we knew the host. Storing relative path is safer.
+            avatarPath = `/uploads/avatars/${filename}`;
+        }
+
+        // Update DB
+        await pool.query('UPDATE users SET avatar = $1 WHERE email = $2', [avatarPath, email]);
+
+        res.status(200).json({ message: 'Avatar updated successfully', avatar: avatarPath });
     } catch (error: any) {
         console.error('updateAvatar error:', error);
         res.status(500).json({ message: 'Server error' });

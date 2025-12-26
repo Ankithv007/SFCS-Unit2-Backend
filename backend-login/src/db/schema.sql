@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
     password VARCHAR(255), -- Nullable initially
     is_verified BOOLEAN DEFAULT FALSE,
     status VARCHAR(50) DEFAULT 'pending_verification', -- pending_verification, active
-    avatar TEXT, -- Base64 encoded image
+    avatar TEXT, -- URL path to image file
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
