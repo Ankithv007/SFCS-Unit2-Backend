@@ -184,13 +184,14 @@ export const login = async (req: Request, res: Response) => {
         const isMatch = await comparePassword(password, user.password);
         if (!isMatch) return res.status(401).json({ message: 'Incorrect credentials' });
 
-        const token = generateToken({ id: user.id, email: user.email });
+        const token = generateToken({ id: user.id, email: user.email, role: user.role });
         res.json({
             token,
             user: {
                 id: user.id,
                 name: user.name,
                 email: user.email,
+                role: user.role,
                 avatar: user.avatar // Return avatar
             }
         });

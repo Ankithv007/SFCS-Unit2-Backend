@@ -35,3 +35,5 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Inventory Service running on port ${PORT}`);
 });
+
+// Trigger restart for env update

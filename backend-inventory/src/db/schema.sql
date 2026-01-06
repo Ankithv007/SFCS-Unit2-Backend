@@ -33,20 +33,6 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     id SERIAL PRIMARY KEY,
     po_number VARCHAR(50) UNIQUE NOT NULL,
     date DATE NOT NULL,
-    vendor_id INTEGER REFERENCES vendors(id),
-    organization VARCHAR(50), -- VISPL, VEPL
-    status VARCHAR(20) DEFAULT 'Draft', -- Draft, Issued, Received, Closed
-    total_amount DECIMAL(12, 2) DEFAULT 0,
-    tax_amount DECIMAL(12, 2) DEFAULT 0,
-    grand_total DECIMAL(12, 2) DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Purchase Order Items Table
-CREATE TABLE IF NOT EXISTS purchase_order_items (
-    id SERIAL PRIMARY KEY,
-    po_id INTEGER REFERENCES purchase_orders(id) ON DELETE CASCADE,
     item_id INTEGER REFERENCES master_items(id),
     
     -- Snapshot of item details
@@ -67,3 +53,5 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
     tax_amount DECIMAL(10, 2) GENERATED ALWAYS AS ((ordered_qty * unit_price) * (tax_rate / 100)) STORED,
     total_amount DECIMAL(12, 2) GENERATED ALWAYS AS ((ordered_qty * unit_price) + ((ordered_qty * unit_price) * (tax_rate / 100))) STORED
 );
+
+
