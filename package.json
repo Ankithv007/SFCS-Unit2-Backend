@@ -1,0 +1,16 @@
+{
+    "name": "new-sfcs-unit2-root",
+    "version": "1.0.0",
+    "description": "Root project to run all microservices",
+    "scripts": {
+        "start": "concurrently \"npm run start:frontend\" \"npm run start:backend-login\" \"npm run start:backend-inventory\" \"npm run start:backend-pretest\"",
+        "start:frontend": "cd New-sfcs-unit2-Frontend/Frontend && npm run dev",
+        "start:backend-login": "cd New-sfcs-unit2-Backend/backend-login && npm run dev",
+        "start:backend-inventory": "cd New-sfcs-unit2-Backend/backend-inventory && npm run dev",
+        "start:backend-pretest": "cd New-sfcs-unit2-Backend/backend-pretest && npm run dev",
+        "install:all": "npm install && npm install --prefix New-sfcs-unit2-Frontend/Frontend && npm install --prefix New-sfcs-unit2-Backend/backend-login && npm install --prefix New-sfcs-unit2-Backend/backend-inventory"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.0"
+    }
+}
