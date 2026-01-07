@@ -77,15 +77,26 @@ export const scanComponent = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Item not found in Warehouse for this batch. Please scan in Warehouse first.' });
         }
 
-        // 3. Check Batch Limit (Optional, as we are limited by Warehouse anyway)
-        if (batch_limit) {
-            const countResult = await pool.query(
-                `SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1 AND status != 'REJECTED'`,
-                [batch_id]
-            );
-            if (parseInt(countResult.rows[0].count) >= batch_limit && status !== 'REJECTED') {
-                return res.status(400).json({ error: `Batch ${batch_number} is full (${batch_limit} items).` });
-            }
+        // 3. Check Batch Limit against Warehouse Received Quantity (Dynamic)
+        // We must allow scanning up to the number of items actually received in Warehouse.
+        const warehouseCountResult = await pool.query(
+            `SELECT COUNT(*) as count 
+             FROM warehouse_scans s 
+             JOIN warehouse_batches wb ON s.batch_id = wb.id 
+             WHERE wb.batch_number = $1`,
+            [batch_number]
+        );
+        const warehouseReceivedQty = parseInt(warehouseCountResult.rows[0].count);
+
+        const iqcCountResult = await pool.query(
+            `SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1`,
+            [batch_id]
+        );
+        const iqcScannedQty = parseInt(iqcCountResult.rows[0].count);
+
+        // Allow scan if we haven't reached the Warehouse Received count yet
+        if (iqcScannedQty >= warehouseReceivedQty && status !== 'REJECTED') {
+            return res.status(400).json({ error: `Cannot scan more items than received from Warehouse (${warehouseReceivedQty}).` });
         }
 
         // 4. Check for Duplicate in Current IQC Batch
