@@ -190,6 +190,16 @@ export const updateComponentStatus = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Component not found' });
         }
 
+        // Real-time Sync: If status changed to anything other than ACCEPTED, remove from Impedance
+        if (status !== 'ACCEPTED') {
+            const updatedComponent = result.rows[0];
+            const barcode = updatedComponent.barcode;
+
+            // Delete from impedance_scans if it exists
+            await pool.query('DELETE FROM impedance_scans WHERE barcode = $1', [barcode]);
+            console.log(`Sync: Removed ${barcode} from Impedance Scans due to IQC status change to ${status}`);
+        }
+
         res.json(result.rows[0]);
     } catch (error) {
         console.error('Error updating component status:', error);
