@@ -5,10 +5,12 @@ import { AuthRequest } from '../middleware/authMiddleware';
 // Get All Users
 export const getAllUsers = async (req: AuthRequest, res: Response) => {
     try {
+        console.log('[ADMIN DEBUG] Fetching all users...');
         const result = await pool.query('SELECT id, name, email, role, status, created_at FROM users ORDER BY id ASC');
+        console.log(`[ADMIN DEBUG] Successfully fetched ${result.rows.length} users`);
         res.json(result.rows);
     } catch (error) {
-        console.error('Error fetching users:', error);
+        console.error('[ADMIN DEBUG] Error fetching users:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
