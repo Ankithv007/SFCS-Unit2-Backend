@@ -1,7 +1,4 @@
 import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const SECRET = process.env.JWT_SECRET || 'secret';
 // Use 24h as default for better parsing consistency across different JWT libraries

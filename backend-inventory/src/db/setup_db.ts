@@ -1,21 +1,20 @@
+import pool from '../config/db';
 import fs from 'fs';
 import path from 'path';
-import pool from '../config/db';
+import { createLogger } from '../utils/logger';
 
-const setupDatabase = async () => {
+const logger = createLogger('INVENTORY');
+
+export const setupDatabase = async () => {
     try {
+        logger.info('Checking database schema...');
         const schemaPath = path.join(__dirname, 'schema.sql');
-        const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+        const schema = fs.readFileSync(schemaPath, 'utf8');
 
-        console.log('Running schema migration...');
-        await pool.query(schemaSql);
-        console.log('Schema migration completed successfully.');
-
-        process.exit(0);
-    } catch (error) {
-        console.error('Error running schema migration:', error);
-        process.exit(1);
+        await pool.query(schema);
+        logger.info('Schema initialized successfully.');
+    } catch (error: any) {
+        logger.error(`Failed to initialize schema: ${error.message}`);
+        throw error;
     }
 };
-
-setupDatabase();

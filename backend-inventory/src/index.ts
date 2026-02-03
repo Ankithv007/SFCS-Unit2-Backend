@@ -1,10 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import inventoryRoutes from './routes/inventoryRoutes';
+import { setupDatabase } from './db/setup_db';
+import { createLogger } from './utils/logger';
+import pool from './config/db';
 
-dotenv.config();
-
+const logger = createLogger('INVENTORY');
 const app = express();
 const PORT = process.env.PORT || 5001;
 
@@ -13,27 +14,57 @@ app.use(express.json());
 
 // Log all requests
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    logger.info(`${req.method} ${req.url}`);
     next();
 });
 
 app.use('/api/inventory', inventoryRoutes);
 
-// Proxy auth requests to the main backend (assuming it runs on port 5000)
-// This is a temporary workaround if the auth service is separate or merged
-const proxy = require('express-http-proxy');
-app.use('/api/auth', proxy('http://localhost:5000', {
-    proxyReqPathResolver: (req: any) => {
-        return `/api/auth${req.url}`;
+// Health Check
+app.get('/health', async (req, res) => {
+    try {
+        const dbRes = await pool.query('SELECT NOW()');
+        res.json({
+            success: true,
+            service: 'backend-inventory',
+            database: 'connected',
+            timestamp: dbRes.rows[0].now
+        });
+    } catch (error: any) {
+        logger.error(`Health check failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            service: 'backend-inventory',
+            database: 'disconnected',
+            error: error.message
+        });
     }
-}));
+});
+
+// Centralized Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    logger.error(`Unhandled error: ${err.message}`);
+    res.status(err.status || 500).json({
+        success: false,
+        error: err.message || 'Internal Server Error'
+    });
+});
 
 app.get('/', (req, res) => {
     res.send('Inventory Service is running');
 });
 
-app.listen(PORT, () => {
-    console.log(`Inventory Service running on port ${PORT}`);
-});
+// Initialize Database and Start Server
+const startServer = async () => {
+    try {
+        await setupDatabase();
+        app.listen(PORT, () => {
+            logger.info(`Inventory Service running on port ${PORT}`);
+        });
+    } catch (error) {
+        logger.error('Failed to start Inventory Service due to DB error.');
+        process.exit(1);
+    }
+};
 
-// Trigger restart for env update
+startServer();

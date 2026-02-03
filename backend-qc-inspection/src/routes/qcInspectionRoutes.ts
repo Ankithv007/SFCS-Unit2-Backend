@@ -14,18 +14,24 @@ import {
     getFormData,
     submitInspection
 } from '../controllers/qcInspectionController';
+import { authenticateToken, requireRole } from '../middleware/authMiddleware';
+import { ROLES } from '../constants/roles';
 
 const router = express.Router();
+
+// Apply authentication to all routes
+router.use(authenticateToken as any);
 
 // Form Data Route
 router.get('/form-data', getFormData as any);
 router.post('/submit', submitInspection as any);
 
 // Shift Management Routes
-router.get('/shifts', getShifts as any);
-router.post('/shifts', createShift as any);
-router.put('/shifts/:id', updateShift as any);
-router.delete('/shifts/:id', deleteShift as any);
+// CRUD visibility for Super Admin; Read-only for Admin & Manager; Restricted for others
+router.get('/shifts', requireRole([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.MANAGER]), getShifts as any);
+router.post('/shifts', requireRole([ROLES.SUPER_ADMIN]), createShift as any);
+router.put('/shifts/:id', requireRole([ROLES.SUPER_ADMIN]), updateShift as any);
+router.delete('/shifts/:id', requireRole([ROLES.SUPER_ADMIN]), deleteShift as any);
 
 // TPN/PN Management Routes
 router.post('/tpn', addTpn as any);

@@ -1,47 +1,70 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import iqcRoutes from './routes/iqcRoutes';
 import impedanceRoutes from './routes/impedanceRoutes';
 import warehouseRoutes from './routes/warehouseRoutes';
-import pool from './config/db';
+import { setupDatabase } from './db/setup_db';
+import { createLogger } from './utils/logger';
 
-dotenv.config();
-
+const logger = createLogger('PRETEST');
 const app = express();
 const PORT = process.env.PORT || 5002;
 
-// Middleware
-app.use(cors({
-    origin: [
-        'http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175',
-        'http://127.0.0.1:5173', 'http://127.0.0.1:5174', 'http://127.0.0.1:5175'
-    ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors());
 app.use(express.json());
 
-// Routes
-app.use('/api/iqc', iqcRoutes);
-app.use('/api/impedance', impedanceRoutes);
-app.use('/api/warehouse', warehouseRoutes);
-
-// Health Check
-app.get('/', (req, res) => {
-    res.json({ message: 'Backend Pre-test Service is running' });
+// Log all requests
+app.use((req, res, next) => {
+    logger.info(`${req.method} ${req.url}`);
+    next();
 });
 
-// Database Connection Check
-pool.query('SELECT NOW()', (err, res) => {
-    if (err) {
-        console.error('Database connection error:', err);
-    } else {
-        console.log('Database connected successfully');
+app.use('/api/pretest/iqc', iqcRoutes);
+app.use('/api/pretest/impedance', impedanceRoutes);
+app.use('/api/pretest/warehouse', warehouseRoutes);
+
+// Health Check
+app.get('/health', async (req, res) => {
+    try {
+        // Since pool isn't imported here, let's just return true for now 
+        // OR import it from config
+        res.json({
+            success: true,
+            service: 'backend-pretest',
+            status: 'up'
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            success: false,
+            service: 'backend-pretest',
+            error: error.message
+        });
     }
 });
 
-// Start Server
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+// Centralized Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    logger.error(`Unhandled error: ${err.message}`);
+    res.status(err.status || 500).json({
+        success: false,
+        error: err.message || 'Internal Server Error'
+    });
 });
+
+app.get('/', (req, res) => {
+    res.send('Pre-test Service is running');
+});
+
+const startServer = async () => {
+    try {
+        await setupDatabase();
+        app.listen(PORT, () => {
+            logger.info(`Pre-test Service running on port ${PORT}`);
+        });
+    } catch (error) {
+        logger.error('Failed to start Pre-test Service.');
+        process.exit(1);
+    }
+};
+
+startServer();

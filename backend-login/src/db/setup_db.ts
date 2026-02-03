@@ -2,23 +2,17 @@ import { pool } from '../config/db';
 import fs from 'fs';
 import path from 'path';
 
-const setupDb = async () => {
+export const setupDatabase = async () => {
     try {
-        console.log('Checking database schema...');
-        // Removed DROP TABLE commands for production safety
-        // Tables will be created only if they don't exist (via schema.sql)
-
-        console.log('Tables dropped. Re-creating schema...');
+        console.log('[Database] Checking schema for Auth Service...');
         const schemaPath = path.join(__dirname, 'schema.sql');
         const schema = fs.readFileSync(schemaPath, 'utf8');
 
+        // Execute schema.sql (contains IF NOT EXISTS)
         await pool.query(schema);
-        console.log('Database schema re-created successfully.');
-        process.exit(0);
+        console.log('[Database] Schema initialized successfully.');
     } catch (error) {
-        console.error('Error setting up database:', error);
-        process.exit(1);
+        console.error('[Database] Failed to initialize schema:', error);
+        throw error; // Re-throw to prevent server startup
     }
 };
-
-setupDb();

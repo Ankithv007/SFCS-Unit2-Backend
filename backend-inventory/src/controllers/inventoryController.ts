@@ -2,9 +2,6 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { fetchNextPONumber } from '../services/zohoService';
 import axios from 'axios';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 // Fetch PO Details from Zoho (Auto-Detect Org)
 export const getZohoPO = async (req: Request, res: Response) => {

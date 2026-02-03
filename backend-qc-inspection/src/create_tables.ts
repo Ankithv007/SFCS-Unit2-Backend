@@ -1,9 +1,7 @@
 import { Pool } from 'pg';
-import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 
-dotenv.config();
 
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',

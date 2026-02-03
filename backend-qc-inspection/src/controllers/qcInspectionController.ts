@@ -7,7 +7,7 @@ export const getQCInspectionStatus = async (req: Request, res: Response) => {
         res.json({ message: 'QC Inspection Module is active', status: 'OK' });
     } catch (error) {
         console.error('Error in getQCInspectionStatus:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -27,7 +27,7 @@ export const getFormData = async (req: Request, res: Response) => {
         });
     } catch (error) {
         console.error('Error in getFormData:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -37,7 +37,7 @@ export const getShifts = async (req: Request, res: Response) => {
         res.json(result.rows);
     } catch (error) {
         console.error('Error in getShifts:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -51,7 +51,7 @@ export const createShift = async (req: Request, res: Response) => {
         res.status(201).json({ message: 'Shift created successfully' });
     } catch (error) {
         console.error('Error in createShift:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -66,7 +66,7 @@ export const updateShift = async (req: Request, res: Response) => {
         res.json({ message: 'Shift updated successfully' });
     } catch (error) {
         console.error('Error in updateShift:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -75,7 +75,7 @@ export const submitInspection = async (req: Request, res: Response) => {
     try {
 
         const {
-            inspector_name, shift, unit_tpn, unit_pn, unit_serial_number,
+            inspector_name, shift, unit_tpn, unit_pn, unit_serial_no,
             pam_tpn, pam_1, pam_2, pam_3, pam_4, ran_barcode, band,
             checklist_results, final_status, process_confirmation,
             de_assembly_status, rework_count, combined_remarks
@@ -124,7 +124,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                 inspection_date_time = CURRENT_TIMESTAMP
             RETURNING id`,
             [
-                unit_serial_number, unit_tpn, unit_pn, pam_tpn,
+                unit_serial_no, unit_tpn, unit_pn, pam_tpn,
                 pam_1, pam_2, pam_3, pam_4, ran_barcode,
                 shift, band, good_count, bad_count,
                 passed, failed, inspector_name,
@@ -167,7 +167,7 @@ export const submitInspection = async (req: Request, res: Response) => {
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error in submitInspection:', error);
-        res.status(500).json({ error: 'Internal server error: ' + (error as any).message });
+        res.status(500).json({ status: 'error', message: 'Internal server error: ' + (error as any).message });
     } finally {
         client.release();
     }
@@ -175,7 +175,7 @@ export const submitInspection = async (req: Request, res: Response) => {
 
 export const addTpn = async (req: Request, res: Response) => {
     const { value } = req.body;
-    if (!value) return res.status(400).json({ error: 'Value is required' });
+    if (!value) return res.status(400).json({ status: 'error', message: 'Value is required' });
 
     try {
         const result = await pool.query(
@@ -185,13 +185,13 @@ export const addTpn = async (req: Request, res: Response) => {
         res.json({ success: true, value, created: result.rowCount ? true : false });
     } catch (error) {
         console.error('Error adding TPN:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
 export const addPn = async (req: Request, res: Response) => {
     const { value } = req.body;
-    if (!value) return res.status(400).json({ error: 'Value is required' });
+    if (!value) return res.status(400).json({ status: 'error', message: 'Value is required' });
 
     try {
         const result = await pool.query(
@@ -201,7 +201,7 @@ export const addPn = async (req: Request, res: Response) => {
         res.json({ success: true, value, created: result.rowCount ? true : false });
     } catch (error) {
         console.error('Error adding PN:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -212,25 +212,27 @@ export const deleteShift = async (req: Request, res: Response) => {
         res.json({ message: 'Shift deleted successfully' });
     } catch (error) {
         console.error('Error in deleteShift:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
 export const validateSerialNumber = async (req: Request, res: Response) => {
     try {
-        let { serial_number } = req.body;
+        console.log('Validating Serial Number. Body:', req.body);
+        let { unit_serial_no } = req.body;
 
-        if (!serial_number) {
-            return res.status(400).json({ error: 'Serial Number is required' });
+        if (!unit_serial_no) {
+            console.error('Validation Error: unit_serial_no is missing');
+            return res.status(400).json({ status: 'error', message: 'Serial Number (unit_serial_no) is required' });
         }
 
-        const rawValue = serial_number;
+        const rawValue = unit_serial_no;
 
         // 1. Check if matches TPN/PN format (Reject)
         // TPN/PN Regex: ^[0-9]{3}-[A-Z0-9]{10}-[A-Z]$
         const tpnPnRegex = /^[0-9]{3}-[A-Z0-9]{10}-[A-Z]$/;
         if (tpnPnRegex.test(rawValue)) {
-            return res.status(400).json({ error: 'Invalid scan. You are scanning TPN or PN. Please scan or enter a barcode starting with SN only.' });
+            return res.status(400).json({ status: 'error', message: 'Invalid scan. You are scanning TPN or PN. Please scan or enter a barcode starting with SN only.' });
         }
 
         // 2. Check if matches SN format
@@ -239,7 +241,7 @@ export const validateSerialNumber = async (req: Request, res: Response) => {
         // Regex: ^AA-[0-9]{4}-[0-9]{2}-[A-Z0-9]{4}$
         const snRegex = /^AA-[0-9]{4}-[0-9]{2}-[A-Z0-9]{4}$/;
         if (!snRegex.test(rawValue)) {
-            return res.status(400).json({ error: 'Invalid Serial Number format. Must be AA-XXXX-XX-XXXX.' });
+            return res.status(400).json({ status: 'error', message: 'Invalid Serial Number format. Must be AA-XXXX-XX-XXXX.' });
         }
 
         // 3. Check for Existing Record
@@ -255,11 +257,11 @@ export const validateSerialNumber = async (req: Request, res: Response) => {
             const unit = existingRecord.rows[0];
 
             if (unit.final_status === 'PASS') {
-                return res.status(400).json({ error: 'This unit has already passed inspection and cannot be scanned again.' });
+                return res.status(400).json({ status: 'error', message: 'This unit has already passed inspection and cannot be scanned again.' });
             }
 
             if (unit.final_status === 'REJECTED') {
-                return res.status(400).json({ error: 'This unit has been rejected and cannot be scanned again.' });
+                return res.status(400).json({ status: 'error', message: 'This unit has been rejected and cannot be scanned again.' });
             }
 
             if (unit.final_status === 'WAITING_FOR_REWORK') {
@@ -292,31 +294,32 @@ export const validateSerialNumber = async (req: Request, res: Response) => {
 
     } catch (error) {
         console.error('Error in validateSerialNumber:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
 export const validatePam = async (req: Request, res: Response) => {
     try {
-        let { pam_value } = req.body;
+        console.log('Validating PAM. Body:', req.body);
+        let { pam_no, pam_value } = req.body;
+        const rawValue = pam_no || pam_value;
 
-        if (!pam_value) {
-            return res.status(400).json({ error: 'PAM Value is required' });
+        if (!rawValue) {
+            console.error('Validation Error: PAM scan value is missing');
+            return res.status(400).json({ status: 'error', message: 'PAM Value (pam_no) is required' });
         }
-
-        const rawValue = pam_value;
 
         // 1. Check if matches TPN/PN format (Reject)
         const tpnPnRegex = /^[0-9]{3}-[A-Z0-9]{10}-[A-Z]$/;
         if (tpnPnRegex.test(rawValue)) {
-            return res.status(400).json({ error: 'Invalid scan. You are scanning TPN or PN. Please scan or enter a valid PAM barcode.' });
+            return res.status(400).json({ status: 'error', message: 'Invalid scan. You are scanning TPN or PN. Please scan or enter a valid PAM barcode.' });
         }
 
         // 2. Check if matches PAM format (Structure: XX-XXXX-XX-XXXX)
         // Allowed prefixes: AY, AB, etc. (Any 2 uppercase letters)
         const pamRegex = /^[A-Z]{2}-[0-9]{4}-[0-9]{2}-[A-Z0-9]{4}$/;
         if (!pamRegex.test(rawValue)) {
-            return res.status(400).json({ error: 'Invalid PAM format. Must be XX-XXXX-XX-XXXX (e.g., AY-2224-24-A0TR).' });
+            return res.status(400).json({ status: 'error', message: 'Invalid PAM format. Must be XX-XXXX-XX-XXXX (e.g., AY-2224-24-A0TR).' });
         }
 
         // 3. Check for Duplicates
@@ -327,36 +330,38 @@ export const validatePam = async (req: Request, res: Response) => {
         );
 
         if ((duplicateCheck.rowCount || 0) > 0) {
-            return res.status(400).json({ error: 'Duplicate PAM Value. This value already exists in the database.' });
+            return res.status(400).json({ status: 'error', message: 'Duplicate PAM Value. This value already exists in the database.' });
         }
 
         res.json({ status: 'success', message: 'PAM Verified', value: rawValue });
 
     } catch (error) {
         console.error('Error in validatePam:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
 export const validateRanBarcode = async (req: Request, res: Response) => {
     try {
+        console.log('Validating RAN Barcode. Body:', req.body);
         let { ran_barcode } = req.body;
 
         if (!ran_barcode) {
-            return res.status(400).json({ error: 'RAN Barcode is required' });
+            console.error('Validation Error: ran_barcode is missing');
+            return res.status(400).json({ status: 'error', message: 'RAN Barcode is required' });
         }
 
         // 1. Check format: RAN-XXXXXX_BO_XXXX
         const ranRegex = /^RAN-\d{6}_BO_\d{4}$/;
         if (!ranRegex.test(ran_barcode)) {
-            return res.status(400).json({ error: 'Invalid RAN Barcode format. Expected: RAN-XXXXXX_BO_XXXX' });
+            return res.status(400).json({ status: 'error', message: 'Invalid RAN Barcode format. Expected: RAN-XXXXXX_BO_XXXX' });
         }
 
         res.json({ status: 'success', message: 'RAN Barcode Verified', value: ran_barcode });
 
     } catch (error) {
         console.error('Error in validateRanBarcode:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -389,7 +394,7 @@ export const getCompletedInspections = async (req: Request, res: Response) => {
         });
     } catch (error) {
         console.error('Error in getCompletedInspections:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
 
@@ -550,6 +555,6 @@ export const exportInspectionsExcel = async (req: Request, res: Response) => {
 
     } catch (error) {
         console.error('Error exporting excel:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ status: 'error', message: 'Internal server error' });
     }
 };
