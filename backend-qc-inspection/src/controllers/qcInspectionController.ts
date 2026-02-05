@@ -20,10 +20,29 @@ export const getFormData = async (req: Request, res: Response) => {
         const tpnResult = await pool.query("SELECT value FROM qc_unit_tpns ORDER BY value");
         const pnResult = await pool.query("SELECT value FROM qc_unit_pns ORDER BY value");
 
+        const mappings = {
+            '611-PCA000211-E': {
+                unitTpn: '611-SKU000176-P',
+                band: 'B1',
+                pamCount: 4
+            },
+            '611-PCA000214-E': {
+                unitTpn: '611-SKU000212-P',
+                band: 'DB',
+                pamCount: 2
+            },
+            '611-PCA000215-E': {
+                unitTpn: '611-SKU000223-P',
+                band: 'DB',
+                pamCount: 2
+            }
+        };
+
         res.json({
             shifts: shiftsResult.rows,
             unitTpns: tpnResult.rows.map((r: any) => r.value),
-            unitPns: pnResult.rows.map((r: any) => r.value)
+            unitPns: pnResult.rows.map((r: any) => r.value),
+            mappings
         });
     } catch (error) {
         console.error('Error in getFormData:', error);
@@ -398,6 +417,34 @@ export const getCompletedInspections = async (req: Request, res: Response) => {
     }
 };
 
+const formatIST = (dateInput: any) => {
+    if (!dateInput) return 'N/A';
+    const date = new Date(dateInput);
+    if (isNaN(date.getTime())) return 'N/A';
+
+    const formatter = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+    });
+
+    const parts = formatter.formatToParts(date);
+    const d = parts.find(p => p.type === 'day')?.value;
+    const mo = parts.find(p => p.type === 'month')?.value;
+    const y = parts.find(p => p.type === 'year')?.value;
+    const h = parts.find(p => p.type === 'hour')?.value;
+    const mi = parts.find(p => p.type === 'minute')?.value;
+    const s = parts.find(p => p.type === 'second')?.value;
+    const dayPeriod = parts.find(p => p.type === 'dayPeriod')?.value.toUpperCase() || '';
+
+    return `${d}/${mo}/${y} ${h}:${mi}:${s} ${dayPeriod}`;
+};
+
 export const exportInspectionsExcel = async (req: Request, res: Response) => {
     try {
         const workbook = new ExcelJS.Workbook();
@@ -418,7 +465,7 @@ export const exportInspectionsExcel = async (req: Request, res: Response) => {
 
         // Base Columns
         const columns = [
-            { header: 'Inspection Date', key: 'inspection_date_time', width: 20 },
+            { header: 'Inspection Date', key: 'inspection_date_time', width: 25 },
             { header: 'Shift', key: 'shift', width: 15 },
             { header: 'Inspector Name', key: 'inspected_by', width: 20 },
             { header: 'Unit TPN', key: 'unit_tpn', width: 20 },
@@ -473,7 +520,7 @@ export const exportInspectionsExcel = async (req: Request, res: Response) => {
 
             const rowData: any = {
                 ...row,
-                inspection_date_time: new Date(row.inspection_date_time).toLocaleString(),
+                inspection_date_time: formatIST(row.inspection_date_time),
                 de_assembly: row.de_assembly_status,
                 final_status: row.final_status,
                 process_confirmation: "C441 & C442 mounting using leaded",
@@ -512,7 +559,7 @@ export const exportInspectionsExcel = async (req: Request, res: Response) => {
                 const history = r.history || [];
                 history.forEach((h: any) => {
                     if (h.remark) {
-                        const date = h.timestamp ? new Date(h.timestamp).toLocaleString() : 'N/A';
+                        const date = formatIST(h.timestamp);
                         const attemptLabel = h.attempt === 0 ? 'Initial' : `Rework ${h.attempt}`;
                         cumulativeRemarks.push(`[${r.checkpoint_description}] [${attemptLabel}] [${date}]: ${h.remark}`);
                     }
