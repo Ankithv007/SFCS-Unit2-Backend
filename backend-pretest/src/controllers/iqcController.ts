@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import * as ExcelJS from 'exceljs';
 import pool from '../config/db';
 
 // Create a new IQC Batch
@@ -36,16 +37,20 @@ export const getBatches = async (req: Request, res: Response) => {
              WHERE wb.batch_number = b.batch_number) as warehouse_received_quantity,
             (SELECT wb.expected_quantity 
              FROM warehouse_batches wb 
-             WHERE wb.batch_number = b.batch_number) as warehouse_expected_quantity,
+             WHERE wb.batch_number = b.batch_number LIMIT 1) as warehouse_expected_quantity,
             (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'ACCEPTED') as passed_count,
-            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REJECTED') as failed_count
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REJECTED') as failed_count,
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REWORK') as rework_count,
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'SCRAP') as scrap_count
             FROM iqc_batches b 
             ORDER BY b.created_at DESC
         `);
+        console.log(`[DEBUG] Fetched ${result.rows.length} IQC batches`);
         res.json(result.rows);
-    } catch (error) {
-        console.error('Error fetching IQC batches:', error);
-        res.status(500).json({ error: 'Internal server error' });
+    } catch (error: any) {
+        console.error('Error fetching IQC batches:', error.message);
+        if (error.stack) console.error(error.stack);
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 };
 
@@ -124,7 +129,23 @@ export const scanComponent = async (req: Request, res: Response) => {
         if (historyCheck.rows.length > 0) {
             const prev = historyCheck.rows[0];
 
-            if (!force_move) {
+            // Restriction: SCRAP is final and cannot be rescanned
+            if (prev.status === 'SCRAP') {
+                return res.status(403).json({
+                    error: `Component was scrapped in Batch ${prev.batch_number} and cannot be rescanned.`,
+                    code: 'SCRAPPED_BLOCK'
+                });
+            }
+
+            // Restriction: REWORK is batch-locked
+            if (prev.status === 'REWORK' && prev.batch_id !== batch_id) {
+                return res.status(403).json({
+                    error: `Component is marked for Rework in Batch ${prev.batch_number}. It can only be rescanned in that same batch.`,
+                    code: 'REWORK_LOCKED'
+                });
+            }
+
+            if (!force_move && prev.status !== 'REWORK') {
                 return res.status(409).json({
                     error: `Component belongs to Batch ${prev.batch_number}. Move it?`,
                     code: 'MOVE_REQUIRED',
@@ -132,15 +153,15 @@ export const scanComponent = async (req: Request, res: Response) => {
                 });
             }
 
-            // Handle Move: Update existing component
-            const previousBatchInfo = `Moved from Batch ${prev.batch_number}`;
-            const movedComponent = await pool.query(
+            // Handle Move or Rework-Resume
+            const previousBatchInfo = prev.status === 'REWORK' ? prev.previous_batch : `Moved from Batch ${prev.batch_number}`;
+            const updatedComponent = await pool.query(
                 `UPDATE iqc_components 
                  SET batch_id = $1, scanned_by = $2, status = $3, remarks = $4, previous_batch = $5, scanned_at = NOW()
                  WHERE id = $6 RETURNING *`,
-                [batch_id, scanned_by, status || 'ACCEPTED', remarks, previousBatchInfo, prev.id]
+                [batch_id, scanned_by, 'ACCEPTED', null, previousBatchInfo, prev.id]
             );
-            return res.status(200).json(movedComponent.rows[0]);
+            return res.status(200).json(updatedComponent.rows[0]);
         }
 
         // 6. Record New Scan
@@ -178,6 +199,10 @@ export const updateComponentStatus = async (req: Request, res: Response) => {
 
     if (!status) {
         return res.status(400).json({ error: 'Status is required' });
+    }
+
+    if ((status === 'REWORK' || status === 'SCRAP') && (!remarks || !remarks.trim())) {
+        return res.status(400).json({ error: `Remarks are mandatory when marking as ${status}` });
     }
 
     try {
@@ -236,7 +261,9 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
             SELECT b.*, b.quantity as expected_quantity,
             (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id) as received_quantity,
             (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'ACCEPTED') as passed_count,
-            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REJECTED') as failed_count
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REJECTED') as failed_count,
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'REWORK') as rework_count,
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'SCRAP') as scrap_count
             FROM iqc_batches b 
             WHERE b.id = $1
         `, [batch_id]);
@@ -253,49 +280,131 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
         );
         const components = componentsResult.rows;
 
-        // 3. Generate CSV Content
-        const formatDateTime = (dateStr: string) => {
-            const d = new Date(dateStr);
-            return d.toLocaleString('en-GB'); // DD/MM/YYYY, HH:mm:ss
+        // 3. Generate Excel Content
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('IQC Report');
+
+        // Styles
+        const headerStyle: Partial<ExcelJS.Style> = {
+            font: { bold: true, color: { argb: 'FFFFFFFF' } },
+            fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F81BD' } },
+            alignment: { horizontal: 'center', vertical: 'middle' },
+            border: {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            }
+        };
+
+        const cellStyle: Partial<ExcelJS.Style> = {
+            alignment: { vertical: 'middle', wrapText: true },
+            border: {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            }
         };
 
         // Section 1: Batch Summary
-        const summaryHeaders = ['Batch Number', 'Created By', 'Date & Time', 'Expected Qty', 'Total Count', 'Passed', 'Failed'];
-        const summaryRow = [
+        worksheet.addRow(['BATCH SUMMARY']).font = { bold: true, size: 14 };
+        worksheet.addRow([]); // Gap
+
+        const summaryHeaders = ['Batch Number', 'Created By', 'Date & Time', 'Expected Qty', 'Total Count', 'Passed', 'Failed', 'Rework', 'Scrap'];
+        const summaryHeaderRow = worksheet.addRow(summaryHeaders);
+        summaryHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
+
+        const summaryData = [
             batch.batch_number,
             batch.created_by,
-            formatDateTime(batch.created_at),
+            new Date(batch.created_at).toLocaleString(),
             batch.expected_quantity,
             batch.received_quantity,
             batch.passed_count,
-            batch.failed_count
+            batch.failed_count,
+            batch.rework_count,
+            batch.scrap_count
         ];
+        const summaryDataRow = worksheet.addRow(summaryData);
+        summaryDataRow.eachCell((cell) => { cell.style = cellStyle; });
+
+        worksheet.addRow([]); // Gap
+        worksheet.addRow([]); // Gap
 
         // Section 2: Component Details
+        worksheet.addRow(['COMPONENT DETAILS']).font = { bold: true, size: 14 };
+        worksheet.addRow([]); // Gap
+
         const detailHeaders = ['Barcode', 'Scanned By', 'Date & Time', 'Status', 'Remarks', 'Previous Batch'];
-        const detailRows = components.map(comp => [
-            comp.barcode,
-            comp.scanned_by,
-            formatDateTime(comp.scanned_at),
-            comp.status,
-            comp.remarks || '-',
-            comp.previous_batch || '-'
-        ]);
+        const detailHeaderRow = worksheet.addRow(detailHeaders);
+        detailHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
 
-        // Combine into CSV string
-        const csvContent = [
-            summaryHeaders.join(','),
-            summaryRow.map(field => `"${field}"`).join(','),
-            '', // Empty line separator
-            '', // Extra empty line for clarity
-            detailHeaders.join(','),
-            ...detailRows.map(row => row.map(field => `"${field}"`).join(','))
-        ].join('\n');
+        components.forEach((comp: any) => {
+            const row = worksheet.addRow([
+                comp.barcode,
+                comp.scanned_by,
+                new Date(comp.scanned_at).toLocaleString(),
+                comp.status,
+                comp.remarks || '-',
+                comp.previous_batch || '-'
+            ]);
 
-        // 4. Send Response
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', `attachment; filename="iqc_batch_${batch.batch_number}.csv"`);
-        res.status(200).send(csvContent);
+            row.eachCell((cell, colNumber) => {
+                cell.style = { ...cellStyle };
+
+                // Apply background color based on status
+                if (comp.status === 'SCRAP') {
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'FFFFEBEE' } // Light Red
+                    };
+                } else if (comp.status === 'REWORK') {
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'FFFFF9C4' } // Light Yellow
+                    };
+                }
+
+                // Color code status text
+                if (colNumber === 4) {
+                    if (comp.status === 'ACCEPTED') cell.font = { color: { argb: 'FF00B050' }, bold: true };
+                    else if (comp.status === 'REWORK') cell.font = { color: { argb: 'FFFFAF33' }, bold: true };
+                    else if (comp.status === 'SCRAP') cell.font = { color: { argb: 'FFFF0000' }, bold: true };
+                }
+            });
+        });
+
+        // Auto-fit column widths
+        worksheet.columns.forEach((column) => {
+            let maxColumnLength = 0;
+            column.eachCell!({ includeEmpty: true }, (cell) => {
+                const columnLength = cell.value ? cell.value.toString().length : 0;
+                if (columnLength > maxColumnLength) {
+                    maxColumnLength = columnLength;
+                }
+            });
+            column.width = maxColumnLength < 12 ? 12 : maxColumnLength + 5;
+        });
+
+        // 4. Generate Filename (Requested Format)
+        const now = new Date();
+        const formattedDateTime = now.toISOString().slice(0, 19).replace(/:/g, '-');
+        const cleanBatchNumber = batch.batch_number.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const fileName = `IQC_Report_${cleanBatchNumber}_${formattedDateTime}.xlsx`;
+
+        // 5. Send Response
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        res.setHeader('X-Suggested-Filename', fileName);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
+        await workbook.xlsx.write(res);
+        res.end();
 
     } catch (error) {
         console.error('Error downloading IQC batch report:', error);

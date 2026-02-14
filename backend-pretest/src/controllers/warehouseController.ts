@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import * as ExcelJS from 'exceljs';
 import pool from '../config/db';
 
 // Create a new Warehouse Batch
@@ -185,49 +186,114 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
         );
         const scans = scansResult.rows;
 
-        // 3. Generate CSV Content
-        // Helper to format date and time
-        const formatDateTime = (dateStr: string) => {
-            const d = new Date(dateStr);
-            return d.toLocaleString('en-GB'); // DD/MM/YYYY, HH:mm:ss
+        // 3. Generate Excel Content
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Warehouse Report');
+
+        // Styles
+        const headerStyle: Partial<ExcelJS.Style> = {
+            font: { bold: true, color: { argb: 'FFFFFFFF' } },
+            fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F81BD' } },
+            alignment: { horizontal: 'center', vertical: 'middle' },
+            border: {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            }
+        };
+
+        const cellStyle: Partial<ExcelJS.Style> = {
+            alignment: { vertical: 'middle', wrapText: true },
+            border: {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            }
         };
 
         // Section 1: Batch Summary
+        worksheet.addRow(['BATCH SUMMARY']).font = { bold: true, size: 14 };
+        worksheet.addRow([]); // Gap
+
         const summaryHeaders = ['Batch Number', 'Created By', 'Date & Time', 'Expected Qty', 'Extra Qty', 'Shortage Qty', 'Total Count'];
-        const summaryRow = [
+        const summaryHeaderRow = worksheet.addRow(summaryHeaders);
+        summaryHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
+
+        const summaryData = [
             batch.batch_number,
             batch.created_by,
-            formatDateTime(batch.created_at),
+            new Date(batch.created_at).toLocaleString(),
             batch.expected_quantity,
             batch.extra_quantity,
             batch.shortage_quantity,
             batch.received_quantity
         ];
+        const summaryDataRow = worksheet.addRow(summaryData);
+        summaryDataRow.eachCell((cell) => { cell.style = cellStyle; });
+
+        worksheet.addRow([]); // Gap
+        worksheet.addRow([]); // Gap
 
         // Section 2: Scan Details
+        worksheet.addRow(['SCAN DETAILS']).font = { bold: true, size: 14 };
+        worksheet.addRow([]); // Gap
+
         const detailHeaders = ['Barcode', 'Scanned By', 'Date & Time', 'Previous Batch', 'Status'];
-        const detailRows = scans.map(scan => [
-            scan.barcode,
-            scan.scanned_by,
-            formatDateTime(scan.scanned_at),
-            scan.previous_batch || '-',
-            scan.status
-        ]);
+        const detailHeaderRow = worksheet.addRow(detailHeaders);
+        detailHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
 
-        // Combine into CSV string
-        const csvContent = [
-            summaryHeaders.join(','),
-            summaryRow.map(field => `"${field}"`).join(','),
-            '', // Empty line separator
-            '', // Extra empty line for clarity
-            detailHeaders.join(','),
-            ...detailRows.map(row => row.map(field => `"${field}"`).join(','))
-        ].join('\n');
+        scans.forEach((scan: any) => {
+            const row = worksheet.addRow([
+                scan.barcode,
+                scan.scanned_by,
+                new Date(scan.scanned_at).toLocaleString(),
+                scan.previous_batch || '-',
+                scan.status
+            ]);
+            row.eachCell((cell) => {
+                cell.style = { ...cellStyle };
 
-        // 4. Send Response
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', `attachment; filename="warehouse_batch_${batch.batch_number}.csv"`);
-        res.status(200).send(csvContent);
+                // Color code if ever not ACCEPTED
+                if (scan.status !== 'ACCEPTED') {
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'FFFFEBEE' } // Light Red
+                    };
+                }
+            });
+        });
+
+        // Auto-fit column widths
+        worksheet.columns.forEach((column) => {
+            let maxColumnLength = 0;
+            column.eachCell!({ includeEmpty: true }, (cell) => {
+                const columnLength = cell.value ? cell.value.toString().length : 0;
+                if (columnLength > maxColumnLength) {
+                    maxColumnLength = columnLength;
+                }
+            });
+            column.width = maxColumnLength < 12 ? 12 : maxColumnLength + 5;
+        });
+
+        // 4. Generate Filename (Requested Format)
+        const now = new Date();
+        const formattedDateTime = now.toISOString().slice(0, 19).replace(/:/g, '-');
+        const cleanBatchNumber = batch.batch_number.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const fileName = `Warehouse_Report_${cleanBatchNumber}_${formattedDateTime}.xlsx`;
+
+        // 5. Send Response
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        res.setHeader('X-Suggested-Filename', fileName);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
+        await workbook.xlsx.write(res);
+        res.end();
 
     } catch (error) {
         console.error('Error downloading batch report:', error);
