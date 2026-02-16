@@ -60,46 +60,21 @@ export const createBatch = async (req: Request, res: Response) => {
 
 // Scan PCB for Impedance
 export const scanPcb = async (req: Request, res: Response) => {
-    const { session_id, barcode, status, remarks } = req.body;
+    const { session_id, barcode, tested_by, test_pa1, test_pa2, test_pa4, test_pa5, test_r160, remarks } = req.body;
 
     if (!session_id || !barcode) {
         return res.status(400).json({ error: 'Session ID and Barcode are required' });
     }
 
+    const client = await pool.connect();
+
     try {
-        // 1. Validate against IQC (Must be ACCEPTED in IQC)
-        // We check if this barcode exists in ANY IQC batch and is ACCEPTED.
-        // Ideally, we might want to restrict to a specific batch if the session is tied to one,
-        // but for now, we'll check global IQC status as per previous logic.
-        // 1. Validate against IQC (Must be ACCEPTED in IQC)
-        const iqcCheck = await pool.query(
-            "SELECT * FROM iqc_components WHERE barcode = $1 ORDER BY scanned_at DESC LIMIT 1",
-            [barcode]
-        );
+        await client.query('BEGIN');
 
-        if (iqcCheck.rows.length === 0) {
-            return res.status(400).json({ error: 'PCB not found in IQC. Please complete IQC first.' });
-        }
+        // Advisory Lock (Collision-resistant)
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
 
-        const iqcComponent = iqcCheck.rows[0];
-        if (iqcComponent.status !== 'ACCEPTED') {
-            return res.status(400).json({ error: `PCB status in IQC is ${iqcComponent.status}. Only ACCEPTED components can be processed.` });
-        }
-
-        // 2. Check for Duplicate in Current Session
-        const duplicateCheck = await pool.query(
-            'SELECT * FROM impedance_scans WHERE session_id = $1 AND barcode = $2',
-            [session_id, barcode]
-        );
-
-        if (duplicateCheck.rows.length > 0) {
-            return res.status(409).json({ error: 'Duplicate scan! PCB already scanned in this session.' });
-        }
-
-        // 3. Record Scan (Accept test results from body, default to TRUE)
-        const { tested_by, test_pa1, test_pa2, test_pa4, test_pa5, test_r160 } = req.body;
-
-        // Determine initial status based on provided test results
+        // Duplicate Guard (5-second throttle)
         const isPass = (
             (test_pa1 !== false) &&
             (test_pa2 !== false) &&
@@ -107,17 +82,55 @@ export const scanPcb = async (req: Request, res: Response) => {
             (test_pa5 !== false) &&
             (test_r160 !== false)
         );
-        const initialStatus = isPass ? 'ACCEPTED' : 'FAILED';
+        const mappedStatus = isPass ? 'Passed' : 'Failed';
 
-        const newScan = await pool.query(
+        const dupCheck = await client.query(`
+            SELECT 1 FROM barcode_stage_history 
+            WHERE barcode = $1 AND stage_name = 'Pre-Impedance' AND status = $2 
+            AND created_at > NOW() - INTERVAL '5 seconds' LIMIT 1
+        `, [barcode, mappedStatus]);
+
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Duplicate scan detected. Please wait 5 seconds.' });
+        }
+
+        // 1. Validate against IQC
+        const iqcCheck = await client.query(
+            "SELECT status, batch_id FROM iqc_components WHERE barcode = $1 ORDER BY scanned_at DESC LIMIT 1",
+            [barcode]
+        );
+
+        if (iqcCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'PCB not found in IQC. Please complete IQC first.' });
+        }
+
+        const iqcComponent = iqcCheck.rows[0];
+        if (iqcComponent.status !== 'ACCEPTED') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: `PCB status in IQC is ${iqcComponent.status}. Only ACCEPTED components can be processed.` });
+        }
+
+        // 2. Check for Duplicate in Current Session
+        const duplicateCheck = await client.query(
+            'SELECT * FROM impedance_scans WHERE session_id = $1 AND barcode = $2',
+            [session_id, barcode]
+        );
+
+        if (duplicateCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Duplicate scan! PCB already scanned in this session.' });
+        }
+
+        // 3. Record Scan
+        const initialStatus = isPass ? 'ACCEPTED' : 'FAILED';
+        const newScan = await client.query(
             `INSERT INTO impedance_scans 
             (session_id, barcode, status, remarks, test_pa1, test_pa2, test_pa4, test_pa5, test_r160, tested_by) 
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
             [
-                session_id,
-                barcode,
-                initialStatus,
-                remarks,
+                session_id, barcode, initialStatus, remarks,
                 test_pa1 !== undefined ? test_pa1 : true,
                 test_pa2 !== undefined ? test_pa2 : true,
                 test_pa4 !== undefined ? test_pa4 : true,
@@ -127,10 +140,20 @@ export const scanPcb = async (req: Request, res: Response) => {
             ]
         );
 
+        // Audit Log
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, remarks, source_system)
+            VALUES ($1, 'Pre-Impedance', 3, $2, $3, $4, $5, 'pretest')
+        `, [barcode, mappedStatus, tested_by || 'Unknown', iqcComponent.batch_id, remarks]);
+
+        await client.query('COMMIT');
         res.status(201).json(newScan.rows[0]);
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error scanning PCB:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 
@@ -139,24 +162,35 @@ export const updateScanTestResult = async (req: Request, res: Response) => {
     const { scan_id } = req.params;
     const { test_name, result } = req.body; // test_name: 'test_pa1', result: boolean
 
-    // Allow list of valid columns to prevent SQL injection
     const validTests = ['test_pa1', 'test_pa2', 'test_pa4', 'test_pa5', 'test_r160'];
     if (!validTests.includes(test_name)) {
         return res.status(400).json({ error: 'Invalid test name' });
     }
 
+    const client = await pool.connect();
+
     try {
+        await client.query('BEGIN');
+
+        // Fetch scan to get barcode
+        const scanCheck = await client.query('SELECT barcode, session_id FROM impedance_scans WHERE id = $1', [scan_id]);
+        if (scanCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Scan not found' });
+        }
+        const { barcode, session_id } = scanCheck.rows[0];
+
+        // Advisory Lock
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
         // 1. Update the specific test result
-        // We use dynamic column name safely because we validated it against the allowlist above
-        await pool.query(
+        await client.query(
             `UPDATE impedance_scans SET ${test_name} = $1 WHERE id = $2`,
             [result, scan_id]
         );
 
         // 2. Recalculate Overall Status
-        // If ALL tests are TRUE -> ACCEPTED
-        // If ANY test is FALSE -> FAILED
-        const updatedScan = await pool.query(
+        const updatedScanResult = await client.query(
             `UPDATE impedance_scans 
              SET status = CASE 
                 WHEN test_pa1 AND test_pa2 AND test_pa4 AND test_pa5 AND test_r160 THEN 'ACCEPTED'
@@ -166,14 +200,27 @@ export const updateScanTestResult = async (req: Request, res: Response) => {
             [scan_id]
         );
 
-        if (updatedScan.rows.length === 0) {
-            return res.status(404).json({ error: 'Scan not found' });
-        }
+        const updatedScan = updatedScanResult.rows[0];
+        const mappedStatus = updatedScan.status === 'ACCEPTED' ? 'Passed' : 'Failed';
 
-        res.json(updatedScan.rows[0]);
+        // Fetch IQC batch_id for the audit log
+        const iqcCheck = await client.query('SELECT batch_id FROM impedance_sessions WHERE id = $1', [session_id]);
+        const iqcBatchId = iqcCheck.rows.length > 0 ? iqcCheck.rows[0].batch_id : null;
+
+        // Log history
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, remarks, source_system)
+            VALUES ($1, 'Pre-Impedance', 3, $2, 'System Update', $3, $4, 'pretest')
+        `, [barcode, mappedStatus, iqcBatchId, `Updated ${test_name} to ${result}`]);
+
+        await client.query('COMMIT');
+        res.json(updatedScan);
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error updating test result:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 
@@ -186,7 +233,11 @@ export const getSessions = async (req: Request, res: Response) => {
             (SELECT COUNT(*)::int FROM impedance_scans sc WHERE sc.session_id = s.id AND sc.status = 'ACCEPTED') as passed_count,
             (SELECT COUNT(*)::int FROM impedance_scans sc WHERE sc.session_id = s.id AND sc.status = 'FAILED') as failed_count,
             b.batch_number,
-            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'ACCEPTED') as iqc_passed_count
+            (SELECT COUNT(*)::int FROM iqc_components c WHERE c.batch_id = b.id AND c.status = 'ACCEPTED') as iqc_passed_count,
+            (SELECT COUNT(*)::int 
+             FROM warehouse_scans ws 
+             JOIN warehouse_batches wb ON ws.batch_id = wb.id 
+             WHERE wb.batch_number = b.batch_number) as warehouse_received_quantity
             FROM impedance_sessions s
             LEFT JOIN iqc_batches b ON s.batch_id = b.id
             ORDER BY s.started_at DESC
@@ -217,6 +268,12 @@ export const getSessionScans = async (req: Request, res: Response) => {
 // Delete Impedance Batch (Session)
 export const deleteBatch = async (req: Request, res: Response) => {
     const { batch_id } = req.params;
+    const userRole = (req as any).user?.role?.toLowerCase();
+
+    if (userRole !== 'admin' && userRole !== 'super admin' && userRole !== 'manager') {
+        return res.status(403).json({ error: `Only Admin, Super Admin, or Manager can delete this batch. Your role: ${(req as any).user?.role}` });
+    }
+
     try {
         // Delete scans first (cascade usually handles this but good to be explicit or if cascade not set)
         await pool.query('DELETE FROM impedance_scans WHERE session_id = $1', [batch_id]);

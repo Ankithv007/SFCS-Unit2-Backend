@@ -5,6 +5,7 @@ import impedanceRoutes from './routes/impedanceRoutes';
 import warehouseRoutes from './routes/warehouseRoutes';
 import preCalibrationRoutes from './routes/preCalibrationRoutes';
 import preAclrRoutes from './routes/preAclrRoutes';
+import traceRoutes from './routes/traceRoutes';
 import { setupDatabase } from './db/setup_db';
 import { createLogger } from './utils/logger';
 
@@ -34,6 +35,8 @@ app.use('/api/pre-calibration', preCalibrationRoutes);
 app.use('/api/pretest/pre-calibration', preCalibrationRoutes);
 app.use('/api/pre-aclr', preAclrRoutes);
 app.use('/api/pretest/pre-aclr', preAclrRoutes);
+app.use('/api/trace', traceRoutes);
+app.use('/api/pretest/trace', traceRoutes);
 
 // Health Check
 app.get('/health', async (req: Request, res: Response) => {

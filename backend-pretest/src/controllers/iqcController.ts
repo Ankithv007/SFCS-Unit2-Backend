@@ -62,15 +62,43 @@ export const scanComponent = async (req: Request, res: Response) => {
         return res.status(400).json({ error: 'Batch ID, Barcode, and Scanned By are required' });
     }
 
+    const client = await pool.connect();
+
     try {
+        await client.query('BEGIN');
+
+        // Advisory Lock (Collision-resistant)
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
+        // Duplicate Guard (5-second throttle)
+        const currentStatus = status || 'ACCEPTED';
+        const mappedStatus = currentStatus === 'ACCEPTED' ? 'Passed' :
+            currentStatus === 'REJECTED' ? 'Failed' :
+                currentStatus === 'REWORK' ? 'Rework' :
+                    currentStatus === 'SCRAP' ? 'Scrap' : 'In Progress';
+
+        const dupCheck = await client.query(`
+            SELECT 1 FROM barcode_stage_history 
+            WHERE barcode = $1 AND stage_name = 'Pre-IQC' AND status = $2 
+            AND created_at > NOW() - INTERVAL '5 seconds' LIMIT 1
+        `, [barcode, mappedStatus]);
+
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Duplicate scan detected. Please wait 5 seconds.' });
+        }
+
         // 1. Check Batch Info
-        const batchInfo = await pool.query('SELECT quantity, batch_number FROM iqc_batches WHERE id = $1', [batch_id]);
-        if (batchInfo.rows.length === 0) return res.status(404).json({ error: 'Batch not found' });
+        const batchInfo = await client.query('SELECT quantity, batch_number FROM iqc_batches WHERE id = $1', [batch_id]);
+        if (batchInfo.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Batch not found' });
+        }
 
         const { quantity: batch_limit, batch_number } = batchInfo.rows[0];
 
-        // 2. Validate Item exists in Warehouse Scans for this batch
-        const warehouseCheck = await pool.query(
+        // 2. Validate Item exists in Warehouse Scans
+        const warehouseCheck = await client.query(
             `SELECT s.id 
              FROM warehouse_scans s
              JOIN warehouse_batches wb ON s.batch_id = wb.id
@@ -79,49 +107,33 @@ export const scanComponent = async (req: Request, res: Response) => {
         );
 
         if (warehouseCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'Item not found in Warehouse for this batch. Please scan in Warehouse first.' });
         }
 
-        // 3. Check Batch Limit against Warehouse Received Quantity (Dynamic)
-        // We must allow scanning up to the number of items actually received in Warehouse.
-        const warehouseCountResult = await pool.query(
-            `SELECT COUNT(*) as count 
-             FROM warehouse_scans s 
-             JOIN warehouse_batches wb ON s.batch_id = wb.id 
-             WHERE wb.batch_number = $1`,
+        // 3. Check Batch Limit
+        const warehouseCountResult = await client.query(
+            `SELECT COUNT(*) as count FROM warehouse_scans s JOIN warehouse_batches wb ON s.batch_id = wb.id WHERE wb.batch_number = $1`,
             [batch_number]
         );
         const warehouseReceivedQty = parseInt(warehouseCountResult.rows[0].count);
 
-        const iqcCountResult = await pool.query(
-            `SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1`,
-            [batch_id]
-        );
+        const iqcCountResult = await client.query(`SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1`, [batch_id]);
         const iqcScannedQty = parseInt(iqcCountResult.rows[0].count);
 
-        // Allow scan if we haven't reached the Warehouse Received count yet
         if (iqcScannedQty >= warehouseReceivedQty && status !== 'REJECTED') {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: `Cannot scan more items than received from Warehouse (${warehouseReceivedQty}).` });
         }
 
-        // 4. Check for Duplicate in Current IQC Batch
-        const duplicateCheck = await pool.query(
-            'SELECT * FROM iqc_components WHERE batch_id = $1 AND barcode = $2',
-            [batch_id, barcode]
-        );
-
-        if (duplicateCheck.rows.length > 0) {
-            return res.status(409).json({ error: 'Duplicate scan! Component already scanned in this IQC batch.' });
-        }
-
-        // 5. Check History (Previous Batch)
-        const historyCheck = await pool.query(
+        // 4. History Check
+        const historyCheck = await client.query(
             `SELECT c.*, b.batch_number 
              FROM iqc_components c
              JOIN iqc_batches b ON c.batch_id = b.id
-             WHERE c.barcode = $1 AND c.batch_id != $2
+             WHERE c.barcode = $1
              ORDER BY c.scanned_at DESC LIMIT 1`,
-            [barcode, batch_id]
+            [barcode]
         );
 
         const { force_move } = req.body;
@@ -129,51 +141,64 @@ export const scanComponent = async (req: Request, res: Response) => {
         if (historyCheck.rows.length > 0) {
             const prev = historyCheck.rows[0];
 
-            // Restriction: SCRAP is final and cannot be rescanned
-            if (prev.status === 'SCRAP') {
-                return res.status(403).json({
-                    error: `Component was scrapped in Batch ${prev.batch_number} and cannot be rescanned.`,
-                    code: 'SCRAPPED_BLOCK'
-                });
+            if (prev.batch_id === batch_id) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ error: 'Duplicate scan! Component already scanned in this IQC batch.' });
             }
 
-            // Restriction: REWORK is batch-locked
+            if (prev.status === 'SCRAP') {
+                await client.query('ROLLBACK');
+                return res.status(403).json({ error: `Component was scrapped in Batch ${prev.batch_number}.`, code: 'SCRAPPED_BLOCK' });
+            }
+
             if (prev.status === 'REWORK' && prev.batch_id !== batch_id) {
-                return res.status(403).json({
-                    error: `Component is marked for Rework in Batch ${prev.batch_number}. It can only be rescanned in that same batch.`,
-                    code: 'REWORK_LOCKED'
-                });
+                await client.query('ROLLBACK');
+                return res.status(403).json({ error: `Component is marked for Rework in Batch ${prev.batch_number}.`, code: 'REWORK_LOCKED' });
             }
 
             if (!force_move && prev.status !== 'REWORK') {
-                return res.status(409).json({
-                    error: `Component belongs to Batch ${prev.batch_number}. Move it?`,
-                    code: 'MOVE_REQUIRED',
-                    previous_batch: prev.batch_number
-                });
+                await client.query('ROLLBACK');
+                return res.status(409).json({ error: `Component belongs to Batch ${prev.batch_number}. Move it?`, code: 'MOVE_REQUIRED' });
             }
 
-            // Handle Move or Rework-Resume
             const previousBatchInfo = prev.status === 'REWORK' ? prev.previous_batch : `Moved from Batch ${prev.batch_number}`;
-            const updatedComponent = await pool.query(
+            const updatedComponent = await client.query(
                 `UPDATE iqc_components 
                  SET batch_id = $1, scanned_by = $2, status = $3, remarks = $4, previous_batch = $5, scanned_at = NOW()
                  WHERE id = $6 RETURNING *`,
                 [batch_id, scanned_by, 'ACCEPTED', null, previousBatchInfo, prev.id]
             );
+
+            // Audit Log
+            await client.query(`
+                INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, source_system)
+                VALUES ($1, 'Pre-IQC', 2, 'Passed', $2, $3, 'pretest')
+            `, [barcode, scanned_by, batch_id]);
+
+            await client.query('COMMIT');
             return res.status(200).json(updatedComponent.rows[0]);
         }
 
-        // 6. Record New Scan
-        const newScan = await pool.query(
+        // New Scan
+        const newScan = await client.query(
             'INSERT INTO iqc_components (batch_id, barcode, scanned_by, status, remarks, previous_batch) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [batch_id, barcode, scanned_by, status || 'ACCEPTED', remarks, null]
         );
 
+        // Audit Log
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, source_system)
+            VALUES ($1, 'Pre-IQC', 2, $2, $3, $4, 'pretest')
+        `, [barcode, mappedStatus, scanned_by, batch_id]);
+
+        await client.query('COMMIT');
         res.status(201).json(newScan.rows[0]);
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error scanning component:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 
@@ -205,41 +230,63 @@ export const updateComponentStatus = async (req: Request, res: Response) => {
         return res.status(400).json({ error: `Remarks are mandatory when marking as ${status}` });
     }
 
+    const client = await pool.connect();
+
     try {
-        const result = await pool.query(
+        await client.query('BEGIN');
+
+        // Fetch component to get barcode and batch_id
+        const compCheck = await client.query('SELECT barcode, batch_id FROM iqc_components WHERE id = $1', [id]);
+        if (compCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Component not found' });
+        }
+        const { barcode, batch_id } = compCheck.rows[0];
+
+        // Advisory Lock
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
+        const result = await client.query(
             'UPDATE iqc_components SET status = $1, remarks = $2 WHERE id = $3 RETURNING *',
             [status, remarks, id]
         );
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Component not found' });
-        }
-
         // Real-time Sync: If status changed to anything other than ACCEPTED, remove from Impedance
         if (status !== 'ACCEPTED') {
-            const updatedComponent = result.rows[0];
-            const barcode = updatedComponent.barcode;
-
-            // Delete from impedance_scans if it exists
-            await pool.query('DELETE FROM impedance_scans WHERE barcode = $1', [barcode]);
-            console.log(`Sync: Removed ${barcode} from Impedance Scans due to IQC status change to ${status}`);
+            await client.query('DELETE FROM impedance_scans WHERE barcode = $1', [barcode]);
         }
 
+        // Map status for audit
+        const mappedStatus = status === 'ACCEPTED' ? 'Passed' :
+            status === 'REJECTED' ? 'Failed' :
+                status === 'REWORK' ? 'Rework' :
+                    status === 'SCRAP' ? 'Scrap' : 'In Progress';
+
+        // Log history
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, remarks, source_system)
+            VALUES ($1, 'Pre-IQC', 2, $2, 'System Update', $3, $4, 'pretest')
+        `, [barcode, mappedStatus, batch_id, remarks]);
+
+        await client.query('COMMIT');
         res.json(result.rows[0]);
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error updating component status:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 
 // Delete Batch (Cascade)
 export const deleteBatch = async (req: Request, res: Response) => {
     const { batch_id } = req.params;
-    const userRole = (req as any).user?.role;
-    console.log('Delete IQC Batch Request - User Role:', userRole);
+    const userRole = (req as any).user?.role?.toLowerCase();
+    console.log('Delete IQC Batch Request - User Role (normalized):', userRole);
 
-    if (userRole !== 'Admin' && userRole !== 'Super Admin' && userRole !== 'Manager') {
-        return res.status(403).json({ error: `Only Admin, Super Admin, or Manager can delete this batch. Your role: ${userRole}` });
+    if (userRole !== 'admin' && userRole !== 'super admin' && userRole !== 'manager') {
+        return res.status(403).json({ error: `Only Admin, Super Admin, or Manager can delete this batch. Your role: ${(req as any).user?.role}` });
     }
 
     try {

@@ -64,25 +64,45 @@ export const scanItem = async (req: Request, res: Response) => {
         return res.status(400).json({ error: 'Batch ID, Barcode, and Scanned By are required' });
     }
 
+    const client = await pool.connect();
+
     try {
+        await client.query('BEGIN');
+
+        // Advisory Lock (Collision-resistant)
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
+        const dupCheck = await client.query(`
+            SELECT 1 FROM barcode_stage_history 
+            WHERE barcode = $1 AND stage_name = 'Warehouse' AND status = 'Passed' 
+            AND created_at > NOW() - INTERVAL '5 seconds' LIMIT 1
+        `, [barcode]);
+
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Duplicate scan detected. Please wait 5 seconds.' });
+        }
+
         // Check if batch exists
-        const batchCheck = await pool.query('SELECT * FROM warehouse_batches WHERE id = $1', [batch_id]);
+        const batchCheck = await client.query('SELECT * FROM warehouse_batches WHERE id = $1', [batch_id]);
         if (batchCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Batch not found' });
         }
 
         // Check for duplicate scan in the same batch
-        const duplicateCheck = await pool.query(
+        const duplicateCheck = await client.query(
             'SELECT * FROM warehouse_scans WHERE batch_id = $1 AND barcode = $2',
             [batch_id, barcode]
         );
 
         if (duplicateCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
             return res.status(409).json({ error: 'Duplicate scan! Item already scanned in this batch.' });
         }
 
         // Check for previous history in OTHER batches
-        const historyCheck = await pool.query(
+        const historyCheck = await client.query(
             `SELECT s.*, b.batch_number 
              FROM warehouse_scans s
              JOIN warehouse_batches b ON s.batch_id = b.id
@@ -98,15 +118,25 @@ export const scanItem = async (req: Request, res: Response) => {
         }
 
         // Record scan
-        const newScan = await pool.query(
+        const newScan = await client.query(
             'INSERT INTO warehouse_scans (batch_id, barcode, scanned_by, previous_batch) VALUES ($1, $2, $3, $4) RETURNING *',
             [batch_id, barcode, scanned_by, previousBatchInfo]
         );
 
+        // Log history
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, source_system)
+            VALUES ($1, 'Warehouse', 1, 'Passed', $2, $3, 'pretest')
+        `, [barcode, scanned_by, batch_id]);
+
+        await client.query('COMMIT');
         res.status(201).json(newScan.rows[0]);
     } catch (error) {
+        await client.query('ROLLBACK');
         console.error('Error scanning warehouse item:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 

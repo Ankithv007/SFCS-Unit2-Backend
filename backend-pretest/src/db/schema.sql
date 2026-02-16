@@ -118,8 +118,38 @@ CREATE TABLE IF NOT EXISTS pre_aclr_scans (
     CONSTRAINT chk_test_case_aclr CHECK ((aclr_result = 'FAIL' AND test_case_number IS NOT NULL) OR (aclr_result = 'PASS' AND test_case_number IS NULL))
 );
 
--- Indices for performance
-CREATE INDEX IF NOT EXISTS idx_precal_scanned_at ON pre_calibration_scans(scanned_at);
-CREATE INDEX IF NOT EXISTS idx_precal_barcode ON pre_calibration_scans(barcode);
-CREATE INDEX IF NOT EXISTS idx_preaclr_scanned_at ON pre_aclr_scans(scanned_at);
-CREATE INDEX IF NOT EXISTS idx_preaclr_barcode ON pre_aclr_scans(barcode);
+-- Trace Module Schema
+DO $$ BEGIN
+    CREATE TYPE trace_status AS ENUM ('Passed', 'Failed', 'Rework', 'Scrap', 'In Progress');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS barcode_stage_history (
+    id BIGSERIAL PRIMARY KEY,
+    barcode VARCHAR(255) NOT NULL,
+    stage_name VARCHAR(50) NOT NULL CHECK (stage_name IN ('Warehouse', 'Pre-IQC', 'Pre-Impedance', 'Pre-Calibration', 'Pre-ACLR')),
+    stage_order INTEGER NOT NULL CHECK (stage_order BETWEEN 1 AND 5),
+    batch_id INTEGER,
+    status trace_status NOT NULL,
+    operator VARCHAR(255) NOT NULL,
+    remarks TEXT,
+    source_system VARCHAR(50) NOT NULL DEFAULT 'pretest',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Immutability Trigger
+CREATE OR REPLACE FUNCTION prevent_modifications() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION 'barcode_stage_history is immutable'; END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER no_update_delete BEFORE UPDATE OR DELETE ON barcode_stage_history
+    FOR EACH ROW EXECUTE FUNCTION prevent_modifications();
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- Elite Performance Indices
+CREATE INDEX IF NOT EXISTS idx_trace_barcode_history_asc ON barcode_stage_history(barcode, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_trace_latest_only_desc ON barcode_stage_history (barcode, created_at DESC) INCLUDE (stage_name, status, operator, batch_id);

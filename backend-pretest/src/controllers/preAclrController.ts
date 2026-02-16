@@ -162,20 +162,39 @@ export const scanBarcode = async (req: Request, res: Response) => {
     if (!operator_name) return res.status(400).json({ error: 'Operator Name is mandatory' });
     if (!barcode) return res.status(400).json({ error: 'Barcode is required' });
 
+    const client = await pool.connect();
+
     try {
-        // 1. Format Validation
         if (!BARCODE_REGEX.test(barcode)) {
             return res.status(400).json({ error: 'Invalid barcode format. Please scan a valid barcode (AA-####-##-####).' });
         }
 
+        await client.query('BEGIN');
+
+        // Advisory Lock (Collision-resistant)
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
+        // Duplicate Guard (5-second throttle)
+        const dupCheck = await client.query(`
+            SELECT 1 FROM barcode_stage_history 
+            WHERE barcode = $1 AND stage_name = 'Pre-ACLR' AND status = $2 
+            AND created_at > NOW() - INTERVAL '5 seconds' LIMIT 1
+        `, [barcode, aclr_result === 'PASS' ? 'Passed' : 'Failed']);
+
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Duplicate scan detected. Please wait 5 seconds.' });
+        }
+
         // 2. Impedance Validation
-        const impedanceCheck = await pool.query(`
+        const impedanceCheck = await client.query(`
             SELECT * FROM impedance_scans 
             WHERE barcode = $1 
             ORDER BY scanned_at DESC LIMIT 1
         `, [barcode]);
 
         if (impedanceCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode is not from Impedance stage.' });
         }
 
@@ -184,26 +203,29 @@ export const scanBarcode = async (req: Request, res: Response) => {
         const statusVal = statusKey ? (record[statusKey] || '').toString().trim().toUpperCase() : '';
 
         if (statusVal === 'FAIL') {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode has failed in Impedance stage.' });
         }
 
         if (statusVal !== 'PASS' && statusVal !== 'ACCEPTED') {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode exists but has not passed Impedance stage.' });
         }
 
-        // 3. Calibration Stage Validation (Safety Check)
-        const calibrationCheck = await pool.query(`
+        // 3. Calibration Stage Validation
+        const calibrationCheck = await client.query(`
             SELECT calibration_result, retest_result 
             FROM pre_calibration_scans 
             WHERE barcode = $1
         `, [barcode]);
 
         if (calibrationCheck.rows.length === 0 || (calibrationCheck.rows[0].calibration_result !== 'PASS' && calibrationCheck.rows[0].retest_result !== 'PASS')) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'Not allowed – Barcode not passed in Calibration stage' });
         }
 
         // 4. Duplicate and Retest Check
-        const existingRecord = await pool.query(`
+        const existingRecord = await client.query(`
             SELECT id, aclr_result, retest_result 
             FROM pre_aclr_scans 
             WHERE barcode = $1
@@ -212,18 +234,18 @@ export const scanBarcode = async (req: Request, res: Response) => {
         if (existingRecord.rows.length > 0) {
             const row = existingRecord.rows[0];
             if (row.aclr_result === 'PASS' || row.retest_result === 'PASS') {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Duplicate – Already Passed in Pre-ACLR' });
             }
 
-            // Already FAILED?
             if (row.aclr_result === 'FAIL') {
                 if (aclr_result === 'FAIL') {
+                    await client.query('ROLLBACK');
                     return res.status(400).json({ error: 'This barcode is already marked as FAILED in ACLR. Please pass it on retest.' });
                 }
 
-                // Retest case: Was FAIL, now PASS
                 const istNow = getISTTime();
-                const updateScan = await pool.query(`
+                const updateScan = await client.query(`
                     UPDATE pre_aclr_scans
                     SET retest_result = 'PASS',
                         retest_datetime = $1,
@@ -231,11 +253,18 @@ export const scanBarcode = async (req: Request, res: Response) => {
                     WHERE id = $3 RETURNING *
                 `, [istNow, operator_name, row.id]);
 
+                // Log history
+                await client.query(`
+                    INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, source_system)
+                    VALUES ($1, 'Pre-ACLR', 5, 'Passed', $2, 'pretest')
+                `, [barcode, operator_name]);
+
+                await client.query('COMMIT');
                 return res.json({ message: 'ACLR Retest recorded successfully (Record Updated)', data: updateScan.rows[0] });
             }
         }
 
-        // 5. Insert Logic (First-time ACLR Scan)
+        // 5. Insert Logic
         const istNow = getISTTime();
         const shift = getShift(istNow);
 
@@ -244,14 +273,14 @@ export const scanBarcode = async (req: Request, res: Response) => {
 
         if (aclr_result === 'FAIL') {
             if (!measured_value || measured_value.toString().trim() === '') {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Measured Value is mandatory for failed units.' });
             }
 
             const failureCode = parseInt(measured_value);
-
-            // Validate failure code
-            const tcCheck = await pool.query('SELECT * FROM aclr_test_case_master WHERE test_case_number = $1', [failureCode]);
+            const tcCheck = await client.query('SELECT * FROM aclr_test_case_master WHERE test_case_number = $1', [failureCode]);
             if (tcCheck.rows.length === 0) {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Invalid Test Case Number. Please enter a valid value.' });
             }
 
@@ -259,19 +288,29 @@ export const scanBarcode = async (req: Request, res: Response) => {
             finalTestCase = failureCode;
         }
 
-        const newScan = await pool.query(`
+        const newScan = await client.query(`
             INSERT INTO pre_aclr_scans 
             (barcode, operator_name, measured_value, aclr_result, test_case_number, shift, stage, jig_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *
         `, [barcode, operator_name, finalMeasuredValue, aclr_result, finalTestCase, shift, 'PRE-ACLR', jig_id]);
 
+        // Log history
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, source_system)
+            VALUES ($1, 'Pre-ACLR', 5, $2, $3, 'pretest')
+        `, [barcode, aclr_result === 'PASS' ? 'Passed' : 'Failed', operator_name]);
+
+        await client.query('COMMIT');
         return res.status(201).json({ message: 'ACLR Scan recorded successfully', data: newScan.rows[0] });
     } catch (error: any) {
+        await client.query('ROLLBACK');
         logger.error(`Error in scanBarcode: ${error.message}`);
         if (error.code === '23514') {
             return res.status(400).json({ error: 'Business rule violation: Check measured value or test case requirements.' });
         }
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 

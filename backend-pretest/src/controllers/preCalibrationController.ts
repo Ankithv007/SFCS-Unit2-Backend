@@ -146,20 +146,40 @@ export const scanBarcode = async (req: Request, res: Response) => {
     if (!operator_name) return res.status(400).json({ error: 'Operator Name is mandatory' });
     if (!barcode) return res.status(400).json({ error: 'Barcode is required' });
 
+    const client = await pool.connect();
+
     try {
-        // 1. Format Validation (Same as verifyBarcode)
+        // 1. Format Validation
         if (!BARCODE_REGEX.test(barcode)) {
             return res.status(400).json({ error: 'Invalid barcode format. Please scan a valid barcode (AA-####-##-####).' });
         }
 
+        await client.query('BEGIN');
+
+        // Advisory Lock (Collision-resistant)
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
+
+        // Duplicate Guard (5-second throttle)
+        const dupCheck = await client.query(`
+            SELECT 1 FROM barcode_stage_history 
+            WHERE barcode = $1 AND stage_name = 'Pre-Calibration' AND status = $2 
+            AND created_at > NOW() - INTERVAL '5 seconds' LIMIT 1
+        `, [barcode, calibration_result === 'PASS' ? 'Passed' : 'Failed']);
+
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Duplicate scan detected. Please wait 5 seconds.' });
+        }
+
         // 2. Impedance Validation
-        const impedanceCheck = await pool.query(`
+        const impedanceCheck = await client.query(`
             SELECT * FROM impedance_scans 
             WHERE barcode = $1 
             ORDER BY scanned_at DESC LIMIT 1
         `, [barcode]);
 
         if (impedanceCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode is not from Impedance stage.' });
         }
 
@@ -168,15 +188,17 @@ export const scanBarcode = async (req: Request, res: Response) => {
         const statusVal = statusKey ? (record[statusKey] || '').toString().trim().toUpperCase() : '';
 
         if (statusVal === 'FAIL') {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode has failed in Impedance stage.' });
         }
 
-        if (statusVal !== 'PASS' && statusVal !== 'ACCEPTED') {
+        if (statusVal !== 'PASS' && statusVal !== 'ACCEPTED' && statusVal !== 'ACCEPTED') {
+            await client.query('ROLLBACK');
             return res.status(400).json({ error: 'This barcode exists but has not passed Impedance stage.' });
         }
 
         // 3. Duplicate and Retest Check
-        const existingRecord = await pool.query(`
+        const existingRecord = await client.query(`
             SELECT id, calibration_result, retest_result 
             FROM pre_calibration_scans 
             WHERE barcode = $1
@@ -185,18 +207,19 @@ export const scanBarcode = async (req: Request, res: Response) => {
         if (existingRecord.rows.length > 0) {
             const row = existingRecord.rows[0];
             if (row.calibration_result === 'PASS' || row.retest_result === 'PASS') {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Duplicate – Already Passed in Pre-Calibration' });
             }
 
-            // Already FAILED?
             if (row.calibration_result === 'FAIL') {
                 if (calibration_result === 'FAIL') {
+                    await client.query('ROLLBACK');
                     return res.status(400).json({ error: 'This barcode is already marked as FAILED. Please pass it on retest.' });
                 }
 
                 // Retest case: Was FAIL, now PASS
                 const istNow = getISTTime();
-                const updateScan = await pool.query(`
+                const updateScan = await client.query(`
                     UPDATE pre_calibration_scans
                     SET retest_result = 'PASS',
                         retest_datetime = $1,
@@ -204,6 +227,13 @@ export const scanBarcode = async (req: Request, res: Response) => {
                     WHERE id = $3 RETURNING *
                 `, [istNow, operator_name, row.id]);
 
+                // Log to history
+                await client.query(`
+                    INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, source_system)
+                    VALUES ($1, 'Pre-Calibration', 4, 'Passed', $2, 'pretest')
+                `, [barcode, operator_name]);
+
+                await client.query('COMMIT');
                 return res.json({ message: 'Retest recorded successfully (Record Updated)', data: updateScan.rows[0] });
             }
         }
@@ -217,14 +247,14 @@ export const scanBarcode = async (req: Request, res: Response) => {
 
         if (calibration_result === 'FAIL') {
             if (!measured_value || measured_value.toString().trim() === '') {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Measured Value is mandatory for failed units.' });
             }
 
             const failureCode = parseInt(measured_value);
-
-            // Validate failure code
-            const tcCheck = await pool.query('SELECT * FROM test_case_master WHERE test_case_number = $1', [failureCode]);
+            const tcCheck = await client.query('SELECT * FROM test_case_master WHERE test_case_number = $1', [failureCode]);
             if (tcCheck.rows.length === 0) {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: 'Invalid Test Case Number. Please enter a valid value.' });
             }
 
@@ -232,19 +262,29 @@ export const scanBarcode = async (req: Request, res: Response) => {
             finalTestCase = failureCode;
         }
 
-        const newScan = await pool.query(`
+        const newScan = await client.query(`
             INSERT INTO pre_calibration_scans 
             (barcode, operator_name, measured_value, calibration_result, test_case_number, shift, jig_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *
         `, [barcode, operator_name, finalMeasuredValue, calibration_result, finalTestCase, shift, jig_id]);
 
+        // Log to history
+        await client.query(`
+            INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, source_system)
+            VALUES ($1, 'Pre-Calibration', 4, $2, $3, 'pretest')
+        `, [barcode, calibration_result === 'PASS' ? 'Passed' : 'Failed', operator_name]);
+
+        await client.query('COMMIT');
         return res.status(201).json({ message: 'Scan recorded successfully', data: newScan.rows[0] });
     } catch (error: any) {
+        await client.query('ROLLBACK');
         logger.error(`Error in scanBarcode: ${error.message}`);
-        if (error.code === '23514') { // PostgreSQL Check Constraint Violation
+        if (error.code === '23514') {
             return res.status(400).json({ error: 'Business rule violation: Check measured value or test case requirements.' });
         }
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        client.release();
     }
 };
 
