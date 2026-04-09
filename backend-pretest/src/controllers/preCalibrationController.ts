@@ -291,18 +291,28 @@ export const scanBarcode = async (req: Request, res: Response) => {
 export const getCompletedScans = async (req: Request, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
+    const barcode = req.query.barcode as string;
     const offset = (page - 1) * limit;
 
     try {
-        const result = await pool.query(`
+        let query = `
             SELECT s.*, t.test_case_name, t.reason
             FROM pre_calibration_scans s
             LEFT JOIN test_case_master t ON s.test_case_number = t.test_case_number
-            ORDER BY s.scanned_at DESC
-            LIMIT $1 OFFSET $2
-        `, [limit, offset]);
+        `;
+        let countQuery = 'SELECT COUNT(*) FROM pre_calibration_scans';
+        const params: any[] = [limit, offset];
 
-        const countResult = await pool.query('SELECT COUNT(*) FROM pre_calibration_scans');
+        if (barcode && barcode.trim()) {
+            query += ` WHERE s.barcode ILIKE $3`;
+            countQuery += ` WHERE barcode ILIKE $1`;
+            params.push(`%${barcode.trim()}%`);
+        }
+
+        query += ` ORDER BY s.scanned_at DESC LIMIT $1 OFFSET $2`;
+
+        const result = await pool.query(query, params);
+        const countResult = await pool.query(countQuery, barcode && barcode.trim() ? [`%${barcode.trim()}%`] : []);
         const total = parseInt(countResult.rows[0].count);
 
         res.json({
