@@ -66,6 +66,12 @@ export const scanPcb = async (req: Request, res: Response) => {
         return res.status(400).json({ error: 'Session ID and Barcode are required' });
     }
 
+    // Barcode Validation
+    const BARCODE_REGEX = /^[A-Z]{2}-[A-Z0-9]{4}-[A-Z0-9]{2}-[A-Z0-9]{4}$/;
+    if (!BARCODE_REGEX.test(barcode.toUpperCase())) {
+        return res.status(400).json({ error: 'Invalid Barcode format. Must be 15 characters (e.g. AO-4734-34-2344)' });
+    }
+
     const client = await pool.connect();
 
     try {

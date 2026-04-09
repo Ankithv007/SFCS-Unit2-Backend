@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('PRE-CAL');
 
 // Barcode Regex Pattern: AA-####-##-#### (15 chars, hyphens at 2, 7, 10)
-const BARCODE_REGEX = /^[A-Z]{2}-\d{4}-\d{2}-[A-Z0-9]{4}$/;
+const BARCODE_REGEX = /^[A-Z]{2}-[A-Z0-9]{4}-[A-Z0-9]{2}-[A-Z0-9]{4}$/;
 
 // Helper to get IST Time
 const getISTTime = () => {
