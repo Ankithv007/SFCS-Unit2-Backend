@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS iqc_batches (
 -- IQC Components Table
 CREATE TABLE IF NOT EXISTS iqc_components (
     id SERIAL PRIMARY KEY,
-    batch_id INTEGER REFERENCES iqc_batches(id),
+    batch_id INTEGER REFERENCES iqc_batches (id),
     barcode VARCHAR(255) NOT NULL,
     scanned_by VARCHAR(255) NOT NULL,
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS iqc_components (
 -- Impedance Sessions Table
 CREATE TABLE IF NOT EXISTS impedance_sessions (
     id SERIAL PRIMARY KEY,
-    batch_id INTEGER REFERENCES iqc_batches(id),
+    batch_id INTEGER REFERENCES iqc_batches (id),
     tested_by VARCHAR(255) NOT NULL,
     remarks TEXT,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS impedance_sessions (
 -- Impedance Scans Table
 CREATE TABLE IF NOT EXISTS impedance_scans (
     id SERIAL PRIMARY KEY,
-    session_id INTEGER REFERENCES impedance_sessions(id),
+    session_id INTEGER REFERENCES impedance_sessions (id),
     barcode VARCHAR(255) NOT NULL,
     status VARCHAR(50) DEFAULT 'ACCEPTED',
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS warehouse_batches (
 -- Warehouse Scans Table
 CREATE TABLE IF NOT EXISTS warehouse_scans (
     id SERIAL PRIMARY KEY,
-    batch_id INTEGER REFERENCES warehouse_batches(id),
+    batch_id INTEGER REFERENCES warehouse_batches (id),
     barcode VARCHAR(255) NOT NULL,
     scanned_by VARCHAR(255) NOT NULL,
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -86,17 +86,37 @@ CREATE TABLE IF NOT EXISTS pre_calibration_scans (
     barcode VARCHAR(255) NOT NULL UNIQUE,
     operator_name VARCHAR(255) NOT NULL,
     measured_value INTEGER,
-    calibration_result VARCHAR(10) NOT NULL CHECK (calibration_result IN ('PASS', 'FAIL')),
+    calibration_result VARCHAR(10) NOT NULL CHECK (
+        calibration_result IN ('PASS', 'FAIL')
+    ),
     retest_result VARCHAR(10) DEFAULT NULL CHECK (retest_result IN ('PASS')),
     retest_datetime TIMESTAMP DEFAULT NULL,
-    test_case_number INTEGER REFERENCES test_case_master(test_case_number),
+    test_case_number INTEGER REFERENCES test_case_master (test_case_number),
     shift CHAR(1) NOT NULL CHECK (shift IN ('A', 'B', 'C')),
     tpn VARCHAR(50) NOT NULL DEFAULT '611-PCA000117-L',
     stage VARCHAR(20) NOT NULL DEFAULT 'PRE CAL',
     jig_id VARCHAR(50) NOT NULL,
     scanned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_measured_value CHECK ((calibration_result = 'PASS' AND measured_value IS NULL) OR (calibration_result = 'FAIL' AND measured_value IS NOT NULL)),
-    CONSTRAINT chk_test_case CHECK ((calibration_result = 'FAIL' AND test_case_number IS NOT NULL) OR (calibration_result = 'PASS' AND test_case_number IS NULL))
+    CONSTRAINT chk_measured_value CHECK (
+        (
+            calibration_result = 'PASS'
+            AND measured_value IS NULL
+        )
+        OR (
+            calibration_result = 'FAIL'
+            AND measured_value IS NOT NULL
+        )
+    ),
+    CONSTRAINT chk_test_case CHECK (
+        (
+            calibration_result = 'FAIL'
+            AND test_case_number IS NOT NULL
+        )
+        OR (
+            calibration_result = 'PASS'
+            AND test_case_number IS NULL
+        )
+    )
 );
 
 -- Pre-ACLR Scans Table
@@ -105,17 +125,37 @@ CREATE TABLE IF NOT EXISTS pre_aclr_scans (
     barcode VARCHAR(255) NOT NULL UNIQUE,
     operator_name VARCHAR(255) NOT NULL,
     measured_value INTEGER,
-    aclr_result VARCHAR(10) NOT NULL CHECK (aclr_result IN ('PASS', 'FAIL')),
+    aclr_result VARCHAR(10) NOT NULL CHECK (
+        aclr_result IN ('PASS', 'FAIL')
+    ),
     retest_result VARCHAR(10) DEFAULT NULL CHECK (retest_result IN ('PASS')),
     retest_datetime TIMESTAMP DEFAULT NULL,
-    test_case_number INTEGER REFERENCES aclr_test_case_master(test_case_number),
+    test_case_number INTEGER REFERENCES aclr_test_case_master (test_case_number),
     shift CHAR(1) NOT NULL CHECK (shift IN ('A', 'B', 'C')),
     tpn VARCHAR(50) NOT NULL DEFAULT '611-PCA000117-L',
     stage VARCHAR(20) NOT NULL DEFAULT 'PRE-ACLR',
     jig_id VARCHAR(50) NOT NULL,
     scanned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_measured_value_aclr CHECK ((aclr_result = 'PASS' AND measured_value IS NULL) OR (aclr_result = 'FAIL' AND measured_value IS NOT NULL)),
-    CONSTRAINT chk_test_case_aclr CHECK ((aclr_result = 'FAIL' AND test_case_number IS NOT NULL) OR (aclr_result = 'PASS' AND test_case_number IS NULL))
+    CONSTRAINT chk_measured_value_aclr CHECK (
+        (
+            aclr_result = 'PASS'
+            AND measured_value IS NULL
+        )
+        OR (
+            aclr_result = 'FAIL'
+            AND measured_value IS NOT NULL
+        )
+    ),
+    CONSTRAINT chk_test_case_aclr CHECK (
+        (
+            aclr_result = 'FAIL'
+            AND test_case_number IS NOT NULL
+        )
+        OR (
+            aclr_result = 'PASS'
+            AND test_case_number IS NULL
+        )
+    )
 );
 
 -- Trace Module Schema
@@ -128,7 +168,15 @@ END $$;
 CREATE TABLE IF NOT EXISTS barcode_stage_history (
     id BIGSERIAL PRIMARY KEY,
     barcode VARCHAR(255) NOT NULL,
-    stage_name VARCHAR(50) NOT NULL CHECK (stage_name IN ('Warehouse', 'Pre-IQC', 'Pre-Impedance', 'Pre-Calibration', 'Pre-ACLR')),
+    stage_name VARCHAR(50) NOT NULL CHECK (
+        stage_name IN (
+            'Warehouse',
+            'Pre-IQC',
+            'Pre-Impedance',
+            'Pre-Calibration',
+            'Pre-ACLR'
+        )
+    ),
     stage_order INTEGER NOT NULL CHECK (stage_order BETWEEN 1 AND 5),
     batch_id INTEGER,
     status trace_status NOT NULL,
@@ -151,5 +199,15 @@ EXCEPTION
 END $$;
 
 -- Elite Performance Indices
-CREATE INDEX IF NOT EXISTS idx_trace_barcode_history_asc ON barcode_stage_history(barcode, created_at ASC, id ASC);
-CREATE INDEX IF NOT EXISTS idx_trace_latest_only_desc ON barcode_stage_history (barcode, created_at DESC) INCLUDE (stage_name, status, operator, batch_id);
+CREATE INDEX IF NOT EXISTS idx_trace_barcode_history_asc ON barcode_stage_history (
+    barcode,
+    created_at ASC,
+    id ASC
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_latest_only_desc ON barcode_stage_history (barcode, created_at DESC) INCLUDE (
+    stage_name,
+    status,
+    operator,
+    batch_id
+);

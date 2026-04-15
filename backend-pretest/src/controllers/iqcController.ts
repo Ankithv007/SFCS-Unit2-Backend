@@ -101,38 +101,43 @@ export const scanComponent = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Batch not found' });
         }
 
-        const { quantity: batch_limit, batch_number } = batchInfo.rows[0];
+        const { quantity: batch_limit, batch_number: current_iqc_batch_number } = batchInfo.rows[0];
 
-        // 2. Validate Item exists in Warehouse Scans
+        // 2. Validate Item exists in ANY Warehouse Scans
         const warehouseCheck = await client.query(
-            `SELECT s.id 
+            `SELECT s.*, wb.batch_number as wh_batch_number 
              FROM warehouse_scans s
              JOIN warehouse_batches wb ON s.batch_id = wb.id
-             WHERE wb.batch_number = $1 AND s.barcode = $2`,
-            [batch_number, barcode]
+             WHERE s.barcode = $1
+             ORDER BY s.scanned_at DESC LIMIT 1`,
+            [barcode]
         );
 
         if (warehouseCheck.rows.length === 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ error: 'Item not found in Warehouse for this batch. Please scan in Warehouse first.' });
+            return res.status(400).json({ error: 'Item not found in Warehouse. Please scan in Warehouse first.' });
         }
 
-        // 3. Check Batch Limit
-        const warehouseCountResult = await client.query(
-            `SELECT COUNT(*) as count FROM warehouse_scans s JOIN warehouse_batches wb ON s.batch_id = wb.id WHERE wb.batch_number = $1`,
-            [batch_number]
-        );
-        const warehouseReceivedQty = parseInt(warehouseCountResult.rows[0].count);
+        const warehouseItem = warehouseCheck.rows[0];
 
-        const iqcCountResult = await client.query(`SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1`, [batch_id]);
-        const iqcScannedQty = parseInt(iqcCountResult.rows[0].count);
+        // 3. Capacity Checks (Only for non-rejected scans)
+        if (status !== 'REJECTED') {
+            const warehouseCountResult = await client.query(
+                `SELECT COUNT(*) as count FROM warehouse_scans s JOIN warehouse_batches wb ON s.batch_id = wb.id WHERE wb.batch_number = $1`,
+                [current_iqc_batch_number]
+            );
+            const warehouseReceivedQty = parseInt(warehouseCountResult.rows[0].count);
 
-        if (iqcScannedQty >= warehouseReceivedQty && status !== 'REJECTED') {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ error: `Cannot scan more items than received from Warehouse (${warehouseReceivedQty}).` });
+            const iqcCountResult = await client.query(`SELECT COUNT(*) as count FROM iqc_components WHERE batch_id = $1`, [batch_id]);
+            const iqcScannedQty = parseInt(iqcCountResult.rows[0].count);
+
+            if (iqcScannedQty >= warehouseReceivedQty) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: `Cannot scan more items than received from Warehouse (${warehouseReceivedQty}).` });
+            }
         }
 
-        // 4. History Check
+        // 4. History Check (Across all IQC batches)
         const historyCheck = await client.query(
             `SELECT c.*, b.batch_number 
              FROM iqc_components c
@@ -162,12 +167,8 @@ export const scanComponent = async (req: Request, res: Response) => {
                 return res.status(403).json({ error: `Component is marked for Rework in Batch ${prev.batch_number}.`, code: 'REWORK_LOCKED' });
             }
 
-            if (!force_move && prev.status !== 'REWORK') {
-                await client.query('ROLLBACK');
-                return res.status(409).json({ error: `Component belongs to Batch ${prev.batch_number}. Move it?`, code: 'MOVE_REQUIRED' });
-            }
-
-            const previousBatchInfo = prev.status === 'REWORK' ? prev.previous_batch : `Moved from Batch ${prev.batch_number}`;
+            // AUTOMATIC MOVE: If found in another batch, move it immediately
+            const previousBatchInfo = `Batch Moved from Batch ${prev.batch_number}`;
             const updatedComponent = await client.query(
                 `UPDATE iqc_components 
                  SET batch_id = $1, scanned_by = $2, status = $3, remarks = $4, previous_batch = $5, scanned_at = NOW()
@@ -185,10 +186,13 @@ export const scanComponent = async (req: Request, res: Response) => {
             return res.status(200).json(updatedComponent.rows[0]);
         }
 
+        // 5. Automatic Move from another Warehouse Batch (not yet in IQC)
+        const previousBatchInfo = warehouseItem.wh_batch_number !== current_iqc_batch_number ? `Batch Moved from Batch ${warehouseItem.wh_batch_number}` : null;
+
         // New Scan
         const newScan = await client.query(
             'INSERT INTO iqc_components (batch_id, barcode, scanned_by, status, remarks, previous_batch) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-            [batch_id, barcode, scanned_by, status || 'ACCEPTED', remarks, null]
+            [batch_id, barcode, scanned_by, status || 'ACCEPTED', remarks, previousBatchInfo]
         );
 
         // Audit Log
