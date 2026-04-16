@@ -152,7 +152,27 @@ export const scanComponent = async (req: Request, res: Response) => {
         if (historyCheck.rows.length > 0) {
             const prev = historyCheck.rows[0];
 
+            // Same-batch re-scan check
             if (prev.batch_id === batch_id) {
+                // If it was in REWORK, scanning it again promotes it to ACCEPTED
+                if (prev.status === 'REWORK') {
+                    const promoted = await client.query(
+                        `UPDATE iqc_components 
+                         SET status = 'ACCEPTED', scanned_by = $1, scanned_at = NOW(), remarks = $2
+                         WHERE id = $3 RETURNING *`,
+                        [scanned_by, 'Rework Cleared by Re-scan', prev.id]
+                    );
+
+                    // Audit Log
+                    await client.query(`
+                        INSERT INTO barcode_stage_history (barcode, stage_name, stage_order, status, operator, batch_id, source_system, remarks)
+                        VALUES ($1, 'Pre-IQC', 2, 'Passed', $2, $3, 'pretest', 'Promoted from Rework via Scan')
+                    `, [barcode, scanned_by, batch_id]);
+
+                    await client.query('COMMIT');
+                    return res.status(200).json(promoted.rows[0]);
+                }
+
                 await client.query('ROLLBACK');
                 return res.status(409).json({ error: 'Duplicate scan! Component already scanned in this IQC batch.' });
             }
@@ -162,12 +182,17 @@ export const scanComponent = async (req: Request, res: Response) => {
                 return res.status(403).json({ error: `Component was scrapped in Batch ${prev.batch_number}.`, code: 'SCRAPPED_BLOCK' });
             }
 
-            if (prev.status === 'REWORK' && prev.batch_id !== batch_id) {
+            // Cross-batch move logic: Require force_move
+            // We now allow MOVE_REQUIRED even if the previous status was REWORK
+            if (!force_move) {
                 await client.query('ROLLBACK');
-                return res.status(403).json({ error: `Component is marked for Rework in Batch ${prev.batch_number}.`, code: 'REWORK_LOCKED' });
+                return res.status(400).json({ 
+                    error: `Component belongs to Batch ${prev.batch_number}.`, 
+                    code: 'MOVE_REQUIRED' 
+                });
             }
 
-            // AUTOMATIC MOVE: If found in another batch, move it immediately
+            // Perform the move now because force_move is true
             const previousBatchInfo = `Batch Moved from Batch ${prev.batch_number}`;
             const updatedComponent = await client.query(
                 `UPDATE iqc_components 
@@ -370,7 +395,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
 
         const summaryHeaders = ['Batch Number', 'Created By', 'Date & Time', 'Expected Qty', 'Total Count', 'Passed', 'Failed', 'Rework', 'Scrap'];
         const summaryHeaderRow = worksheet.addRow(summaryHeaders);
-        summaryHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
+        summaryHeaderRow.eachCell((cell: any) => { cell.style = headerStyle; });
 
         const summaryData = [
             batch.batch_number,
@@ -384,7 +409,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
             batch.scrap_count
         ];
         const summaryDataRow = worksheet.addRow(summaryData);
-        summaryDataRow.eachCell((cell) => { cell.style = cellStyle; });
+        summaryDataRow.eachCell((cell: any) => { cell.style = cellStyle; });
 
         worksheet.addRow([]); // Gap
         worksheet.addRow([]); // Gap
@@ -395,7 +420,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
 
         const detailHeaders = ['Barcode', 'Scanned By', 'Date & Time', 'Status', 'Remarks', 'Previous Batch'];
         const detailHeaderRow = worksheet.addRow(detailHeaders);
-        detailHeaderRow.eachCell((cell) => { cell.style = headerStyle; });
+        detailHeaderRow.eachCell((cell: any) => { cell.style = headerStyle; });
 
         components.forEach((comp: any) => {
             const row = worksheet.addRow([
@@ -407,7 +432,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
                 comp.previous_batch || '-'
             ]);
 
-            row.eachCell((cell, colNumber) => {
+            row.eachCell((cell: any, colNumber: number) => {
                 cell.style = { ...cellStyle };
 
                 // Apply background color based on status
@@ -435,9 +460,9 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
         });
 
         // Auto-fit column widths
-        worksheet.columns.forEach((column) => {
+        worksheet.columns.forEach((column: any) => {
             let maxColumnLength = 0;
-            column.eachCell!({ includeEmpty: true }, (cell) => {
+            column.eachCell!({ includeEmpty: true }, (cell: any) => {
                 const columnLength = cell.value ? cell.value.toString().length : 0;
                 if (columnLength > maxColumnLength) {
                     maxColumnLength = columnLength;
