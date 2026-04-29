@@ -1,0 +1,166 @@
+import { Request, Response } from 'express';
+import pool from '../config/db';
+
+// === Work Orders ===
+export const createWorkOrder = async (req: Request, res: Response) => {
+    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity } = req.body;
+    try {
+        const result = await pool.query(
+            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error creating work order:", err);
+        res.status(500).json({ error: "Failed to create work order" });
+    }
+};
+
+export const getWorkOrders = async (req: Request, res: Response) => {
+    try {
+        const result = await pool.query('SELECT * FROM smt_work_orders ORDER BY created_at DESC');
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error("Error fetching work orders:", err);
+        res.status(500).json({ error: "Failed to fetch work orders" });
+    }
+};
+
+// === Serial Numbers ===
+export const generateSerials = async (req: Request, res: Response) => {
+    const { work_order_id, format, serials } = req.body;
+    try {
+        await pool.query('BEGIN');
+        
+        for (const serial of serials) {
+            await pool.query(
+                `INSERT INTO smt_serial_numbers (work_order_id, serial_format, serial_number) 
+                 VALUES ($1, $2, $3)`,
+                [work_order_id, format, serial]
+            );
+        }
+        
+        await pool.query('COMMIT');
+        res.status(201).json({ message: "Serials generated successfully" });
+    } catch (err) {
+        await pool.query('ROLLBACK');
+        console.error("Error generating serials:", err);
+        res.status(500).json({ error: "Failed to generate serials" });
+    }
+};
+
+export const getSerials = async (req: Request, res: Response) => {
+    try {
+        const result = await pool.query('SELECT * FROM smt_serial_numbers ORDER BY id ASC');
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error("Error fetching serials:", err);
+        res.status(500).json({ error: "Failed to fetch serials" });
+    }
+};
+
+export const deleteSerials = async (req: Request, res: Response) => {
+    const { work_order_id } = req.query;
+    try {
+        if (work_order_id) {
+            await pool.query('DELETE FROM smt_serial_numbers WHERE work_order_id = $1', [work_order_id]);
+        } else {
+            await pool.query('DELETE FROM smt_serial_numbers');
+        }
+        res.status(200).json({ message: "Serials deleted successfully" });
+    } catch (err) {
+        console.error("Error deleting serials:", err);
+        res.status(500).json({ error: "Failed to delete serials" });
+    }
+};
+
+// === Printing Employees ===
+export const createEmployee = async (req: Request, res: Response) => {
+    const { name, user_id, password } = req.body;
+    try {
+        const result = await pool.query(
+            `INSERT INTO smt_printing_employees (name, user_id, password) VALUES ($1, $2, $3) RETURNING *`,
+            [name, user_id, password]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error creating employee:", err);
+        res.status(500).json({ error: "Failed to create employee" });
+    }
+};
+
+export const getEmployees = async (req: Request, res: Response) => {
+    try {
+        const result = await pool.query('SELECT * FROM smt_printing_employees ORDER BY created_at DESC');
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error("Error fetching employees:", err);
+        res.status(500).json({ error: "Failed to fetch employees" });
+    }
+};
+
+export const updateEmployee = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { name, user_id, password } = req.body;
+    try {
+        const result = await pool.query(
+            `UPDATE smt_printing_employees SET name = $1, user_id = $2, password = $3 WHERE id = $4 RETURNING *`,
+            [name, user_id, password, id]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: "Employee not found" });
+        res.status(200).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error updating employee:", err);
+        res.status(500).json({ error: "Failed to update employee" });
+    }
+};
+
+export const deleteEmployee = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        await pool.query('DELETE FROM smt_printing_employees WHERE id = $1', [id]);
+        res.status(200).json({ message: "Employee deleted" });
+    } catch (err) {
+        console.error("Error deleting employee:", err);
+        res.status(500).json({ error: "Failed to delete employee" });
+    }
+};
+
+export const toggleEmployeeStatus = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            `UPDATE smt_printing_employees SET is_active = NOT is_active WHERE id = $1 RETURNING *`,
+            [id]
+        );
+        res.status(200).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error toggling status:", err);
+        res.status(500).json({ error: "Failed to toggle status" });
+    }
+};
+
+export const loginEmployee = async (req: Request, res: Response) => {
+    const { userId, password } = req.body;
+    try {
+        const result = await pool.query(
+            `SELECT * FROM smt_printing_employees WHERE user_id = $1 AND password = $2`,
+            [userId, password]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: "Invalid credentials" });
+        }
+        
+        const employee = result.rows[0];
+        if (!employee.is_active) {
+            return res.status(403).json({ error: "Account deactivated. Please contact admin." });
+        }
+        
+        res.status(200).json({ message: "Login successful", employee });
+    } catch (err) {
+        console.error("Error during login:", err);
+        res.status(500).json({ error: "Login failed" });
+    }
+};

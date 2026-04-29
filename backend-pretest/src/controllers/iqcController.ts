@@ -186,9 +186,9 @@ export const scanComponent = async (req: Request, res: Response) => {
             // We now allow MOVE_REQUIRED even if the previous status was REWORK
             if (!force_move) {
                 await client.query('ROLLBACK');
-                return res.status(400).json({ 
-                    error: `Component belongs to Batch ${prev.batch_number}.`, 
-                    code: 'MOVE_REQUIRED' 
+                return res.status(400).json({
+                    error: `Component belongs to Batch ${prev.batch_number}.`,
+                    code: 'MOVE_REQUIRED'
                 });
             }
 
