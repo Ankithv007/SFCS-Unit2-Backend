@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import fs from 'fs';
 import inventoryRoutes from './routes/inventoryRoutes';
-import { setupDatabase } from './db/setup_db';
 import { createLogger } from './utils/logger';
 import pool from './config/db';
 
@@ -53,6 +54,19 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 app.get('/', (req, res) => {
     res.send('Inventory Service is running');
 });
+
+const setupDatabase = async () => {
+    try {
+        logger.info('[Database] Checking schema for Inventory Service...');
+        const schemaPath = path.join(__dirname, 'db/schema.sql');
+        const schema = fs.readFileSync(schemaPath, 'utf8');
+        await pool.query(schema);
+        logger.info('[Database] Schema initialized successfully.');
+    } catch (error) {
+        logger.error('[Database] Failed to initialize schema:', error);
+        throw error;
+    }
+};
 
 // Initialize Database and Start Server
 const startServer = async () => {
