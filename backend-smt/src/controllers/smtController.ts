@@ -47,6 +47,33 @@ export const getWorkOrders = async (req: Request, res: Response) => {
     }
 };
 
+export const registerWorkOrder = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'UPDATE smt_work_orders SET is_registered = true WHERE id = $1 RETURNING *',
+            [id]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: "Work order not found" });
+        res.status(200).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error registering work order:", err);
+        res.status(500).json({ error: "Failed to register work order" });
+    }
+};
+
+export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM smt_work_orders WHERE is_registered = true ORDER BY created_at DESC'
+        );
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error("Error fetching registered work orders:", err);
+        res.status(500).json({ error: "Failed to fetch registered work orders" });
+    }
+};
+
 // === Serial Numbers ===
 export const generateSerials = async (req: Request, res: Response) => {
     const { work_order_id, format, serials, created_by } = req.body;
@@ -84,7 +111,8 @@ export const getSerials = async (req: Request, res: Response) => {
                 wo.product_name, 
                 wo.quantity as wo_qty, 
                 wo.panel_quantity as panel_qty, 
-                wo.created_by as wo_created_by
+                wo.created_by as wo_created_by,
+                wo.is_registered
             FROM smt_serial_numbers sn
             JOIN smt_work_orders wo ON sn.work_order_id = wo.id
         `;
@@ -214,5 +242,21 @@ export const loginEmployee = async (req: Request, res: Response) => {
     } catch (err) {
         console.error("Error during login:", err);
         res.status(500).json({ error: "Login failed" });
+    }
+};
+
+export const updateSerialNumberStatus = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { status } = req.body;
+    try {
+        const result = await pool.query(
+            'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2 RETURNING *',
+            [status, id]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: "Serial number not found" });
+        res.status(200).json(result.rows[0]);
+    } catch (err) {
+        console.error("Error updating serial status:", err);
+        res.status(500).json({ error: "Failed to update serial status" });
     }
 };

@@ -11,7 +11,10 @@ import {
     updateEmployee, 
     deleteEmployee, 
     toggleEmployeeStatus, 
-    loginEmployee 
+    loginEmployee,
+    registerWorkOrder,
+    getRegisteredWorkOrders,
+    updateSerialNumberStatus
 } from '../controllers/smtController';
 
 const router = express.Router();
@@ -19,12 +22,15 @@ const router = express.Router();
 // Work Orders
 router.post('/work-orders', createWorkOrder);
 router.get('/work-orders', getWorkOrders);
-router.get('/workorders/pending', getPendingWorkOrders); // New endpoint
+router.get('/workorders/pending', getPendingWorkOrders);
+router.post('/work-orders/:id/register', registerWorkOrder);
+router.get('/work-orders/registered', getRegisteredWorkOrders);
 
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
 router.get('/serial-numbers', getSerials);
 router.delete('/serial-numbers', deleteSerials);
+router.patch('/serial-numbers/:id/status', updateSerialNumberStatus);
 
 // Aliases for Requirement 5
 router.get('/serials', getSerials);

@@ -30,6 +30,7 @@ const initDB = async () => {
             );
 
             ALTER TABLE smt_work_orders ADD COLUMN IF NOT EXISTS created_by VARCHAR(255);
+            ALTER TABLE smt_work_orders ADD COLUMN IF NOT EXISTS is_registered BOOLEAN DEFAULT false;
 
             CREATE TABLE IF NOT EXISTS smt_serial_numbers (
                 id SERIAL PRIMARY KEY,
