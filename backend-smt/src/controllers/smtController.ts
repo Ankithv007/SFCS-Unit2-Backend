@@ -3,17 +3,37 @@ import pool from '../config/db';
 
 // === Work Orders ===
 export const createWorkOrder = async (req: Request, res: Response) => {
-    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity } = req.body;
+    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by } = req.body;
     try {
         const result = await pool.query(
-            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity]
+            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by]
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
         console.error("Error creating work order:", err);
         res.status(500).json({ error: "Failed to create work order" });
+    }
+};
+
+export const getPendingWorkOrders = async (req: Request, res: Response) => {
+    try {
+        const query = `
+            SELECT 
+                wo.*, 
+                COUNT(sn.id) as generated_count
+            FROM smt_work_orders wo
+            LEFT JOIN smt_serial_numbers sn ON wo.id = sn.work_order_id
+            GROUP BY wo.id
+            HAVING COUNT(sn.id) < wo.panel_quantity
+            ORDER BY wo.created_at DESC
+        `;
+        const result = await pool.query(query);
+        res.status(200).json(result.rows);
+    } catch (err) {
+        console.error("Error fetching pending work orders:", err);
+        res.status(500).json({ error: "Failed to fetch pending work orders" });
     }
 };
 
@@ -29,15 +49,20 @@ export const getWorkOrders = async (req: Request, res: Response) => {
 
 // === Serial Numbers ===
 export const generateSerials = async (req: Request, res: Response) => {
-    const { work_order_id, format, serials } = req.body;
+    const { work_order_id, format, serials, created_by } = req.body;
+    
+    // Safety Layer: Aggressive cleaning
+    const cleanFormat = (format || "").replace(/-/g, "").toUpperCase();
+    const cleanSerials = (serials || []).map((s: string) => s.replace(/-/g, "").toUpperCase());
+
     try {
         await pool.query('BEGIN');
         
-        for (const serial of serials) {
+        for (const serial of cleanSerials) {
             await pool.query(
-                `INSERT INTO smt_serial_numbers (work_order_id, serial_format, serial_number) 
-                 VALUES ($1, $2, $3)`,
-                [work_order_id, format, serial]
+                `INSERT INTO smt_serial_numbers (work_order_id, serial_format, serial_number, created_by) 
+                 VALUES ($1, $2, $3, $4)`,
+                [work_order_id, cleanFormat, serial, created_by]
             );
         }
         
@@ -51,9 +76,36 @@ export const generateSerials = async (req: Request, res: Response) => {
 };
 
 export const getSerials = async (req: Request, res: Response) => {
+    const { work_order_id } = req.query;
     try {
-        const result = await pool.query('SELECT * FROM smt_serial_numbers ORDER BY id ASC');
-        res.status(200).json(result.rows);
+        let query = `
+            SELECT 
+                sn.*, 
+                wo.product_name, 
+                wo.quantity as wo_qty, 
+                wo.panel_quantity as panel_qty, 
+                wo.created_by as wo_created_by
+            FROM smt_serial_numbers sn
+            JOIN smt_work_orders wo ON sn.work_order_id = wo.id
+        `;
+        const params: any[] = [];
+        if (work_order_id) {
+            query += ` WHERE sn.work_order_id = $1`;
+            params.push(work_order_id);
+        }
+        query += ` ORDER BY sn.id ASC`;
+        
+        const result = await pool.query(query, params);
+        
+        // Safety Layer: Clean API Response
+        const cleanedRows = result.rows.map(row => ({
+            ...row,
+            serial_number: row.serial_number.replace(/-/g, ""),
+            serial_format: row.serial_format.replace(/-/g, "")
+        }));
+
+        console.log("DEBUG API RESPONSE (Serials):", cleanedRows);
+        res.status(200).json(cleanedRows);
     } catch (err) {
         console.error("Error fetching serials:", err);
         res.status(500).json({ error: "Failed to fetch serials" });
