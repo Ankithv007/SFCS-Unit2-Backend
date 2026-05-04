@@ -85,37 +85,46 @@ const setupDatabase = async () => {
 
 const seedDatabase = async () => {
     logger.info('[Database] Starting seeding...');
-    const admins = [
+    const usersToSeed = [
         {
             email: process.env.SEED_ADMIN_1_EMAIL,
             password: process.env.SEED_ADMIN_1_PASSWORD,
-            name: 'System Admin'
+            name: 'System Admin',
+            role: 'Super Admin'
         },
         {
             email: process.env.SEED_ADMIN_2_EMAIL,
             password: process.env.SEED_ADMIN_2_PASSWORD,
-            name: 'Ankith'
+            name: 'Ankith',
+            role: 'Super Admin'
+        },
+        {
+            email: process.env.SEED_MANAGER_EMAIL,
+            password: process.env.SEED_MANAGER_PASSWORD,
+            name: 'System Manager',
+            role: 'Manager'
         }
     ];
 
-    for (const admin of admins) {
-        if (!admin.email || !admin.password) {
-            throw new Error('Super Admin environment variables are missing');
+    for (const user of usersToSeed) {
+        if (!user.email || !user.password) {
+            logger.warn(`[Database] Skipping seeding for ${user.role} as environment variables are missing`);
+            continue;
         }
-        const hashedPassword = await hashPassword(admin.password);
-        const existing = await pool.query('SELECT id FROM users WHERE email = $1', [admin.email]);
+        const hashedPassword = await hashPassword(user.password);
+        const existing = await pool.query('SELECT id FROM users WHERE email = $1', [user.email]);
 
         if (existing.rows.length > 0) {
-            logger.info(`[Database] Updating Super Admin: ${admin.email}`);
+            logger.info(`[Database] Updating ${user.role}: ${user.email}`);
             await pool.query(
-                `UPDATE users SET password = $1, role = 'Super Admin', status = 'active', is_verified = TRUE, name = $2 WHERE email = $3`,
-                [hashedPassword, admin.name, admin.email]
+                `UPDATE users SET password = $1, role = $2, status = 'active', is_verified = TRUE, name = $3 WHERE email = $4`,
+                [hashedPassword, user.role, user.name, user.email]
             );
         } else {
-            logger.info(`[Database] Creating Super Admin: ${admin.email}`);
+            logger.info(`[Database] Creating ${user.role}: ${user.email}`);
             await pool.query(
-                `INSERT INTO users (name, email, password, role, status, is_verified) VALUES ($1, $2, $3, 'Super Admin', 'active', TRUE)`,
-                [admin.name, admin.email, hashedPassword]
+                `INSERT INTO users (name, email, password, role, status, is_verified) VALUES ($1, $2, $3, $4, 'active', TRUE)`,
+                [user.name, user.email, hashedPassword, user.role]
             );
         }
     }
