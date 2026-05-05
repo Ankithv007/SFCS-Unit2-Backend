@@ -14,7 +14,13 @@ import {
     loginEmployee,
     registerWorkOrder,
     getRegisteredWorkOrders,
-    updateSerialNumberStatus
+    updateSerialNumberStatus,
+    createInspection,
+    getInspections,
+    createProcessSetup,
+    getProcessSetups,
+    getWorkOrderHistory,
+    deleteProcessSetup
 } from '../controllers/smtController';
 
 const router = express.Router();
@@ -25,12 +31,22 @@ router.get('/work-orders', getWorkOrders);
 router.get('/workorders/pending', getPendingWorkOrders);
 router.post('/work-orders/:id/register', registerWorkOrder);
 router.get('/work-orders/registered', getRegisteredWorkOrders);
+router.get('/workorder-history', getWorkOrderHistory);
 
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
 router.get('/serial-numbers', getSerials);
 router.delete('/serial-numbers', deleteSerials);
 router.patch('/serial-numbers/:id/status', updateSerialNumberStatus);
+
+// Inspections
+router.post('/inspections', createInspection);
+router.get('/inspections', getInspections);
+
+// Process Setups (SPI, AOI, etc.)
+router.post('/process-setups', createProcessSetup);
+router.get('/process-setups', getProcessSetups);
+router.delete('/process-setups/:id', deleteProcessSetup);
 
 // Aliases for Requirement 5
 router.get('/serials', getSerials);
