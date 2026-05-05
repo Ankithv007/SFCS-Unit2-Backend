@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('SMT_CONTROLLER');
 
 // === Work Orders ===
 export const createWorkOrder = async (req: Request, res: Response) => {
@@ -12,7 +15,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
-        console.error("Error creating work order:", err);
+        logger.error("Error creating work order:", err);
         res.status(500).json({ error: "Failed to create work order" });
     }
 };
@@ -32,7 +35,7 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
         const result = await pool.query(query);
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching pending work orders:", err);
+        logger.error("Error fetching pending work orders:", err);
         res.status(500).json({ error: "Failed to fetch pending work orders" });
     }
 };
@@ -42,7 +45,7 @@ export const getWorkOrders = async (req: Request, res: Response) => {
         const result = await pool.query('SELECT * FROM smt_work_orders ORDER BY created_at DESC');
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching work orders:", err);
+        logger.error("Error fetching work orders:", err);
         res.status(500).json({ error: "Failed to fetch work orders" });
     }
 };
@@ -57,7 +60,7 @@ export const registerWorkOrder = async (req: Request, res: Response) => {
         if (result.rowCount === 0) return res.status(404).json({ error: "Work order not found" });
         res.status(200).json(result.rows[0]);
     } catch (err) {
-        console.error("Error registering work order:", err);
+        logger.error("Error registering work order:", err);
         res.status(500).json({ error: "Failed to register work order" });
     }
 };
@@ -97,7 +100,7 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching registered work orders:", err);
+        logger.error("Error fetching registered work orders:", err);
         res.status(500).json({ error: "Failed to fetch registered work orders" });
     }
 };
@@ -110,31 +113,59 @@ export const generateSerials = async (req: Request, res: Response) => {
     const cleanFormat = (format || "").replace(/-/g, "").toUpperCase();
     const cleanSerials = (serials || []).map((s: string) => s.replace(/-/g, "").toUpperCase());
 
+    if (!cleanSerials || cleanSerials.length === 0) {
+        return res.status(400).json({ error: "No serial numbers provided" });
+    }
+
     try {
         await pool.query('BEGIN');
 
-        for (const serial of cleanSerials) {
-            const snResult = await pool.query(
-                `INSERT INTO smt_serial_numbers (work_order_id, serial_format, serial_number, created_by) 
-                 VALUES ($1, $2, $3, $4) RETURNING id`,
-                [work_order_id, cleanFormat, serial, created_by]
-            );
+        // 1. Bulk insert serial numbers, skipping duplicates
+        const snValues: any[] = [];
+        const snPlaceholders: string[] = [];
+        let snParamIdx = 1;
 
-            const serialId = snResult.rows[0].id;
+        cleanSerials.forEach((serial: string) => {
+            snPlaceholders.push(`($${snParamIdx++}, $${snParamIdx++}, $${snParamIdx++}, $${snParamIdx++})`);
+            snValues.push(work_order_id, cleanFormat, serial, created_by);
+        });
 
-            // Insert initial activation record
-            await pool.query(
-                `INSERT INTO smt_inspections (serial_id, process_step, scanned_by, status) 
-                 VALUES ($1, $2, $3, $4)`,
-                [serialId, 'Serial Number', created_by, 'PASS']
-            );
+        const snQuery = `
+            INSERT INTO smt_serial_numbers (work_order_id, serial_format, serial_number, created_by)
+            VALUES ${snPlaceholders.join(', ')}
+            ON CONFLICT (serial_number) DO NOTHING
+            RETURNING id
+        `;
+
+        const snResult = await pool.query(snQuery, snValues);
+        
+        // 2. Bulk insert initial inspections for NEW serials only
+        if (snResult.rows.length > 0) {
+            const inspValues: any[] = [];
+            const inspPlaceholders: string[] = [];
+            let inspParamIdx = 1;
+
+            snResult.rows.forEach((row: any) => {
+                inspPlaceholders.push(`($${inspParamIdx++}, $${inspParamIdx++}, $${inspParamIdx++}, $${inspParamIdx++})`);
+                inspValues.push(row.id, 'Serial Number', created_by, 'PASS');
+            });
+
+            const inspQuery = `
+                INSERT INTO smt_inspections (serial_id, process_step, scanned_by, status)
+                VALUES ${inspPlaceholders.join(', ')}
+            `;
+            await pool.query(inspQuery, inspValues);
         }
 
         await pool.query('COMMIT');
-        res.status(201).json({ message: "Serials generated successfully" });
+        res.status(201).json({ 
+            message: "Serials generated successfully", 
+            inserted: snResult.rows.length,
+            total: cleanSerials.length
+        });
     } catch (err) {
         await pool.query('ROLLBACK');
-        console.error("Error generating serials:", err);
+        logger.error("Error generating serials:", err);
         res.status(500).json({ error: "Failed to generate serials" });
     }
 };
@@ -189,14 +220,14 @@ export const getSerials = async (req: Request, res: Response) => {
         if (filter_step && filter_status) {
             const steps = (filter_step as string).split(',');
             const stepPlaceholders = steps.map((_, i) => `$${params.length + i + 1}`).join(',');
-            
+
             conditions.push(`EXISTS (
                 SELECT 1 FROM smt_inspections insp_filter 
                 WHERE insp_filter.serial_id = sn.id 
                 AND insp_filter.process_step IN (${stepPlaceholders}) 
                 AND insp_filter.status = $${params.length + steps.length + 1}
             )`);
-            
+
             steps.forEach(step => params.push(step.trim()));
             params.push(filter_status);
         } else if (filter_status) {
@@ -231,7 +262,7 @@ export const getSerials = async (req: Request, res: Response) => {
 
         res.status(200).json(cleanedRows);
     } catch (err) {
-        console.error("Error fetching serials:", err);
+        logger.error("Error fetching serials:", err);
         res.status(500).json({ error: "Failed to fetch serials" });
     }
 };
@@ -246,7 +277,7 @@ export const deleteSerials = async (req: Request, res: Response) => {
         }
         res.status(200).json({ message: "Serials deleted successfully" });
     } catch (err) {
-        console.error("Error deleting serials:", err);
+        logger.error("Error deleting serials:", err);
         res.status(500).json({ error: "Failed to delete serials" });
     }
 };
@@ -261,7 +292,7 @@ export const createEmployee = async (req: Request, res: Response) => {
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
-        console.error("Error creating employee:", err);
+        logger.error("Error creating employee:", err);
         res.status(500).json({ error: "Failed to create employee" });
     }
 };
@@ -271,7 +302,7 @@ export const getEmployees = async (req: Request, res: Response) => {
         const result = await pool.query('SELECT * FROM smt_printing_employees ORDER BY created_at DESC');
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching employees:", err);
+        logger.error("Error fetching employees:", err);
         res.status(500).json({ error: "Failed to fetch employees" });
     }
 };
@@ -287,7 +318,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         if (result.rowCount === 0) return res.status(404).json({ error: "Employee not found" });
         res.status(200).json(result.rows[0]);
     } catch (err) {
-        console.error("Error updating employee:", err);
+        logger.error("Error updating employee:", err);
         res.status(500).json({ error: "Failed to update employee" });
     }
 };
@@ -298,7 +329,7 @@ export const deleteEmployee = async (req: Request, res: Response) => {
         await pool.query('DELETE FROM smt_printing_employees WHERE id = $1', [id]);
         res.status(200).json({ message: "Employee deleted" });
     } catch (err) {
-        console.error("Error deleting employee:", err);
+        logger.error("Error deleting employee:", err);
         res.status(500).json({ error: "Failed to delete employee" });
     }
 };
@@ -312,7 +343,7 @@ export const toggleEmployeeStatus = async (req: Request, res: Response) => {
         );
         res.status(200).json(result.rows[0]);
     } catch (err) {
-        console.error("Error toggling status:", err);
+        logger.error("Error toggling status:", err);
         res.status(500).json({ error: "Failed to toggle status" });
     }
 };
@@ -336,7 +367,7 @@ export const loginEmployee = async (req: Request, res: Response) => {
 
         res.status(200).json({ message: "Login successful", employee });
     } catch (err) {
-        console.error("Error during login:", err);
+        logger.error("Error during login:", err);
         res.status(500).json({ error: "Login failed" });
     }
 };
@@ -352,7 +383,7 @@ export const updateSerialNumberStatus = async (req: Request, res: Response) => {
         if (result.rowCount === 0) return res.status(404).json({ error: "Serial number not found" });
         res.status(200).json(result.rows[0]);
     } catch (err) {
-        console.error("Error updating serial status:", err);
+        logger.error("Error updating serial status:", err);
         res.status(500).json({ error: "Failed to update serial status" });
     }
 };
@@ -377,13 +408,13 @@ export const createInspection = async (req: Request, res: Response) => {
 
         res.status(201).json(result.rows[0]);
     } catch (err) {
-        console.error("Error creating inspection:", err);
+        logger.error("Error creating inspection:", err);
         res.status(500).json({ error: "Failed to create inspection" });
     }
 };
 
 export const getInspections = async (req: Request, res: Response) => {
-    const { serial_id, work_order_id } = req.query;
+    const { serial_id, work_order_id, process_step } = req.query;
     try {
         let query = `
             SELECT i.*, sn.serial_number, sn.work_order_id 
@@ -400,12 +431,16 @@ export const getInspections = async (req: Request, res: Response) => {
             params.push(work_order_id);
             query += ` AND sn.work_order_id = $${params.length}`;
         }
+        if (process_step) {
+            params.push(process_step);
+            query += ` AND i.process_step = $${params.length}`;
+        }
         query += ` ORDER BY i.scanned_at DESC`;
 
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching inspections:", err);
+        logger.error("Error fetching inspections:", err);
         res.status(500).json({ error: "Failed to fetch inspections" });
     }
 };
@@ -422,7 +457,7 @@ export const deleteInspection = async (req: Request, res: Response) => {
         );
         res.status(200).json({ message: "Inspection reset successfully" });
     } catch (err) {
-        console.error("Error deleting inspection:", err);
+        logger.error("Error deleting inspection:", err);
         res.status(500).json({ error: "Failed to reset inspection" });
     }
 };
@@ -438,7 +473,7 @@ export const createProcessSetup = async (req: Request, res: Response) => {
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
-        console.error("Error creating process setup:", err);
+        logger.error("Error creating process setup:", err);
         res.status(500).json({ error: "Failed to create process setup" });
     }
 };
@@ -456,7 +491,7 @@ export const getProcessSetups = async (req: Request, res: Response) => {
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching process setups:", err);
+        logger.error("Error fetching process setups:", err);
         res.status(500).json({ error: "Failed to fetch process setups" });
     }
 };
@@ -467,7 +502,7 @@ export const deleteProcessSetup = async (req: Request, res: Response) => {
         await pool.query('DELETE FROM smt_process_setups WHERE id = $1', [id]);
         res.status(200).json({ message: "Process setup deleted" });
     } catch (err) {
-        console.error("Error deleting process setup:", err);
+        logger.error("Error deleting process setup:", err);
         res.status(500).json({ error: "Failed to delete process setup" });
     }
 };
@@ -517,7 +552,7 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
-        console.error("Error fetching work order history:", err);
+        logger.error("Error fetching work order history:", err);
         res.status(500).json({ error: "Failed to fetch work order history" });
     }
 };

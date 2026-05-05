@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('WORKORDER_HISTORY_CONTROLLER');
 
 /**
  * GET /api/smt/workorder-history
@@ -77,7 +80,7 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
 
         res.status(200).json(history);
     } catch (err: any) {
-        console.error("Error fetching work order history:", err);
+        logger.error("Error fetching work order history:", err);
         res.status(500).json({ error: "Failed to fetch work order history", details: err.message });
     }
 };

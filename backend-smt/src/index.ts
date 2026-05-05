@@ -1,58 +1,96 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import smtRoutes from './routes/smtRoutes';
 import workorderHistoryRoutes from './routes/workorderHistory.routes';
 import pool from './config/db';
+import { createLogger } from './utils/logger';
 
+const logger = createLogger('SMT');
 const app = express();
+const PORT = process.env.PORT || 5005;
+
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5005;
+// Log all requests
+app.use((req: Request, res: Response, next: NextFunction) => {
+    logger.info(`${req.method} ${req.originalUrl}`);
+    next();
+});
 
 // Initialize Database Tables from schema.sql
 const initDB = async () => {
     try {
-        console.log("Initializing SMT database tables...");
+        logger.info("Initializing SMT database tables...");
         const schemaPath = path.join(__dirname, 'db/schema.sql');
 
         if (fs.existsSync(schemaPath)) {
             const schema = fs.readFileSync(schemaPath, 'utf8');
             await pool.query(schema);
-            console.log("SMT Database tables initialized successfully from schema.sql.");
+            logger.info("SMT Database tables initialized successfully from schema.sql.");
 
             // Run migrations/initial data if needed
             await pool.query(`
                 UPDATE smt_serial_numbers SET serial_number = REPLACE(serial_number, '-', '') WHERE serial_number LIKE '%-%';
                 UPDATE smt_serial_numbers SET serial_format = REPLACE(serial_format, '-', '') WHERE serial_format LIKE '%-%';
             `);
-            console.log("SMT migrations completed.");
+            logger.info("SMT migrations completed.");
         } else {
-            console.warn("Warning: schema.sql not found at", schemaPath);
-            // Fallback to legacy init if file missing (optional)
+            logger.warn(`schema.sql not found at ${schemaPath}`);
         }
-    } catch (err) {
-        console.error("Error initializing SMT database tables:", err);
+    } catch (err: any) {
+        logger.error(`Error initializing SMT database tables: ${err.message}`);
     }
 };
 
+// Mount routes with multiple possible prefixes for resilience
 app.use('/api', smtRoutes);
+app.use('/api/smt', smtRoutes);
 app.use('/api', workorderHistoryRoutes);
+app.use('/api/smt', workorderHistoryRoutes);
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok', service: 'backend-smt' });
+// Health Check
+app.get('/health', (req: Request, res: Response) => {
+    res.status(200).json({ 
+        success: true, 
+        service: 'backend-smt', 
+        status: 'up',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// 404 Handler
+app.use((req: Request, res: Response) => {
+    const errorBody = {
+        success: false,
+        error: 'Route not found in backend-smt',
+        method: req.method,
+        path: req.originalUrl,
+        timestamp: new Date().toISOString()
+    };
+    logger.warn(`404 Not Found: ${req.method} ${req.originalUrl}`);
+    res.status(404).json(errorBody);
+});
+
+// Centralized Error Handler
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    logger.error(`Unhandled error: ${err.message}`);
+    res.status(err.status || 500).json({
+        success: false,
+        error: err.message || 'Internal Server Error'
+    });
 });
 
 const startServer = async () => {
     try {
         await initDB();
         app.listen(PORT, () => {
-            console.log(`SMT Backend Server running on port ${PORT}`);
+            logger.info(`SMT Backend Server running on port ${PORT}`);
         });
-    } catch (err) {
-        console.error("Failed to start SMT Backend Server:", err);
+    } catch (err: any) {
+        logger.error(`Failed to start SMT Backend Server: ${err.message}`);
         process.exit(1);
     }
 };
