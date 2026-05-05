@@ -1,0 +1,163 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: sfcs-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Gateway.Dockerfile
+    container_name: sfcs-gateway
+    ports:
+      - "80:80"
+    volumes:
+      # ✅ FIX: mount uploads where backend expects
+      - ./uploads:/app/uploads
+    depends_on:
+      - backend-login
+      - backend-inventory
+      - backend-pretest
+      - backend-qc-inspection
+      - backend-vacuum-leak-test
+      - backend-smt
+      - backend-backend
+
+  backend-login:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-login
+    container_name: sfcs-backend-login
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_AUTH}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
+      - EMAIL_HOST=${EMAIL_HOST}
+      - EMAIL_PORT=${EMAIL_PORT}
+      - EMAIL_SECURE=${EMAIL_SECURE}
+      - EMAIL_USER=${EMAIL_USER}
+      - EMAIL_PASS=${EMAIL_PASS}
+      - SEED_ADMIN_1_EMAIL=${SEED_ADMIN_1_EMAIL}
+      - SEED_ADMIN_1_PASSWORD=${SEED_ADMIN_1_PASSWORD}
+      - SEED_ADMIN_2_EMAIL=${SEED_ADMIN_2_EMAIL}
+      - SEED_ADMIN_2_PASSWORD=${SEED_ADMIN_2_PASSWORD}
+    volumes:
+      # ✅ FIX: mount uploads where backend writes
+      - ./uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-inventory:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-inventory
+    container_name: sfcs-backend-inventory
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_INVENTORY}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+      - ZOHO_CLIENT_ID=${ZOHO_CLIENT_ID}
+      - ZOHO_CLIENT_SECRET=${ZOHO_CLIENT_SECRET}
+      - ZOHO_REFRESH_TOKEN=${ZOHO_REFRESH_TOKEN}
+      - ZOHO_ORG_ID_VISPL=${ZOHO_ORG_ID_VISPL}
+      - ZOHO_ORG_ID_VEAPL=${ZOHO_ORG_ID_VEAPL}
+      - ZOHO_REFRESH_TOKEN_VEAPL=${ZOHO_REFRESH_TOKEN_VEAPL}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-pretest:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-pretest
+    container_name: sfcs-backend-pretest
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_PRETEST}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-qc-inspection:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-qc-inspection
+    container_name: sfcs-backend-qc
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_QC}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-vacuum-leak-test:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-vacuum-leak-test
+    container_name: sfcs-backend-vlt
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_VLT}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-smt:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-smt
+    container_name: sfcs-backend-smt
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_SMT}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-backend:
+    build:
+      context: ./SFCS-Unit2-Backend/backend-backend
+    container_name: sfcs-backend-backend
+    environment:
+      - DB_USER=${DB_USER}
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME_BACKEND}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
