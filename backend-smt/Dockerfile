@@ -8,6 +8,9 @@ RUN npm install
 COPY . .
 RUN npm run build
 
+# Ensure schema.sql is copied to the dist folder after build
+RUN mkdir -p dist/db && cp src/db/schema.sql dist/db/
+
 EXPOSE 5005
 
 CMD ["npm", "start"]

@@ -63,14 +63,38 @@ export const registerWorkOrder = async (req: Request, res: Response) => {
 };
 
 export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
+    const { last_status } = req.query;
     try {
-        const result = await pool.query(`
+        let query = `
             SELECT DISTINCT wo.* 
             FROM smt_work_orders wo
-            JOIN smt_serial_numbers sn ON wo.id = sn.work_order_id
-            WHERE sn.status = 'SCANNED' OR wo.is_registered = true
-            ORDER BY wo.created_at DESC
-        `);
+            WHERE 1=1
+        `;
+        const params: any[] = [];
+
+        if (last_status) {
+            params.push(last_status);
+            query += ` AND EXISTS (
+                SELECT 1
+                FROM smt_serial_numbers sn2
+                JOIN (
+                    SELECT DISTINCT ON (serial_id) serial_id, status
+                    FROM smt_inspections
+                    ORDER BY serial_id, scanned_at DESC
+                ) latest ON sn2.id = latest.serial_id
+                WHERE sn2.work_order_id = wo.id
+                AND latest.status = $${params.length}
+            )`;
+        } else {
+            query += ` AND EXISTS (
+                SELECT 1 FROM smt_serial_numbers sn3
+                WHERE sn3.work_order_id = wo.id AND sn3.status = 'SCANNED'
+            )`;
+        }
+
+        query += ` ORDER BY wo.created_at DESC`;
+
+        const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
         console.error("Error fetching registered work orders:", err);
@@ -116,8 +140,25 @@ export const generateSerials = async (req: Request, res: Response) => {
 };
 
 export const getSerials = async (req: Request, res: Response) => {
-    const { work_order_id, filter_step, filter_status } = req.query;
+    const { work_order_id, filter_step, filter_status, current_step, last_status } = req.query;
     try {
+        const params: any[] = [];
+        const currentStep = typeof current_step === 'string' ? current_step : null;
+        let completedHereSelect = `false as is_completed_here`;
+
+        if (currentStep) {
+            params.push(currentStep);
+            completedHereSelect = `
+                EXISTS (
+                    SELECT 1
+                    FROM smt_inspections step_done
+                    WHERE step_done.serial_id = sn.id
+                    AND step_done.process_step = $${params.length}
+                    AND step_done.status = 'PASS'
+                ) as is_completed_here
+            `;
+        }
+
         let query = `
             SELECT 
                 sn.*, 
@@ -128,7 +169,8 @@ export const getSerials = async (req: Request, res: Response) => {
                 wo.is_registered,
                 last_insp.status as last_status,
                 last_insp.process_step as last_step,
-                last_insp.rework_reason
+                last_insp.rework_reason,
+                ${completedHereSelect}
             FROM smt_serial_numbers sn
             JOIN smt_work_orders wo ON sn.work_order_id = wo.id
             LEFT JOIN (
@@ -137,7 +179,6 @@ export const getSerials = async (req: Request, res: Response) => {
                 ORDER BY serial_id, scanned_at DESC
             ) last_insp ON sn.id = last_insp.serial_id
         `;
-        const params: any[] = [];
         const conditions: string[] = [];
 
         if (work_order_id) {
@@ -146,21 +187,31 @@ export const getSerials = async (req: Request, res: Response) => {
         }
 
         if (filter_step && filter_status) {
-            // Split by comma in case multiple steps are provided
             const steps = (filter_step as string).split(',');
             const stepPlaceholders = steps.map((_, i) => `$${params.length + i + 1}`).join(',');
-
-            query += ` JOIN smt_inspections insp_filter ON sn.id = insp_filter.serial_id `;
+            
+            conditions.push(`EXISTS (
+                SELECT 1 FROM smt_inspections insp_filter 
+                WHERE insp_filter.serial_id = sn.id 
+                AND insp_filter.process_step IN (${stepPlaceholders}) 
+                AND insp_filter.status = $${params.length + steps.length + 1}
+            )`);
+            
             steps.forEach(step => params.push(step.trim()));
-            conditions.push(`insp_filter.process_step IN (${stepPlaceholders})`);
-
             params.push(filter_status);
-            conditions.push(`insp_filter.status = $${params.length}`);
         } else if (filter_status) {
-            // If only status is provided, filter by any step with that status
-            query += ` JOIN smt_inspections insp_filter ON sn.id = insp_filter.serial_id `;
             params.push(filter_status);
-            conditions.push(`insp_filter.status = $${params.length}`);
+            conditions.push(`EXISTS (
+                SELECT 1 FROM smt_inspections insp_filter 
+                WHERE insp_filter.serial_id = sn.id 
+                AND insp_filter.status = $${params.length}
+            )`);
+        }
+
+        // Filter by the most-recent inspection status (latest record per serial)
+        if (last_status) {
+            params.push(last_status);
+            conditions.push(`last_insp.status = $${params.length}`);
         }
 
         if (conditions.length > 0) {
@@ -356,6 +407,23 @@ export const getInspections = async (req: Request, res: Response) => {
     } catch (err) {
         console.error("Error fetching inspections:", err);
         res.status(500).json({ error: "Failed to fetch inspections" });
+    }
+};
+
+export const deleteInspection = async (req: Request, res: Response) => {
+    const { serial_id, process_step } = req.query;
+    try {
+        if (!serial_id || !process_step) {
+            return res.status(400).json({ error: "serial_id and process_step are required" });
+        }
+        await pool.query(
+            `DELETE FROM smt_inspections WHERE serial_id = $1 AND process_step = $2`,
+            [serial_id, process_step]
+        );
+        res.status(200).json({ message: "Inspection reset successfully" });
+    } catch (err) {
+        console.error("Error deleting inspection:", err);
+        res.status(500).json({ error: "Failed to reset inspection" });
     }
 };
 
