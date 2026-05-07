@@ -1,16 +1,28 @@
 import { Router } from 'express';
-import { 
+import {
     getPthDetailsByWoId,
-    createPthScan, 
-    getPthScansByWoId 
+    createBatch,
+    getBatches,
+    completeBatch,
+    deleteBatch,
+    createPthScan,
+    getScansByBatchId,
+    updateScanStatus
 } from '../controllers/pthController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = Router();
 
-// PTH Data Routes
-router.get('/details/:id', authenticateToken, getPthDetailsByWoId);
+// Batch Management (Exact path names like /pth/batch as requested)
+router.post('/batch', authenticateToken, createBatch);
+router.get('/batch', authenticateToken, getBatches); // Changed from /batches to /batch
+router.put('/batch/:id/complete', authenticateToken, completeBatch);
+router.delete('/batch/:id', authenticateToken, deleteBatch);
+
+// Scanning
 router.post('/scan', authenticateToken, createPthScan);
-router.get('/scans/:woId', authenticateToken, getPthScansByWoId);
+router.get('/scan/:batchId', authenticateToken, getScansByBatchId); // Changed from /scans to /scan
+router.put('/scan/:id/status', authenticateToken, updateScanStatus);
+router.get('/details/:id', authenticateToken, getPthDetailsByWoId);
 
 export default router;

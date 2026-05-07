@@ -8,18 +8,44 @@ CREATE TABLE IF NOT EXISTS work_orders (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS pth_batches (
+  id SERIAL PRIMARY KEY,
+  work_order_id INT REFERENCES work_orders(id) ON DELETE CASCADE,
+  batch_number VARCHAR(100) UNIQUE NOT NULL,
+  created_by VARCHAR(100) NOT NULL,
+  status VARCHAR(20) DEFAULT 'active',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS pth_scans (
   id SERIAL PRIMARY KEY,
   work_order_id INT REFERENCES work_orders(id) ON DELETE CASCADE,
-  barcode VARCHAR(100) UNIQUE NOT NULL,
+  batch_id INT REFERENCES pth_batches(id) ON DELETE CASCADE,
+  barcode VARCHAR(100) NOT NULL,
   scanned_by VARCHAR(100),
-  scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  status VARCHAR(20) DEFAULT 'ACCEPTED'
 );
 
-CREATE TABLE IF NOT EXISTS vi (
+CREATE TABLE IF NOT EXISTS vi_batches (
   id SERIAL PRIMARY KEY,
-  name VARCHAR(255),
+  batch_number VARCHAR(100) UNIQUE NOT NULL,
+  work_order_id INT REFERENCES work_orders(id) ON DELETE CASCADE,
+  created_by VARCHAR(100) NOT NULL,
+  status VARCHAR(20) DEFAULT 'active',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS vi_scans (
+  id SERIAL PRIMARY KEY,
+  batch_id INT REFERENCES vi_batches(id) ON DELETE CASCADE,
+  barcode VARCHAR(100) NOT NULL,
+  status VARCHAR(20) DEFAULT 'pending',
+  reason VARCHAR(100),
+  remarks TEXT,
+  scanned_by VARCHAR(100),
+  scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(batch_id, barcode)
 );
 
 CREATE TABLE IF NOT EXISTS qi (
