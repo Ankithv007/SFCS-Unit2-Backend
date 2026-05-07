@@ -5,7 +5,7 @@ const generateBatchNumber = async () => {
     const date = new Date();
     const dateStr = date.toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
     const prefix = `PTH${dateStr}`;
-    
+
     const lastBatch = await pool.query(`
         SELECT batch_number FROM pth_batches 
         WHERE batch_number LIKE $1 
@@ -21,8 +21,17 @@ const generateBatchNumber = async () => {
 };
 
 export const createBatch = async (req: Request, res: Response) => {
-    const { work_order_id, created_by } = req.body;
     try {
+        console.log("Incoming Create Batch Request:", req.body);
+        const { work_order_id, created_by } = req.body;
+
+        if (!work_order_id) {
+            return res.status(400).json({ error: "work_order_id is required" });
+        }
+        if (!created_by) {
+            return res.status(400).json({ error: "created_by is required" });
+        }
+
         const batch_number = await generateBatchNumber();
         const result = await pool.query(
             `INSERT INTO pth_batches (work_order_id, batch_number, created_by) 
@@ -30,19 +39,27 @@ export const createBatch = async (req: Request, res: Response) => {
             [work_order_id, batch_number, created_by]
         );
         res.status(201).json(result.rows[0]);
-    } catch (err) {
-        console.error("Error creating PTH batch:", err);
-        res.status(500).json({ error: "Failed to create batch" });
+    } catch (err: any) {
+        console.error("❌ Error creating PTH batch:", err);
+        res.status(500).json({ error: "Failed to create batch: " + err.message });
     }
 };
 
 export const getBatches = async (req: Request, res: Response) => {
     try {
         const result = await pool.query(`
-            SELECT b.*, w.wo_number, w.quantity as wo_qty,
-            (SELECT COUNT(*) FROM pth_scans WHERE batch_id = b.id) as scanned_count
+            SELECT 
+                b.*, 
+                w.wo_number, 
+                w.quantity as wo_qty,
+                COUNT(s.id) as scanned_qty,
+                COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
+                COUNT(CASE WHEN s.status IN ('rework', 'REWORK') THEN 1 END) as rework,
+                COUNT(CASE WHEN s.status IN ('debug', 'DEBUG') THEN 1 END) as debug
             FROM pth_batches b
             JOIN work_orders w ON b.work_order_id = w.id
+            LEFT JOIN pth_scans s ON s.batch_id = b.id
+            GROUP BY b.id, w.wo_number, w.quantity
             ORDER BY b.created_at DESC
         `);
         res.status(200).json(result.rows);
@@ -81,8 +98,8 @@ export const createPthScan = async (req: Request, res: Response) => {
     const { work_order_id, batch_id, barcode, scanned_by } = req.body;
     try {
         const result = await pool.query(
-            `INSERT INTO pth_scans (work_order_id, batch_id, barcode, scanned_by) 
-             VALUES ($1, $2, $3, $4) RETURNING *`,
+            `INSERT INTO pth_scans (work_order_id, batch_id, barcode, scanned_by, status) 
+             VALUES ($1, $2, $3, $4, 'accepted') RETURNING *`,
             [work_order_id, batch_id, barcode, scanned_by]
         );
         res.status(201).json(result.rows[0]);
@@ -106,6 +123,23 @@ export const getScansByBatchId = async (req: Request, res: Response) => {
     } catch (err) {
         console.error("Error fetching PTH batch scans:", err);
         res.status(500).json({ error: "Failed to fetch scans" });
+    }
+};
+
+export const updateScanStatus = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { status, remarks } = req.body;
+    try {
+        await pool.query(
+            `UPDATE pth_scans 
+             SET status = $1, remarks = $2 
+             WHERE id = $3`,
+            [status, remarks, id]
+        );
+        res.status(200).json({ message: "Updated" });
+    } catch (err) {
+        console.error("Error updating PTH scan status:", err);
+        res.status(500).json({ error: "Failed to update status" });
     }
 };
 

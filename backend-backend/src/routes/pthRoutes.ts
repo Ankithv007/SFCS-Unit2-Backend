@@ -1,12 +1,13 @@
 import { Router } from 'express';
-import { 
+import {
     getPthDetailsByWoId,
     createBatch,
     getBatches,
     completeBatch,
     deleteBatch,
-    createPthScan, 
-    getScansByBatchId
+    createPthScan,
+    getScansByBatchId,
+    updateScanStatus
 } from '../controllers/pthController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
@@ -21,6 +22,7 @@ router.delete('/batch/:id', authenticateToken, deleteBatch);
 // Scanning
 router.post('/scan', authenticateToken, createPthScan);
 router.get('/scan/:batchId', authenticateToken, getScansByBatchId); // Changed from /scans to /scan
+router.put('/scan/:id/status', authenticateToken, updateScanStatus);
 router.get('/details/:id', authenticateToken, getPthDetailsByWoId);
 
 export default router;
