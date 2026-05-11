@@ -1,27 +1,9 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 
-const generateBatchNumber = async () => {
-    const date = new Date();
-    const dateStr = date.toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
-    const prefix = `PTH${dateStr}`;
-
-    const lastBatch = await pool.query(`
-        SELECT batch_number FROM pth_batches 
-        WHERE batch_number LIKE $1 
-        ORDER BY id DESC LIMIT 1
-    `, [`${prefix}%`]);
-
-    let sequence = '0001';
-    if (lastBatch.rowCount && lastBatch.rowCount > 0) {
-        const lastNum = parseInt(lastBatch.rows[0].batch_number.slice(-4));
-        sequence = String(lastNum + 1).padStart(4, '0');
-    }
-    return `${prefix}${sequence}`;
-};
-
 export const createBatch = async (req: Request, res: Response) => {
     try {
+        console.log("Incoming Create Batch Request:", req.body);
         const { work_order_id, created_by } = req.body;
 
         if (!work_order_id) {
@@ -31,7 +13,13 @@ export const createBatch = async (req: Request, res: Response) => {
             return res.status(400).json({ error: "created_by is required" });
         }
 
-        const batch_number = await generateBatchNumber();
+        // Fetch Work Order number to use as Batch Number
+        const woResult = await pool.query('SELECT wo_number FROM work_orders WHERE id = $1', [work_order_id]);
+        if (woResult.rowCount === 0) {
+            return res.status(404).json({ error: "Work Order not found" });
+        }
+        const batch_number = woResult.rows[0].wo_number;
+
         const result = await pool.query(
             `INSERT INTO pth_batches (work_order_id, batch_number, created_by) 
              VALUES ($1, $2, $3) RETURNING *`,
@@ -40,6 +28,9 @@ export const createBatch = async (req: Request, res: Response) => {
         res.status(201).json(result.rows[0]);
     } catch (err: any) {
         console.error("❌ Error creating PTH batch:", err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: "Batch for this Work Order already exists" });
+        }
         res.status(500).json({ error: "Failed to create batch: " + err.message });
     }
 };
@@ -50,6 +41,7 @@ export const getBatches = async (req: Request, res: Response) => {
             SELECT 
                 b.*, 
                 w.wo_number, 
+                w.customer_name,
                 w.quantity as wo_qty,
                 COUNT(s.id) as scanned_qty,
                 COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
@@ -58,7 +50,7 @@ export const getBatches = async (req: Request, res: Response) => {
             FROM pth_batches b
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN pth_scans s ON s.batch_id = b.id
-            GROUP BY b.id, w.wo_number, w.quantity
+            GROUP BY b.id, w.wo_number, w.customer_name, w.quantity
             ORDER BY b.created_at DESC
         `);
         res.status(200).json(result.rows);
@@ -96,23 +88,32 @@ export const deleteBatch = async (req: Request, res: Response) => {
 export const createPthScan = async (req: Request, res: Response) => {
     const { work_order_id, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
     try {
-        // Ghost Removal Logic
         const existingScan = await pool.query(
-            "SELECT * FROM pth_scans WHERE barcode = $1 AND batch_id = $2 ORDER BY scanned_at DESC LIMIT 1",
-            [barcode, batch_id]
+            "SELECT * FROM pth_scans WHERE barcode = $1 ORDER BY scanned_at DESC LIMIT 1",
+            [barcode]
         );
 
         if (existingScan.rows.length > 0) {
             const scan = existingScan.rows[0];
-            if (scan.status.toLowerCase() === 'accepted') {
+            const currentStatus = scan.status.toLowerCase();
+            
+            if (currentStatus === 'accepted') {
                 return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
             }
-            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks !== 'Fixed') {
+            
+            if ((currentStatus === 'remark' || currentStatus === 'debug') && 
+                (!scan.resolution_remarks || scan.resolution_remarks.toLowerCase() !== 'fixed')) {
                 return res.status(400).json({ error: "Barcode is in Remark/Debug and not yet fixed" });
             }
-            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks === 'Fixed') {
-                await pool.query("DELETE FROM pth_scans WHERE barcode = $1 AND batch_id = $2", [barcode, batch_id]);
-            }
+        }
+
+        // If the incoming status is 'accepted', delete any existing 'remark' or 'debug' records 
+        // to prevent duplicate entries and ensure UI cleanliness
+        if (status && status.toLowerCase() === 'accepted') {
+            await pool.query(
+                "DELETE FROM pth_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('remark', 'REMARK', 'debug', 'DEBUG')",
+                [barcode, batch_id]
+            );
         }
 
         const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? new Date() : null);

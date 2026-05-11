@@ -40,7 +40,7 @@ export const getBatches = async (req: Request, res: Response) => {
                 b.*, 
                 w.wo_number, 
                 w.customer_name,
-                (SELECT COUNT(*) FROM pcba_fct_scans pfs JOIN pcba_fct_batches pfb ON pfs.batch_id = pfb.id WHERE pfb.work_order_id = w.id AND pfs.status IN ('accepted', 'ACCEPTED')) as wo_qty,
+                (SELECT COUNT(*) FROM vi_scans vs JOIN vi_batches vb ON vs.batch_id = vb.id WHERE vb.work_order_id = w.id AND vs.status IN ('accepted', 'ACCEPTED')) as wo_qty,
                 COUNT(s.id) as scanned_qty,
                 COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
                 COUNT(CASE WHEN s.status IN ('remark', 'REMARK') THEN 1 END) as remark,
@@ -72,23 +72,33 @@ export const deleteBatch = async (req: Request, res: Response) => {
 export const createScan = async (req: Request, res: Response) => {
     const { batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
     try {
-        // Ghost Removal Logic
-        const existingScan = await pool.query(
+        // If the item was previously remarked but is now 'Fixed', delete the old record to allow re-scanning
+                        const existingScan = await pool.query(
             "SELECT * FROM qa_scans WHERE barcode = $1 AND batch_id = $2 ORDER BY scanned_at DESC LIMIT 1",
             [barcode, batch_id]
         );
 
         if (existingScan.rows.length > 0) {
             const scan = existingScan.rows[0];
-            if (scan.status.toLowerCase() === 'accepted') {
+            const currentStatus = scan.status.toLowerCase();
+            
+            if (currentStatus === 'accepted') {
                 return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
             }
-            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks !== 'Fixed') {
+            
+            if ((currentStatus === 'remark' || currentStatus === 'debug') && 
+                (!scan.resolution_remarks || scan.resolution_remarks.toLowerCase() !== 'fixed')) {
                 return res.status(400).json({ error: "Barcode is in Remark/Debug and not yet fixed" });
             }
-            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks === 'Fixed') {
-                await pool.query("DELETE FROM qa_scans WHERE barcode = $1 AND batch_id = $2", [barcode, batch_id]);
-            }
+        }
+
+        // If the incoming status is 'accepted', delete any existing 'remark' or 'debug' records 
+        // to prevent duplicate entries and ensure UI cleanliness
+        if (status && status.toLowerCase() === 'accepted') {
+            await pool.query(
+                "DELETE FROM qa_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('remark', 'REMARK', 'debug', 'DEBUG')",
+                [barcode, batch_id]
+            );
         }
 
         // Strict Check: Barcode must be accepted in VI
