@@ -14,7 +14,7 @@ router.post('/batch', createBatch);
 router.get('/batch', getBatches);
 router.delete('/batch/:id', deleteBatch);
 router.post('/scan', createScan);
-router.get('/batch/:batchId/scans', getScansByBatchId);
-router.put('/scan/:id', updateScanStatus);
+router.get('/scan/:batchId', getScansByBatchId);
+router.put('/scan/:id/status', updateScanStatus);
 
 export default router;
