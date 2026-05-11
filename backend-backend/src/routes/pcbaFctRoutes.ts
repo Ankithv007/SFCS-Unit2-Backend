@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createPcbaFct, 
-    getAllPcbaFct, 
-    getPcbaFctById, 
-    updatePcbaFct, 
-    deletePcbaFct 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/pcbaFctController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createPcbaFct);
-router.get('/', getAllPcbaFct);
-router.get('/:id', getPcbaFctById);
-router.put('/:id', updatePcbaFct);
-router.delete('/:id', deletePcbaFct);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;

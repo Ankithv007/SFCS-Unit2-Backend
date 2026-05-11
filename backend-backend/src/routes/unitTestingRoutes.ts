@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createUnitTesting, 
-    getAllUnitTesting, 
-    getUnitTestingById, 
-    updateUnitTesting, 
-    deleteUnitTesting 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/unitTestingController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createUnitTesting);
-router.get('/', getAllUnitTesting);
-router.get('/:id', getUnitTestingById);
-router.put('/:id', updateUnitTesting);
-router.delete('/:id', deleteUnitTesting);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;

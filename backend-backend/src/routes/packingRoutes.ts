@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createPacking, 
-    getAllPacking, 
-    getPackingById, 
-    updatePacking, 
-    deletePacking 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/packingController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createPacking);
-router.get('/', getAllPacking);
-router.get('/:id', getPackingById);
-router.put('/:id', updatePacking);
-router.delete('/:id', deletePacking);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;

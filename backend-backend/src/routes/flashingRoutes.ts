@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createFlashing, 
-    getAllFlashings, 
-    getFlashingById, 
-    updateFlashing, 
-    deleteFlashing 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/flashingController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createFlashing);
-router.get('/', getAllFlashings);
-router.get('/:id', getFlashingById);
-router.put('/:id', updateFlashing);
-router.delete('/:id', deleteFlashing);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;

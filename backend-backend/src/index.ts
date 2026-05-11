@@ -8,12 +8,16 @@ import { createLogger } from './utils/logger';
 import workOrderRoutes from './routes/workOrderRoutes';
 import pthRoutes from './routes/pthRoutes';
 import viRoutes from './routes/viRoutes';
+import qaRoutes from './routes/qaRoutes';
 import qiRoutes from './routes/qiRoutes';
 import flashingRoutes from './routes/flashingRoutes';
 import pcbaFctRoutes from './routes/pcbaFctRoutes';
 import assemblyRoutes from './routes/assemblyRoutes';
 import unitTestingRoutes from './routes/unitTestingRoutes';
 import packingRoutes from './routes/packingRoutes';
+import remarkRoutes from './routes/remarkRoutes';
+import debugRoutes from './routes/debugRoutes';
+import trackRoutes from './routes/trackRoutes';
 
 const logger = createLogger('BACKEND');
 const app = express();
@@ -32,12 +36,16 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use('/api/backend/work-order', workOrderRoutes);
 app.use('/api/backend/pth', pthRoutes);
 app.use('/api/backend/vi', viRoutes);
+app.use('/api/backend/qa', qaRoutes);
 app.use('/api/backend/qi', qiRoutes);
 app.use('/api/backend/flashing', flashingRoutes);
 app.use('/api/backend/pcba-fct', pcbaFctRoutes);
 app.use('/api/backend/assembly', assemblyRoutes);
 app.use('/api/backend/unit-testing', unitTestingRoutes);
 app.use('/api/backend/packing', packingRoutes);
+app.use('/api/backend/remark', remarkRoutes);
+app.use('/api/backend/debug', debugRoutes);
+app.use('/api/backend/track', trackRoutes);
 
 // Root Route
 app.get('/', (req: Request, res: Response) => {

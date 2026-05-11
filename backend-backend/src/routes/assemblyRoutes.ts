@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createAssembly, 
-    getAllAssemblies, 
-    getAssemblyById, 
-    updateAssembly, 
-    deleteAssembly 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/assemblyController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createAssembly);
-router.get('/', getAllAssemblies);
-router.get('/:id', getAssemblyById);
-router.put('/:id', updateAssembly);
-router.delete('/:id', deleteAssembly);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;

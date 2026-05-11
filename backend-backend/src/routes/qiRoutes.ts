@@ -1,18 +1,20 @@
-import express from 'express';
+import { Router } from 'express';
 import { 
-    createQi, 
-    getAllQi, 
-    getQiById, 
-    updateQi, 
-    deleteQi 
+    createBatch, 
+    getBatches, 
+    deleteBatch, 
+    createScan, 
+    getScansByBatchId, 
+    updateScanStatus 
 } from '../controllers/qiController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/', createQi);
-router.get('/', getAllQi);
-router.get('/:id', getQiById);
-router.put('/:id', updateQi);
-router.delete('/:id', deleteQi);
+router.post('/batch', createBatch);
+router.get('/batch', getBatches);
+router.delete('/batch/:id', deleteBatch);
+router.post('/scan', createScan);
+router.get('/batch/:batchId/scans', getScansByBatchId);
+router.put('/scan/:id', updateScanStatus);
 
 export default router;
