@@ -53,7 +53,7 @@ export const getBatches = async (req: Request, res: Response) => {
                 w.quantity as wo_qty,
                 COUNT(s.id) as scanned_qty,
                 COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
-                COUNT(CASE WHEN s.status IN ('rework', 'REWORK') THEN 1 END) as rework,
+                COUNT(CASE WHEN s.status IN ('remark', 'REMARK') THEN 1 END) as remark,
                 COUNT(CASE WHEN s.status IN ('debug', 'DEBUG') THEN 1 END) as debug
             FROM vi_batches b
             JOIN work_orders w ON b.work_order_id = w.id
@@ -94,13 +94,32 @@ export const deleteBatch = async (req: Request, res: Response) => {
 };
 
 export const createViScan = async (req: Request, res: Response) => {
-    const { batch_id, barcode, scanned_by } = req.body;
+    const { batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
     try {
+        // Ghost Removal Logic
+        const existingScan = await pool.query(
+            "SELECT * FROM vi_scans WHERE barcode = $1 AND batch_id = $2 ORDER BY scanned_at DESC LIMIT 1",
+            [barcode, batch_id]
+        );
+
+        if (existingScan.rows.length > 0) {
+            const scan = existingScan.rows[0];
+            if (scan.status.toLowerCase() === 'accepted') {
+                return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
+            }
+            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks !== 'Fixed') {
+                return res.status(400).json({ error: "Barcode is in Remark/Debug and not yet fixed" });
+            }
+            if ((scan.status.toLowerCase() === 'remark' || scan.status.toLowerCase() === 'debug') && scan.resolution_remarks === 'Fixed') {
+                await pool.query("DELETE FROM vi_scans WHERE barcode = $1 AND batch_id = $2", [barcode, batch_id]);
+            }
+        }
+
         // 🔥 validate from PTH
         const check = await pool.query(
             `SELECT * FROM pth_scans 
              WHERE barcode = $1 
-             AND status = 'ACCEPTED'`,
+             AND status IN ('accepted', 'ACCEPTED')`,
             [barcode]
         );
 
@@ -110,10 +129,13 @@ export const createViScan = async (req: Request, res: Response) => {
             });
         }
 
+        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? new Date() : null);
+        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? remarks : null);
+
         const result = await pool.query(
-            `INSERT INTO vi_scans (batch_id, barcode, scanned_by, status) 
-             VALUES ($1, $2, $3, 'accepted') RETURNING *`,
-            [batch_id, barcode, scanned_by]
+            `INSERT INTO vi_scans (batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            [batch_id, barcode, scanned_by, status || 'accepted', remarks, resolution_remarks, final_failed_at, final_failed_remarks]
         );
         res.status(201).json(result.rows[0]);
     } catch (err: any) {

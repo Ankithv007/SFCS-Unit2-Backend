@@ -1,7 +1,21 @@
+# Ignore everything in the root directory by default
+/*
+
+# Whitelist the specific backend module folders
+!/backend-backend/
+!/backend-inventory/
+!/backend-login/
+!/backend-pretest/
+!/backend-qc-inspection/
+!/backend-smt/
+!/backend-vacuum-leak-test/
+
+# Allow this .gitignore file itself
+!.gitignore
+
+# Standard ignores for subdirectories
 **/node_modules/
 **/dist/
 **/.env
-.env
 .DS_Store
-coverage/
 .vscode/
