@@ -15,7 +15,7 @@ import pcbaFctRoutes from './routes/pcbaFctRoutes';
 import assemblyRoutes from './routes/assemblyRoutes';
 import unitTestingRoutes from './routes/unitTestingRoutes';
 import packingRoutes from './routes/packingRoutes';
-import remarkRoutes from './routes/remarkRoutes';
+import reworkRoutes from './routes/reworkRoutes';
 import debugRoutes from './routes/debugRoutes';
 import trackRoutes from './routes/trackRoutes';
 
@@ -43,7 +43,7 @@ app.use('/api/backend/pcba-fct', pcbaFctRoutes);
 app.use('/api/backend/assembly', assemblyRoutes);
 app.use('/api/backend/unit-testing', unitTestingRoutes);
 app.use('/api/backend/packing', packingRoutes);
-app.use('/api/backend/remark', remarkRoutes);
+app.use('/api/backend/rework', reworkRoutes);
 app.use('/api/backend/debug', debugRoutes);
 app.use('/api/backend/track', trackRoutes);
 

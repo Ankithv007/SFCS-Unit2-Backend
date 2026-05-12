@@ -44,7 +44,7 @@ export const getBatches = async (req: Request, res: Response) => {
                 (SELECT COUNT(*) FROM pth_scans WHERE work_order_id = w.id AND status IN ('accepted', 'ACCEPTED')) as wo_qty,
                 COUNT(s.id) as scanned_qty,
                 COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
-                COUNT(CASE WHEN s.status IN ('remark', 'REMARK') THEN 1 END) as remark,
+                COUNT(CASE WHEN s.status IN ('rework', 'REWORK') THEN 1 END) as rework,
                 COUNT(CASE WHEN s.status IN ('debug', 'DEBUG') THEN 1 END) as debug
             FROM vi_batches b
             JOIN work_orders w ON b.work_order_id = w.id
@@ -87,7 +87,7 @@ export const deleteBatch = async (req: Request, res: Response) => {
 export const createViScan = async (req: Request, res: Response) => {
     const { batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
     try {
-        // If the item was previously remarked but is now 'Fixed', delete the old record to allow re-scanning
+        // If the item was previously reworked but is now 'Fixed', delete the old record to allow re-scanning
         const existingScan = await pool.query(
             "SELECT * FROM vi_scans WHERE barcode = $1 AND batch_id = $2 ORDER BY scanned_at DESC LIMIT 1",
             [barcode, batch_id]
@@ -101,17 +101,17 @@ export const createViScan = async (req: Request, res: Response) => {
                 return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
             }
             
-            if ((currentStatus === 'remark' || currentStatus === 'debug') && 
+            if ((currentStatus === 'rework' || currentStatus === 'debug') && 
                 (!scan.resolution_remarks || scan.resolution_remarks.toLowerCase() !== 'fixed')) {
-                return res.status(400).json({ error: "Barcode is in Remark/Debug and not yet fixed" });
+                return res.status(400).json({ error: "Barcode is in Rework/Debug and not yet fixed" });
             }
         }
 
-        // If the incoming status is 'accepted', delete any existing 'remark' or 'debug' records 
+        // If the incoming status is 'accepted', delete any existing 'rework' or 'debug' records 
         // to prevent duplicate entries and ensure UI cleanliness
         if (status && status.toLowerCase() === 'accepted') {
             await pool.query(
-                "DELETE FROM vi_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('remark', 'REMARK', 'debug', 'DEBUG')",
+                "DELETE FROM vi_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('rework', 'REWORK', 'debug', 'DEBUG')",
                 [barcode, batch_id]
             );
         }
@@ -130,8 +130,8 @@ export const createViScan = async (req: Request, res: Response) => {
             });
         }
 
-        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? new Date() : null);
-        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? remarks : null);
+        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? new Date() : null);
+        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? remarks : null);
 
         const result = await pool.query(
             `INSERT INTO vi_scans (batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,

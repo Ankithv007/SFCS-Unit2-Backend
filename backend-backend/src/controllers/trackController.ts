@@ -32,7 +32,7 @@ export const trackBarcode = async (req: Request, res: Response) => {
                 UNION ALL
                 SELECT 'Packing' as station, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks FROM packing_scans WHERE barcode = $1
                 UNION ALL
-                SELECT 'Remark' as station, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks FROM remark_scans WHERE barcode = $1
+                SELECT 'Rework' as station, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks FROM remark_scans WHERE barcode = $1
                 UNION ALL
                 SELECT 'Debug' as station, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks FROM debug_scans WHERE barcode = $1
                 ORDER BY scanned_at ASC
