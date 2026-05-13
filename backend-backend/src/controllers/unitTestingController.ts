@@ -1,21 +1,16 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
+import { sendSuccess, sendError } from '../utils/response';
+import { processMESScan } from '../utils/mesLogic';
 
 export const createBatch = async (req: Request, res: Response) => {
     try {
         const { work_order_id, created_by } = req.body;
-
-        if (!work_order_id) {
-            return res.status(400).json({ error: "work_order_id is required" });
-        }
-        if (!created_by) {
-            return res.status(400).json({ error: "created_by is required" });
-        }
+        if (!work_order_id) return sendError(res, "work_order_id is required");
+        if (!created_by) return sendError(res, "created_by is required");
 
         const woResult = await pool.query('SELECT wo_number FROM work_orders WHERE id = $1', [work_order_id]);
-        if (woResult.rowCount === 0) {
-            return res.status(404).json({ error: "Work Order not found" });
-        }
+        if (woResult.rowCount === 0) return sendError(res, "Work Order not found", 404);
         const batch_number = woResult.rows[0].wo_number;
 
         const result = await pool.query(
@@ -23,13 +18,10 @@ export const createBatch = async (req: Request, res: Response) => {
              VALUES ($1, $2, $3) RETURNING *`,
             [work_order_id, batch_number, created_by]
         );
-        res.status(201).json(result.rows[0]);
+        return sendSuccess(res, "Batch created successfully", result.rows[0]);
     } catch (err: any) {
-        console.error("❌ Error creating Unit Testing batch:", err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: "Batch for this Work Order already exists" });
-        }
-        res.status(500).json({ error: "Failed to create batch: " + err.message });
+        if (err.code === '23505') return sendError(res, "Batch for this Work Order already exists");
+        return sendError(res, err.message, 500);
     }
 };
 
@@ -40,95 +32,66 @@ export const getBatches = async (req: Request, res: Response) => {
                 b.*, 
                 w.wo_number, 
                 w.customer_name,
-                (SELECT COUNT(*) FROM assembly_scans asans JOIN assembly_batches ab ON asans.batch_id = ab.id WHERE ab.work_order_id = w.id AND asans.status IN ('accepted', 'ACCEPTED')) as wo_qty,
+                (SELECT COUNT(*) FROM assembly_scans asans JOIN assembly_batches ab ON asans.batch_id = ab.id WHERE ab.work_order_id = w.id AND asans.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as wo_qty,
                 COUNT(s.id) as scanned_qty,
-                COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED') THEN 1 END) as passed,
+                COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED') THEN 1 END) as passed,
                 COUNT(CASE WHEN s.status IN ('rework', 'REWORK') THEN 1 END) as rework,
                 COUNT(CASE WHEN s.status IN ('debug', 'DEBUG') THEN 1 END) as debug
             FROM unit_testing_batches b
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN unit_testing_scans s ON s.batch_id = b.id
+            WHERE b.is_deleted = FALSE
             GROUP BY b.id, w.wo_number, w.customer_name, w.id
             ORDER BY b.created_at DESC
         `);
-        res.status(200).json(result.rows);
-    } catch (err) {
-        console.error("Error fetching Unit Testing batches:", err);
-        res.status(500).json({ error: "Failed to fetch batches" });
+        return res.status(200).json(result.rows);
+    } catch (err: any) {
+        return sendError(res, err.message, 500);
     }
 };
 
 export const deleteBatch = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const { deleted_by } = req.body;
     try {
-        await pool.query("DELETE FROM unit_testing_batches WHERE id = $1", [id]);
-        res.status(200).json({ message: "Batch deleted" });
-    } catch (err) {
-        console.error("Error deleting Unit Testing batch:", err);
-        res.status(500).json({ error: "Failed to delete batch" });
+        await pool.query(
+            "UPDATE unit_testing_batches SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1 WHERE id = $2",
+            [deleted_by || 'system', id]
+        );
+        return sendSuccess(res, "Batch soft deleted");
+    } catch (err: any) {
+        return sendError(res, err.message, 500);
     }
 };
 
-export const createScan = async (req: Request, res: Response) => {
-    const { batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
+export const createUnitTestingScan = async (req: Request, res: Response) => {
+    const { work_order_id, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
+    const client = await pool.connect();
     try {
-        // If the item was previously reworked but is now 'Fixed', delete the old record to allow re-scanning
-                        const existingScan = await pool.query(
-            "SELECT * FROM unit_testing_scans WHERE barcode = $1 AND batch_id = $2 ORDER BY scanned_at DESC LIMIT 1",
-            [barcode, batch_id]
-        );
-
-        if (existingScan.rows.length > 0) {
-            const scan = existingScan.rows[0];
-            const currentStatus = scan.status.toLowerCase();
-            
-            if (currentStatus === 'accepted') {
-                return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
-            }
-            
-            if ((currentStatus === 'rework' || currentStatus === 'debug') && 
-                (!scan.resolution_remarks || scan.resolution_remarks.toLowerCase() !== 'fixed')) {
-                return res.status(400).json({ error: "Barcode is in Rework/Debug and not yet fixed" });
-            }
-        }
-
-        // If the incoming status is 'accepted', delete any existing 'rework' or 'debug' records 
-        // to prevent duplicate entries and ensure UI cleanliness
-        if (status && status.toLowerCase() === 'accepted') {
-            await pool.query(
-                "DELETE FROM unit_testing_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('rework', 'REWORK', 'debug', 'DEBUG')",
-                [barcode, batch_id]
-            );
-        }
-
-        // Strict Check: Barcode must be accepted in Assembly
-        const check = await pool.query(
-            `SELECT * FROM assembly_scans 
-             WHERE barcode = $1 
-             AND status IN ('accepted', 'ACCEPTED')`,
-            [barcode]
-        );
-
-        if (check.rows.length === 0) {
-            return res.status(400).json({
-                error: "Barcode not passed in Assembly station"
-            });
-        }
-
-        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? new Date() : null);
-        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? remarks : null);
-
-        const result = await pool.query(
-            `INSERT INTO unit_testing_scans (batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-            [batch_id, barcode, scanned_by, status || 'accepted', remarks, resolution_remarks, final_failed_at, final_failed_remarks]
-        );
-        res.status(201).json(result.rows[0]);
+        await client.query('BEGIN');
+        const scanResult = await processMESScan({
+            client,
+            batch_id,
+            barcode,
+            scanned_by,
+            status,
+            remarks,
+            resolution_remarks,
+            failed_at,
+            failed_remarks,
+            stage_id: 7,
+            prev_stage_id: 6,
+            batch_table: 'unit_testing_batches',
+            scans_table: 'unit_testing_scans',
+            work_order_id
+        });
+        await client.query('COMMIT');
+        return sendSuccess(res, "Barcode scanned successfully", scanResult);
     } catch (err: any) {
-        console.error("Error creating Unit Testing scan:", err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: "Barcode already scanned" });
-        }
-        res.status(500).json({ error: "Failed to scan item" });
+        await client.query('ROLLBACK');
+        return sendError(res, err.message);
+    } finally {
+        client.release();
     }
 };
 
@@ -139,10 +102,9 @@ export const getScansByBatchId = async (req: Request, res: Response) => {
             'SELECT * FROM unit_testing_scans WHERE batch_id = $1 ORDER BY scanned_at DESC',
             [batchId]
         );
-        res.status(200).json(result.rows);
-    } catch (err) {
-        console.error("Error fetching Unit Testing batch scans:", err);
-        res.status(500).json({ error: "Failed to fetch scans" });
+        return res.status(200).json(result.rows);
+    } catch (err: any) {
+        return sendError(res, err.message, 500);
     }
 };
 
@@ -151,14 +113,12 @@ export const updateScanStatus = async (req: Request, res: Response) => {
     const { status, remarks } = req.body;
     try {
         await pool.query(
-            `UPDATE unit_testing_scans 
-             SET status = $1, remarks = $2 
-             WHERE id = $3`,
+            `UPDATE unit_testing_scans SET status = $1, remarks = $2 WHERE id = $3`,
             [status, remarks, id]
         );
-        res.status(200).json({ message: "Updated" });
-    } catch (err) {
-        console.error("Error updating Unit Testing scan status:", err);
-        res.status(500).json({ error: "Failed to update status" });
+        return sendSuccess(res, "Status updated successfully");
+    } catch (err: any) {
+        return sendError(res, err.message, 500);
     }
 };
+

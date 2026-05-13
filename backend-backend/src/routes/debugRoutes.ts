@@ -1,24 +1,20 @@
-import express from 'express';
-import { 
-    createBatch, 
-    getBatches, 
-    deleteBatch, 
-    createDebugScan, 
-    getScansByBatchId, 
-    updateScanStatus,
+import { Router } from 'express';
+import { authenticateToken } from '../middleware/authMiddleware';
+import {
+    getBatches,
+    createDebugScan,
     getPendingDebugItems,
-    closePendingItem
+    getScansByBatchId,
+    deleteBatch
 } from '../controllers/debugController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/batch', createBatch);
-router.get('/batches', getBatches);
-router.delete('/batch/:id', deleteBatch);
-router.post('/scan', createDebugScan);
-router.get('/scans/:batchId', getScansByBatchId);
-router.put('/scan/:id/status', updateScanStatus);
-router.get('/pending-items', getPendingDebugItems);
-router.post('/close-item/:barcode', closePendingItem);
+router.get('/batch', authenticateToken, getBatches);
+router.delete('/batch/:id', authenticateToken, deleteBatch);
+
+router.post('/scan', authenticateToken, createDebugScan);
+router.get('/pending', authenticateToken, getPendingDebugItems);
+router.get('/scan/:batchId', authenticateToken, getScansByBatchId);
 
 export default router;

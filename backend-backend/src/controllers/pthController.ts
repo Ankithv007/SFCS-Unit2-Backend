@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
+import { sendSuccess, sendError } from '../utils/response';
 
 export const createBatch = async (req: Request, res: Response) => {
     try {
@@ -50,6 +51,7 @@ export const getBatches = async (req: Request, res: Response) => {
             FROM pth_batches b
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN pth_scans s ON s.batch_id = b.id
+            WHERE b.is_deleted = FALSE
             GROUP BY b.id, w.wo_number, w.customer_name, w.quantity
             ORDER BY b.created_at DESC
         `);
@@ -76,61 +78,55 @@ export const completeBatch = async (req: Request, res: Response) => {
 
 export const deleteBatch = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const { deleted_by } = req.body; // Expect deleted_by in request
     try {
-        await pool.query("DELETE FROM pth_batches WHERE id = $1", [id]);
-        res.status(200).json({ message: "Batch deleted" });
+        await pool.query(
+            "UPDATE pth_batches SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1 WHERE id = $2",
+            [deleted_by || 'system', id]
+        );
+        res.status(200).json({ message: "Batch soft deleted" });
     } catch (err) {
         console.error("Error deleting PTH batch:", err);
         res.status(500).json({ error: "Failed to delete batch" });
     }
 };
 
+
+import { processMESScan } from '../utils/mesLogic';
+
 export const createPthScan = async (req: Request, res: Response) => {
     const { work_order_id, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
+    const client = await pool.connect();
+
     try {
-        const existingScan = await pool.query(
-            "SELECT * FROM pth_scans WHERE barcode = $1 ORDER BY scanned_at DESC LIMIT 1",
-            [barcode]
-        );
+        await client.query('BEGIN');
 
-        if (existingScan.rows.length > 0) {
-            const scan = existingScan.rows[0];
-            const currentStatus = scan.status.toLowerCase();
-            
-            if (currentStatus === 'accepted') {
-                return res.status(400).json({ error: "Barcode already scanned and passed at this station" });
-            }
-            
-            if ((currentStatus === 'rework' || currentStatus === 'debug') && 
-                (!scan.resolution_remarks || scan.resolution_remarks.toLowerCase() !== 'fixed')) {
-                return res.status(400).json({ error: "Barcode is in Rework/Debug and not yet fixed" });
-            }
-        }
+        const scanResult = await processMESScan({
+            client,
+            batch_id,
+            barcode,
+            scanned_by,
+            status,
+            remarks,
+            resolution_remarks,
+            failed_at,
+            failed_remarks,
+            stage_id: 1,
+            prev_stage_id: null,
+            batch_table: 'pth_batches',
+            scans_table: 'pth_scans',
+            work_order_id
+        });
 
-        // If the incoming status is 'accepted', delete any existing 'rework' or 'debug' records 
-        // to prevent duplicate entries and ensure UI cleanliness
-        if (status && status.toLowerCase() === 'accepted') {
-            await pool.query(
-                "DELETE FROM pth_scans WHERE barcode = $1 AND batch_id = $2 AND status IN ('rework', 'REWORK', 'debug', 'DEBUG')",
-                [barcode, batch_id]
-            );
-        }
+        await client.query('COMMIT');
+        return sendSuccess(res, "Barcode scanned successfully", scanResult);
 
-        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? new Date() : null);
-        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'rework' || status.toLowerCase() === 'debug')) ? remarks : null);
-
-        const result = await pool.query(
-            `INSERT INTO pth_scans (work_order_id, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [work_order_id, batch_id, barcode, scanned_by, status || 'accepted', remarks, resolution_remarks, final_failed_at, final_failed_remarks]
-        );
-        res.status(201).json(result.rows[0]);
     } catch (err: any) {
-        console.error("Error creating PTH scan:", err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: "Barcode already scanned" });
-        }
-        res.status(500).json({ error: "Failed to scan item" });
+        await client.query('ROLLBACK');
+        console.error("Error in createPthScan:", err);
+        return sendError(res, err.message || "Failed to process scan");
+    } finally {
+        client.release();
     }
 };
 
@@ -138,7 +134,26 @@ export const getScansByBatchId = async (req: Request, res: Response) => {
     const { batchId } = req.params;
     try {
         const result = await pool.query(
-            'SELECT * FROM pth_scans WHERE batch_id = $1 ORDER BY scanned_at DESC',
+            `SELECT 
+                h.barcode,
+                h.scanned_by,
+                h.scanned_at,
+                h.status,
+                h.remarks,
+                COALESCE(
+                    h.failed_at,
+                    (SELECT rs.scanned_at FROM rework_scans rs WHERE rs.barcode = h.barcode ORDER BY rs.scanned_at DESC LIMIT 1),
+                    (SELECT ds.scanned_at FROM debug_scans ds WHERE ds.barcode = h.barcode ORDER BY ds.scanned_at DESC LIMIT 1)
+                ) as remark_debug_time,
+                COALESCE(
+                    h.failed_remarks,
+                    (SELECT rs.remarks FROM rework_scans rs WHERE rs.barcode = h.barcode ORDER BY rs.scanned_at DESC LIMIT 1),
+                    (SELECT ds.remarks FROM debug_scans ds WHERE ds.barcode = h.barcode ORDER BY ds.scanned_at DESC LIMIT 1),
+                    h.resolution_remarks
+                ) as remark_debug_remarks
+             FROM pth_scans h
+             WHERE h.batch_id = $1
+             ORDER BY h.scanned_at DESC`,
             [batchId]
         );
         res.status(200).json(result.rows);
@@ -175,3 +190,4 @@ export const getPthDetailsByWoId = async (req: Request, res: Response) => {
         res.status(500).json({ error: "Failed to fetch details" });
     }
 };
+

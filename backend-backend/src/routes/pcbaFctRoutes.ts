@@ -1,20 +1,18 @@
 import { Router } from 'express';
-import { 
-    createBatch, 
-    getBatches, 
-    deleteBatch, 
-    createScan, 
-    getScansByBatchId, 
-    updateScanStatus 
+import { authenticateToken } from '../middleware/authMiddleware';
+import {
+    getBatches,
+    deleteBatch,
+    createPcbaFctScan,
+    getScansByBatchId
 } from '../controllers/pcbaFctController';
 
 const router = Router();
 
-router.post('/batch', createBatch);
-router.get('/batch', getBatches);
-router.delete('/batch/:id', deleteBatch);
-router.post('/scan', createScan);
-router.get('/scan/:batchId', getScansByBatchId);
-router.put('/scan/:id/status', updateScanStatus);
+router.get('/batch', authenticateToken, getBatches);
+router.delete('/batch/:id', authenticateToken, deleteBatch);
+
+router.post('/scan', authenticateToken, createPcbaFctScan);
+router.get('/scan/:batchId', authenticateToken, getScansByBatchId);
 
 export default router;

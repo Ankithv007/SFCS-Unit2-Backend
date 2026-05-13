@@ -77,7 +77,7 @@ export const scanComponent = async (req: Request, res: Response) => {
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [barcode]);
 
         // Duplicate Guard (5-second throttle)
-        const currentStatus = status || 'ACCEPTED';
+        const currentStatus = (status || 'ACCEPTED').toUpperCase();
         const mappedStatus = currentStatus === 'ACCEPTED' ? 'Passed' :
             currentStatus === 'REJECTED' ? 'Failed' :
                 currentStatus === 'REWORK' ? 'Rework' :
@@ -217,7 +217,7 @@ export const scanComponent = async (req: Request, res: Response) => {
         // New Scan
         const newScan = await client.query(
             'INSERT INTO iqc_components (batch_id, barcode, scanned_by, status, remarks, previous_batch) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-            [batch_id, barcode, scanned_by, status || 'ACCEPTED', remarks, previousBatchInfo]
+            [batch_id, barcode, scanned_by, (status || 'ACCEPTED').toUpperCase(), remarks, previousBatchInfo]
         );
 
         // Audit Log
@@ -283,7 +283,7 @@ export const updateComponentStatus = async (req: Request, res: Response) => {
 
         const result = await client.query(
             'UPDATE iqc_components SET status = $1, remarks = $2 WHERE id = $3 RETURNING *',
-            [status, remarks, id]
+            [status.toUpperCase(), remarks, id]
         );
 
         // Real-time Sync: If status changed to anything other than ACCEPTED, remove from Impedance
@@ -292,10 +292,10 @@ export const updateComponentStatus = async (req: Request, res: Response) => {
         }
 
         // Map status for audit
-        const mappedStatus = status === 'ACCEPTED' ? 'Passed' :
-            status === 'REJECTED' ? 'Failed' :
-                status === 'REWORK' ? 'Rework' :
-                    status === 'SCRAP' ? 'Scrap' : 'In Progress';
+        const mappedStatus = status.toUpperCase() === 'ACCEPTED' ? 'Passed' :
+            status.toUpperCase() === 'REJECTED' ? 'Failed' :
+                status.toUpperCase() === 'REWORK' ? 'Rework' :
+                    status.toUpperCase() === 'SCRAP' ? 'Scrap' : 'In Progress';
 
         // Log history
         await client.query(`

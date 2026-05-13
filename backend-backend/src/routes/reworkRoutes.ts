@@ -1,26 +1,20 @@
-import express from 'express';
-import { 
-    createBatch, 
-    getBatches, 
-    deleteBatch, 
-    createReworkScan, 
-    getScansByBatchId, 
-    updateScanStatus,
+import { Router } from 'express';
+import { authenticateToken } from '../middleware/authMiddleware';
+import {
+    getBatches,
+    createReworkScan,
     getPendingReworkItems,
-    getLatestResolution,
-    closePendingItem
+    getScansByBatchId,
+    deleteBatch
 } from '../controllers/reworkController';
 
-const router = express.Router();
+const router = Router();
 
-router.post('/batch', createBatch);
-router.get('/batches', getBatches);
-router.delete('/batch/:id', deleteBatch);
-router.post('/scan', createReworkScan);
-router.get('/scans/:batchId', getScansByBatchId);
-router.put('/scan/:id/status', updateScanStatus);
-router.get('/pending-items', getPendingReworkItems);
-router.get('/resolution/:barcode', getLatestResolution);
-router.post('/close-item/:barcode', closePendingItem);
+router.get('/batch', authenticateToken, getBatches);
+router.delete('/batch/:id', authenticateToken, deleteBatch);
+
+router.post('/scan', authenticateToken, createReworkScan);
+router.get('/pending', authenticateToken, getPendingReworkItems);
+router.get('/scan/:batchId', authenticateToken, getScansByBatchId);
 
 export default router;
