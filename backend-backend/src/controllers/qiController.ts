@@ -26,26 +26,84 @@ export const createBatch = async (req: Request, res: Response) => {
 };
 
 export const getBatches = async (req: Request, res: Response) => {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const offset = (page - 1) * limit;
+    const statusFilter = req.query.status as string;
+    const search = req.query.search as string;
+
     try {
-        const result = await pool.query(`
-            SELECT 
-                b.*, 
+        let baseQuery = `
+            SELECT * FROM (
+                SELECT 
+                b.id, b.batch_number, b.work_order_id, b.created_at, b.created_by, b.is_deleted,
                 w.wo_number, 
                 w.customer_name,
-                (SELECT COUNT(*) FROM unit_testing_scans uts JOIN unit_testing_batches utb ON uts.batch_id = utb.id WHERE utb.work_order_id = w.id AND uts.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as wo_qty,
-                COUNT(s.id) as scanned_qty,
-                COUNT(CASE WHEN s.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED') THEN 1 END) as passed,
-                COUNT(CASE WHEN s.status IN ('rework', 'REWORK') THEN 1 END) as rework,
-                COUNT(CASE WHEN s.status IN ('debug', 'DEBUG') THEN 1 END) as debug
+                w.model,
+                w.quantity as "workOrderQty",
+                (SELECT COUNT(DISTINCT ps.barcode) FROM unit_testing_scans ps JOIN unit_testing_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as "previousStagePassed",
+                stats.scanned,
+                ((SELECT COUNT(DISTINCT ps.barcode) FROM unit_testing_scans ps JOIN unit_testing_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) - stats.scanned) as pending,
+                stats.passed,
+                stats.rework,
+                stats.debug,
+                b.status
             FROM qi_batches b
             JOIN work_orders w ON b.work_order_id = w.id
-            LEFT JOIN qi_scans s ON s.batch_id = b.id
+            LEFT JOIN LATERAL (
+                WITH latest_scans AS (
+                    SELECT DISTINCT ON (barcode) status
+                    FROM qi_scans
+                    WHERE batch_id = b.id
+                    ORDER BY barcode, scanned_at DESC
+                )
+                SELECT 
+                    COUNT(*)::int as scanned,
+                    COUNT(*) FILTER (WHERE status = 'ACCEPTED')::int as passed,
+                    COUNT(*) FILTER (WHERE status = 'REWORK')::int as rework,
+                    COUNT(*) FILTER (WHERE status = 'DEBUG')::int as debug
+                FROM latest_scans
+            ) stats ON TRUE
             WHERE b.is_deleted = FALSE
-            GROUP BY b.id, w.wo_number, w.customer_name, w.id
-            ORDER BY b.created_at DESC
-        `);
-        return res.status(200).json(result.rows);
+            ) as t
+        `;
+        
+        let whereClause = '';
+        const conditions = [];
+        const queryParams: any[] = [];
+
+        if (statusFilter) {
+            if (statusFilter === 'completed') {
+                conditions.push("t.status = 'completed'");
+            } else {
+                conditions.push("t.status != 'completed'");
+            }
+        }
+
+        if (search) {
+            queryParams.push(`%${search}%`);
+            conditions.push(`(t.wo_number ILIKE $${queryParams.length} OR t.batch_number ILIKE $${queryParams.length} OR t.model ILIKE $${queryParams.length})`);
+        }
+
+        if (conditions.length > 0) {
+            whereClause = ' WHERE ' + conditions.join(' AND ');
+        }
+
+        const countResult = await pool.query(`SELECT COUNT(*) FROM (${baseQuery}) as t ${whereClause}`, queryParams);
+        const total = parseInt(countResult.rows[0].count);
+
+        const paginatedQuery = `SELECT * FROM (${baseQuery}) as t ${whereClause} ORDER BY t.created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        const result = await pool.query(paginatedQuery, [...queryParams, limit, offset]);
+        
+        return res.status(200).json({
+            data: result.rows,
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit)
+        });
     } catch (err: any) {
+        console.error("Error in getBatches for qiController.ts:", err);
         return sendError(res, err.message, 500);
     }
 };
@@ -85,8 +143,50 @@ export const createQiScan = async (req: Request, res: Response) => {
             scans_table: 'qi_scans',
             work_order_id
         });
+
+        // Fetch updated counters
+        const statsResult = await client.query(`
+            SELECT 
+                w.quantity as "workOrderQty",
+                (SELECT COUNT(DISTINCT ps.barcode) FROM pth_scans ps JOIN pth_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as "previousStagePassed",
+                stats.scanned,
+                (w.quantity - stats.scanned) as pending,
+                stats.passed,
+                stats.rework,
+                stats.debug,
+                b.status
+            FROM qi_batches b
+            JOIN work_orders w ON b.work_order_id = w.id
+            LEFT JOIN LATERAL (
+                WITH latest_scans AS (
+                    SELECT DISTINCT ON (s.barcode) s.status
+                    FROM qi_scans s
+                    JOIN qi_batches pb ON s.batch_id = pb.id
+                    WHERE pb.work_order_id = w.id
+                    ORDER BY s.barcode, s.scanned_at DESC
+                )
+                SELECT 
+                    COUNT(*)::int as scanned,
+                    COUNT(*) FILTER (WHERE status IN ('accepted', 'passed', 'ACCEPTED', 'PASSED'))::int as passed,
+                    COUNT(*) FILTER (WHERE status IN ('rework', 'REWORK'))::int as rework,
+                    COUNT(*) FILTER (WHERE status IN ('debug', 'DEBUG'))::int as debug
+                FROM latest_scans
+            ) stats ON TRUE
+            WHERE b.id = $1
+            GROUP BY b.id, w.quantity, w.id, stats.scanned, stats.passed, stats.rework, stats.debug, b.status
+        `, [batch_id]);
+
+        const counters = statsResult.rows[0];
+
         await client.query('COMMIT');
-        return sendSuccess(res, "Barcode scanned successfully", scanResult);
+        return res.status(200).json({
+            success: true,
+            message: "Scan completed successfully",
+            data: {
+                scan: scanResult,
+                counters: counters
+            }
+        });
     } catch (err: any) {
         await client.query('ROLLBACK');
         return sendError(res, err.message);
@@ -97,14 +197,29 @@ export const createQiScan = async (req: Request, res: Response) => {
 
 export const getScansByBatchId = async (req: Request, res: Response) => {
     const { batchId } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = (page - 1) * limit;
+
     try {
+        const countResult = await pool.query('SELECT COUNT(*) FROM qi_scans WHERE batch_id = $1', [batchId]);
+        const total = parseInt(countResult.rows[0].count);
+
         const result = await pool.query(
-            'SELECT * FROM qi_scans WHERE batch_id = $1 ORDER BY scanned_at DESC',
-            [batchId]
+            `SELECT * FROM qi_scans WHERE batch_id = $1 ORDER BY scanned_at DESC LIMIT $2 OFFSET $3`,
+            [batchId, limit, offset]
         );
-        return res.status(200).json(result.rows);
+        
+        return res.status(200).json({
+            data: result.rows,
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit)
+        });
     } catch (err: any) {
-        return sendError(res, err.message, 500);
+        console.error("Error fetching scans:", err);
+        return res.status(500).json({ error: err.message || "Failed to fetch scans" });
     }
 };
 

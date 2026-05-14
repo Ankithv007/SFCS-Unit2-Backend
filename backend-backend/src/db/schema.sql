@@ -62,7 +62,12 @@ CREATE TABLE IF NOT EXISTS barcode_tracking (
   current_stage_id INT REFERENCES production_stages(id),
   current_status VARCHAR(20) DEFAULT 'pending', -- pending, accepted, rework, debug, failed
   last_scanned_at TIMESTAMP,
-  last_updated_by VARCHAR(100)
+  last_updated_by VARCHAR(100),
+  last_updated_at TIMESTAMP,
+  revalidated_passed_at TIMESTAMP,
+  repair_completed_at TIMESTAMP,
+  failure_created_at TIMESTAMP,
+  failed_stage_id INT REFERENCES production_stages(id)
 );
 
 -- 6. Stage Scan History (Audit Trail)

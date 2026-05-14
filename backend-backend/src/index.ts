@@ -98,7 +98,9 @@ const setupDatabase = async () => {
             { name: 'Assembly', order: 6 },
             { name: 'Unit Testing', order: 7 },
             { name: 'QI', order: 8 },
-            { name: 'Packing', order: 9 }
+            { name: 'Packing', order: 9 },
+            { name: 'Rework', order: 10 },
+            { name: 'Debug', order: 11 }
         ];
 
         for (const stage of stages) {

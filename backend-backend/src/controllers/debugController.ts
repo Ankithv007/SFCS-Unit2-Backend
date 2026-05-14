@@ -25,46 +25,56 @@ export const createBatch = async (req: Request, res: Response) => {
 };
 
 export const getBatches = async (req: Request, res: Response) => {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const offset = (page - 1) * limit;
+    const statusFilter = req.query.status as string;
+    const search = req.query.search as string;
+
     try {
-        const result = await pool.query(`
-            SELECT *, (total_debugged + scanned_qty) as wo_qty, 0 as rework, 0 as debug FROM (
-                SELECT 
-                    b.*, 
-                    w.wo_number, 
-                    w.customer_name,
-                    COUNT(DISTINCT s.id) as scanned_qty,
-                    COUNT(DISTINCT CASE WHEN s.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED') THEN s.id END) as passed,
-                    (
-                        SELECT COUNT(DISTINCT barcode) FROM (
-                            SELECT barcode FROM pth_scans WHERE status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed') AND work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM vi_scans vs JOIN vi_batches vb ON vs.batch_id = vb.id WHERE vs.status IN ('debug', 'DEBUG') AND (vs.resolution_remarks IS NULL OR vs.resolution_remarks <> 'Fixed') AND vb.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM qa_scans qs JOIN qa_batches qb ON qs.batch_id = qb.id WHERE qs.status IN ('debug', 'DEBUG') AND (qs.resolution_remarks IS NULL OR qs.resolution_remarks <> 'Fixed') AND qb.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM flashing_scans fs JOIN flashing_batches fb ON fs.batch_id = fb.id WHERE fs.status IN ('debug', 'DEBUG') AND (fs.resolution_remarks IS NULL OR fs.resolution_remarks <> 'Fixed') AND fb.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM pcba_fct_scans pfs JOIN pcba_fct_batches pfb ON pfs.batch_id = pfb.id WHERE pfs.status IN ('debug', 'DEBUG') AND (pfs.resolution_remarks IS NULL OR pfs.resolution_remarks <> 'Fixed') AND pfb.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM assembly_scans assans JOIN assembly_batches ab ON assans.batch_id = ab.id WHERE assans.status IN ('debug', 'DEBUG') AND (assans.resolution_remarks IS NULL OR assans.resolution_remarks <> 'Fixed') AND ab.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM unit_testing_scans uts JOIN unit_testing_batches utb ON uts.batch_id = utb.id WHERE uts.status IN ('debug', 'DEBUG') AND (uts.resolution_remarks IS NULL OR uts.resolution_remarks <> 'Fixed') AND utb.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM qi_scans qis JOIN qi_batches qib ON qis.batch_id = qib.id WHERE qis.status IN ('debug', 'DEBUG') AND (qis.resolution_remarks IS NULL OR qis.resolution_remarks <> 'Fixed') AND qib.work_order_id = w.id
-                            UNION
-                            SELECT barcode FROM packing_scans ps JOIN packing_batches pb ON ps.batch_id = pb.id WHERE ps.status IN ('debug', 'DEBUG') AND (ps.resolution_remarks IS NULL OR ps.resolution_remarks <> 'Fixed') AND pb.work_order_id = w.id
-                        ) as pending
-                    ) as total_debugged
-                FROM debug_batches b
-                JOIN work_orders w ON b.work_order_id = w.id
-                LEFT JOIN debug_scans s ON s.batch_id = b.id
-                WHERE b.is_deleted = FALSE
-                GROUP BY b.id, w.wo_number, w.customer_name, w.quantity, w.id
-            ) as sub
-            ORDER BY created_at DESC
-        `);
-        return res.status(200).json(result.rows);
+        const queryParams: any[] = [];
+        let searchCondition = '';
+
+        if (search) {
+            queryParams.push(`%${search}%`);
+            searchCondition = `AND (w.wo_number ILIKE $1 OR b.batch_number ILIKE $1 OR w.model ILIKE $1)`;
+        }
+
+        const baseQuery = `
+            SELECT 
+                b.id, b.batch_number, b.work_order_id, b.created_at, b.created_by,
+                w.wo_number, w.customer_name, w.model, w.quantity as "workOrderQty",
+                ps.stage_name as "sourceStage",
+                COUNT(bt.id)::int as debug,
+                0 as rework,
+                0 as passed,
+                'in_progress' as status
+            FROM debug_batches b
+            JOIN work_orders w ON b.work_order_id = w.id
+            JOIN master_batches mb ON mb.work_order_id = w.id
+            JOIN barcode_tracking bt ON bt.batch_id = mb.id
+            JOIN production_stages ps ON bt.failed_stage_id = ps.id
+            WHERE b.is_deleted = FALSE 
+              AND bt.current_stage_id = (SELECT id FROM production_stages WHERE LOWER(stage_name) = 'debug' LIMIT 1)
+              AND bt.current_status = 'DEBUG'
+              ${searchCondition}
+            GROUP BY b.id, w.wo_number, w.customer_name, w.model, w.quantity, ps.stage_name`;
+
+        const countResult = await pool.query(`SELECT COUNT(*) FROM (${baseQuery}) as t`, queryParams);
+        const total = parseInt(countResult.rows[0].count);
+
+        const paginatedQuery = `${baseQuery} ORDER BY b.created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        const result = await pool.query(paginatedQuery, [...queryParams, limit, offset]);
+        
+        return res.status(200).json({
+            data: result.rows,
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit)
+        });
     } catch (err: any) {
+        console.error("Error in debug getBatches:", err);
         return sendError(res, err.message, 500);
     }
 };
@@ -93,67 +103,52 @@ export const createDebugScan = async (req: Request, res: Response) => {
         await client.query("SELECT * FROM barcode_tracking WHERE barcode = $1 FOR UPDATE", [barcode]);
 
         const checkQuery = `
-            SELECT station FROM (
-                SELECT 'PTH' as station FROM pth_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'VI' as station FROM vi_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'QA' as station FROM qa_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'Flashing' as station FROM flashing_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'PCBA-FCT' as station FROM pcba_fct_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'Assembly' as station FROM assembly_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'Unit Testing' as station FROM unit_testing_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'QI' as station FROM qi_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'Packing' as station FROM packing_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-                UNION ALL
-                SELECT 'Rework' as station FROM rework_scans WHERE barcode = $1 AND status IN ('debug', 'DEBUG') AND (resolution_remarks IS NULL OR resolution_remarks <> 'Fixed')
-            ) as stations LIMIT 1
+            SELECT bt.barcode, bt.failed_stage_id, ps.stage_name
+            FROM barcode_tracking bt
+            JOIN production_stages ps ON bt.failed_stage_id = ps.id
+            WHERE bt.barcode = $1 AND bt.current_stage_id = (SELECT id FROM production_stages WHERE LOWER(stage_name) = 'debug' LIMIT 1) AND bt.current_status = 'DEBUG'
         `;
-
         const checkResult = await client.query(checkQuery, [barcode]);
-        if (checkResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return sendError(res, "This item is not marked as Debug");
+        if (checkResult.rowCount === 0) {
+            throw new Error("This barcode is not in DEBUG state or already resolved.");
         }
 
-        const stage = checkResult.rows[0].station;
-        const final_failed_at = failed_at || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? new Date() : null);
-        const final_failed_remarks = failed_remarks || ((status && (status.toLowerCase() === 'remark' || status.toLowerCase() === 'debug')) ? remarks : null);
+        const failedStageId = checkResult.rows[0].failed_stage_id;
+        const originStation = (checkResult.rows[0].stage_name || 'PTH').toUpperCase();
+
+        const updateTable = (originStation === 'PCBA-FCT' ? 'pcba_fct_scans' : 
+                            originStation === 'UNIT TESTING' ? 'unit_testing_scans' : 
+                            originStation.toLowerCase().replace(/[ -]/g, '_') + '_scans');
+
+        const failedRecordRes = await client.query(
+            `SELECT scanned_at, remarks FROM ${updateTable} WHERE barcode = $1 AND status IN ('debug', 'DEBUG') ORDER BY scanned_at DESC LIMIT 1`,
+            [barcode]
+        );
+        const originalFailedAt = failedRecordRes.rows[0]?.scanned_at || new Date();
+        const originalFailedRemarks = failedRecordRes.rows[0]?.remarks || '-';
 
         const result = await client.query(
-            `INSERT INTO debug_scans (batch_id, barcode, scanned_by, status, remarks, stage, failed_at, failed_remarks, resolution_remarks) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [batch_id, barcode, scanned_by, status || 'accepted', remarks, stage, final_failed_at, final_failed_remarks,
-             (status && (status.toLowerCase() === 'accepted' || status.toLowerCase() === 'passed')) ? remarks : null]
+            `INSERT INTO debug_scans (batch_id, barcode, scanned_by, status, remarks, stage, failed_at, failed_remarks, repair_remark, repair_time) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP) RETURNING *`,
+            [batch_id, barcode, scanned_by, 'ACCEPTED', remarks || 'Fixed', originStation, originalFailedAt, originalFailedRemarks, remarks || 'Fixed']
         );
 
-        if (status && (status.toLowerCase() === 'accepted' || status.toLowerCase() === 'passed')) {
-            const stations = [
-                'pth_scans', 'vi_scans', 'qa_scans', 'flashing_scans',
-                'pcba_fct_scans', 'assembly_scans', 'unit_testing_scans',
-                'qi_scans', 'packing_scans', 'rework_scans'
-            ];
-            for (const table of stations) {
-                await client.query(
-                    `UPDATE ${table} SET resolution_remarks = 'Fixed' WHERE barcode = $1 AND status IN ('debug', 'DEBUG')`,
-                    [barcode]
-                );
-            }
-            // Update tracking to allow next scan
-            await client.query(
-                "UPDATE barcode_tracking SET current_status = 'passed', last_updated_at = CURRENT_TIMESTAMP, last_updated_by = $1 WHERE barcode = $2",
-                [scanned_by, barcode]
-            );
-        }
+        await client.query(
+            `UPDATE ${updateTable} SET resolution_remarks = 'Fixed', repair_time = CURRENT_TIMESTAMP, repair_remark = $1 WHERE barcode = $2 AND status IN ('debug', 'DEBUG')`,
+            [remarks || 'Fixed', barcode]
+        );
+
+        // Return to original failed stage so it can be scanned again in that stage
+        // e.g., if failed in PTH, return to PTH stage so operator can scan it again
+
+
+        await client.query(
+            "UPDATE barcode_tracking SET current_stage_id = $1, current_status = 'READY_FOR_RESCAN', last_updated_at = CURRENT_TIMESTAMP, last_updated_by = $2, repair_completed_at = CURRENT_TIMESTAMP WHERE barcode = $3",
+            [failedStageId, scanned_by, barcode]
+        );
 
         await client.query('COMMIT');
-        return sendSuccess(res, "Barcode scanned successfully", result.rows[0]);
+        return sendSuccess(res, "Item resolved and returned to " + originStation, result.rows[0]);
     } catch (err: any) {
         await client.query('ROLLBACK');
         return sendError(res, err.message, 500);
@@ -162,86 +157,14 @@ export const createDebugScan = async (req: Request, res: Response) => {
     }
 };
 
-export const getScansByBatchId = async (req: Request, res: Response) => {
-    const { batchId } = req.params;
+export const getScans = async (req: Request, res: Response) => {
+    const { batch_id } = req.params;
     try {
-        const result = await pool.query('SELECT * FROM debug_scans WHERE batch_id = $1', [batchId]);
-        return res.status(200).json(result.rows);
-    } catch (err: any) {
-        return sendError(res, err.message, 500);
-    }
-};
-
-export const updateScanStatus = async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const { status, remarks } = req.body;
-    try {
-        await pool.query(`UPDATE debug_scans SET status = $1, remarks = $2 WHERE id = $3`, [status, remarks, id]);
-        return sendSuccess(res, "Status updated successfully");
-    } catch (err: any) {
-        return sendError(res, err.message, 500);
-    }
-};
-
-export const closePendingItem = async (req: Request, res: Response) => {
-    const { barcode } = req.params;
-    try {
-        const stations = ['pth_scans', 'vi_scans', 'qa_scans', 'flashing_scans', 'pcba_fct_scans', 'assembly_scans', 'unit_testing_scans', 'qi_scans', 'packing_scans', 'rework_scans'];
-        for (const table of stations) {
-            await pool.query(`UPDATE ${table} SET resolution_remarks = 'Closed' WHERE barcode = $1 AND status IN ('debug', 'DEBUG')`, [barcode]);
-        }
-        return sendSuccess(res, "Item closed/dismissed");
-    } catch (err: any) {
-        return sendError(res, err.message, 500);
-    }
-};
-
-export const getPendingDebugItems = async (req: Request, res: Response) => {
-    try {
-        const query = `
-            SELECT 'PTH' as station, w.wo_number as batch_number, p.barcode, p.scanned_by, p.scanned_at, p.remarks 
-            FROM pth_scans p JOIN work_orders w ON p.work_order_id = w.id 
-            WHERE p.status IN ('debug', 'DEBUG') AND (p.resolution_remarks IS NULL OR p.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'VI' as station, vb.batch_number, vs.barcode, vs.scanned_by, vs.scanned_at, CONCAT(vs.reason, ': ', vs.remarks) as remarks 
-            FROM vi_scans vs JOIN vi_batches vb ON vs.batch_id = vb.id 
-            WHERE vs.status IN ('debug', 'DEBUG') AND (vs.resolution_remarks IS NULL OR vs.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'QA' as station, qb.batch_number, qs.barcode, qs.scanned_by, qs.scanned_at, qs.remarks 
-            FROM qa_scans qs JOIN qa_batches qb ON qs.batch_id = qb.id 
-            WHERE qs.status IN ('debug', 'DEBUG') AND (qs.resolution_remarks IS NULL OR qs.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'Flashing' as station, fb.batch_number, fs.barcode, fs.scanned_by, fs.scanned_at, fs.remarks 
-            FROM flashing_scans fs JOIN flashing_batches fb ON fs.batch_id = fb.id 
-            WHERE fs.status IN ('debug', 'DEBUG') AND (fs.resolution_remarks IS NULL OR fs.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'PCBA-FCT' as station, pfb.batch_number, pfs.barcode, pfs.scanned_by, pfs.scanned_at, pfs.remarks 
-            FROM pcba_fct_scans pfs JOIN pcba_fct_batches pfb ON pfs.batch_id = pfb.id 
-            WHERE pfs.status IN ('debug', 'DEBUG') AND (pfs.resolution_remarks IS NULL OR pfs.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'Assembly' as station, ab.batch_number, assans.barcode, assans.scanned_by, assans.scanned_at, assans.remarks 
-            FROM assembly_scans assans JOIN assembly_batches ab ON assans.batch_id = ab.id 
-            WHERE assans.status IN ('debug', 'DEBUG') AND (assans.resolution_remarks IS NULL OR assans.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'Unit Testing' as station, utb.batch_number, uts.barcode, uts.scanned_by, uts.scanned_at, uts.remarks 
-            FROM unit_testing_scans uts JOIN unit_testing_batches utb ON uts.batch_id = utb.id 
-            WHERE uts.status IN ('debug', 'DEBUG') AND (uts.resolution_remarks IS NULL OR uts.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'QI' as station, qib.batch_number, qis.barcode, qis.scanned_by, qis.scanned_at, qis.remarks 
-            FROM qi_scans qis JOIN qi_batches qib ON qis.batch_id = qib.id 
-            WHERE qis.status IN ('debug', 'DEBUG') AND (qis.resolution_remarks IS NULL OR qis.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'Packing' as station, pb.batch_number, ps.barcode, ps.scanned_by, ps.scanned_at, ps.remarks 
-            FROM packing_scans ps JOIN packing_batches pb ON ps.batch_id = pb.id 
-            WHERE ps.status IN ('debug', 'DEBUG') AND (ps.resolution_remarks IS NULL OR ps.resolution_remarks <> 'Fixed')
-            UNION ALL
-            SELECT 'Rework' as station, rb.batch_number, rs.barcode, rs.scanned_by, rs.scanned_at, rs.remarks 
-            FROM rework_scans rs JOIN rework_batches rb ON rs.batch_id = rb.id 
-            WHERE rs.status IN ('debug', 'DEBUG') AND (rs.resolution_remarks IS NULL OR rs.resolution_remarks <> 'Fixed')
-            ORDER BY scanned_at DESC
-        `;
-        const result = await pool.query(query);
-        return res.status(200).json(result.rows);
+        const result = await pool.query(
+            `SELECT * FROM debug_scans WHERE batch_id = $1 ORDER BY scanned_at DESC`,
+            [batch_id]
+        );
+        return sendSuccess(res, "Scans fetched", result.rows);
     } catch (err: any) {
         return sendError(res, err.message, 500);
     }

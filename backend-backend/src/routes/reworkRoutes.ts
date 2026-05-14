@@ -3,8 +3,7 @@ import { authenticateToken } from '../middleware/authMiddleware';
 import {
     getBatches,
     createReworkScan,
-    getPendingReworkItems,
-    getScansByBatchId,
+    getScans,
     deleteBatch
 } from '../controllers/reworkController';
 
@@ -14,7 +13,6 @@ router.get('/batch', authenticateToken, getBatches);
 router.delete('/batch/:id', authenticateToken, deleteBatch);
 
 router.post('/scan', authenticateToken, createReworkScan);
-router.get('/pending', authenticateToken, getPendingReworkItems);
-router.get('/scan/:batchId', authenticateToken, getScansByBatchId);
+router.get('/scan/:batch_id', authenticateToken, getScans);
 
 export default router;
