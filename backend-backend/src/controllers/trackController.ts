@@ -5,12 +5,35 @@ export const trackBarcode = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     if (!id || id.trim() === '') {
-        return res.status(400).json({ error: 'Barcode is required.' });
+        return res.status(400).json({ error: 'Barcode or Unit Serial Number is required.' });
     }
 
-    const barcode = id.trim().toUpperCase();
+    const inputValue = id.trim().toUpperCase();
 
     try {
+        // --- Dual Search: accept PCB barcode OR Unit Serial Number ---
+        let barcode = inputValue;
+        let unitSerialNumber: string | null = null;
+
+        // Check if input is a Unit Serial Number
+        const usnResult = await pool.query(
+            `SELECT barcode, unit_serial_number FROM unit_serial_mapping WHERE unit_serial_number = $1`,
+            [inputValue]
+        );
+        if ((usnResult.rowCount ?? 0) > 0) {
+            barcode = usnResult.rows[0].barcode;
+            unitSerialNumber = usnResult.rows[0].unit_serial_number;
+        } else {
+            // Input might be a PCB barcode — also try to find its linked USN
+            const barcodeUsnResult = await pool.query(
+                `SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`,
+                [inputValue]
+            );
+            if ((barcodeUsnResult.rowCount ?? 0) > 0) {
+                unitSerialNumber = barcodeUsnResult.rows[0].unit_serial_number;
+            }
+        }
+
         // 1. Main tracking info (current state)
         const trackingResult = await pool.query(`
             SELECT 
@@ -34,34 +57,34 @@ export const trackBarcode = async (req: Request, res: Response) => {
         `, [barcode]);
 
         if ((trackingResult.rowCount ?? 0) === 0) {
-            return res.status(404).json({ error: `Barcode "${barcode}" was not found in the system.` });
+            return res.status(404).json({ error: `"${inputValue}" was not found in the system. Please check the barcode or Unit Serial Number.` });
         }
 
         const tracking = trackingResult.rows[0];
 
         // 2. Full scan history from ALL production stage tables
         const historyResult = await pool.query(`
-            SELECT 'PTH'          AS station, 1  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM pth_scans          WHERE barcode = $1
+            SELECT 'PTH'          AS station, 1  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM pth_scans          WHERE barcode = $1
             UNION ALL
-            SELECT 'VI'           AS station, 2  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM vi_scans           WHERE barcode = $1
+            SELECT 'VI'           AS station, 2  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM vi_scans           WHERE barcode = $1
             UNION ALL
-            SELECT 'QA'           AS station, 3  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM qa_scans           WHERE barcode = $1
+            SELECT 'QA'           AS station, 3  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM qa_scans           WHERE barcode = $1
             UNION ALL
-            SELECT 'Flashing'     AS station, 4  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM flashing_scans     WHERE barcode = $1
+            SELECT 'Flashing'     AS station, 4  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM flashing_scans     WHERE barcode = $1
             UNION ALL
-            SELECT 'PCBA-FCT'     AS station, 5  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM pcba_fct_scans     WHERE barcode = $1
+            SELECT 'PCBA-FCT'     AS station, 5  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM pcba_fct_scans     WHERE barcode = $1
             UNION ALL
-            SELECT 'Assembly'     AS station, 6  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM assembly_scans     WHERE barcode = $1
+            SELECT 'Assembly'     AS station, 6  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM assembly_scans     WHERE barcode = $1
             UNION ALL
-            SELECT 'Unit Testing' AS station, 7  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM unit_testing_scans WHERE barcode = $1
+            SELECT 'Unit Testing' AS station, 7  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM unit_testing_scans WHERE barcode = $1
             UNION ALL
-            SELECT 'QI'           AS station, 8  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM qi_scans           WHERE barcode = $1
+            SELECT 'QI'           AS station, 8  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM qi_scans           WHERE barcode = $1
             UNION ALL
-            SELECT 'Packing'      AS station, 9  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time FROM packing_scans      WHERE barcode = $1
+            SELECT 'Packing'      AS station, 9  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM packing_scans      WHERE barcode = $1
             UNION ALL
-            SELECT 'Rework'       AS station, 10 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time FROM rework_scans WHERE barcode = $1
+            SELECT 'Rework'       AS station, 10 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time, unit_serial_number FROM rework_scans WHERE barcode = $1
             UNION ALL
-            SELECT 'Debug'        AS station, 11 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time FROM debug_scans  WHERE barcode = $1
+            SELECT 'Debug'        AS station, 11 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time, unit_serial_number FROM debug_scans  WHERE barcode = $1
             ORDER BY scanned_at ASC
         `, [barcode]);
 
@@ -77,6 +100,7 @@ export const trackBarcode = async (req: Request, res: Response) => {
             failed_remarks: row.failed_remarks || null,
             repair_remark: row.repair_remark || null,
             repair_time: row.repair_time || null,
+            unit_serial_number: row.unit_serial_number || null,
         }));
 
         // 3. Compute summary stats
@@ -101,6 +125,8 @@ export const trackBarcode = async (req: Request, res: Response) => {
 
         return res.status(200).json({
             barcode: tracking.barcode,
+            unit_serial_number: unitSerialNumber,
+            searched_by: inputValue !== barcode ? 'unit_serial_number' : 'barcode',
             batch_number: tracking.batch_number || '-',
             wo_number: tracking.wo_number || '-',
             customer_name: tracking.customer_name || '-',

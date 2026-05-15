@@ -15,7 +15,25 @@ export interface ScanContext {
     batch_table: string;
     scans_table: string;
     work_order_id: number;
+    unit_serial_number?: string; // External USN – required for Assembly and downstream stages
 }
+
+/**
+ * Resolve an incoming scan value to a PCB barcode + USN pair.
+ * Returns null if the value is NOT a registered Unit Serial Number.
+ * Used by Assembly, UnitTesting, QI, Packing, Rework, Debug controllers.
+ */
+export const resolveUnitSerial = async (
+    client: PoolClient,
+    value: string
+): Promise<{ pcb_barcode: string; unit_serial_number: string } | null> => {
+    const res = await client.query(
+        `SELECT barcode, unit_serial_number FROM unit_serial_mapping WHERE unit_serial_number = $1`,
+        [value.trim().toUpperCase()]
+    );
+    if ((res.rowCount ?? 0) === 0) return null;
+    return { pcb_barcode: res.rows[0].barcode, unit_serial_number: res.rows[0].unit_serial_number };
+};
 
 export const processMESScan = async (ctx: ScanContext) => {
     let { client, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks, stage_id, prev_stage_id, batch_table, scans_table, work_order_id } = ctx;
@@ -182,10 +200,16 @@ export const processMESScan = async (ctx: ScanContext) => {
         throw new Error(`Invalid barcode value: "${barcode}". Please scan a valid serial number.`);
     }
 
+    // Build INSERT — include unit_serial_number when provided (Assembly and downstream stages)
     const historyResult = await client.query(
-        `INSERT INTO ${scans_table} (batch_id, barcode, scanned_by, status, remarks) 
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [batch_id, barcode, scanned_by, finalStatus, remarks]
+        ctx.unit_serial_number
+            ? `INSERT INTO ${scans_table} (batch_id, barcode, unit_serial_number, scanned_by, status, remarks)
+               VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`
+            : `INSERT INTO ${scans_table} (batch_id, barcode, scanned_by, status, remarks)
+               VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        ctx.unit_serial_number
+            ? [batch_id, barcode, ctx.unit_serial_number, scanned_by, finalStatus, remarks]
+            : [batch_id, barcode, scanned_by, finalStatus, remarks]
     );
 
     // 6. Update Barcode Tracking

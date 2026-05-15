@@ -7,14 +7,11 @@ export const createBatch = async (req: Request, res: Response) => {
         const { work_order_id, created_by } = req.body;
         if (!work_order_id) return sendError(res, "work_order_id is required");
         if (!created_by) return sendError(res, "created_by is required");
-
         const woResult = await pool.query('SELECT wo_number FROM work_orders WHERE id = $1', [work_order_id]);
         if (woResult.rowCount === 0) return sendError(res, "Work Order not found", 404);
         const batch_number = woResult.rows[0].wo_number;
-
         const result = await pool.query(
-            `INSERT INTO debug_batches (work_order_id, batch_number, created_by) 
-             VALUES ($1, $2, $3) RETURNING *`,
+            `INSERT INTO debug_batches (work_order_id, batch_number, created_by) VALUES ($1, $2, $3) RETURNING *`,
             [work_order_id, batch_number, created_by]
         );
         return sendSuccess(res, "Batch created successfully", result.rows[0]);
@@ -28,13 +25,11 @@ export const getBatches = async (req: Request, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
     const offset = (page - 1) * limit;
-    const statusFilter = req.query.status as string;
     const search = req.query.search as string;
 
     try {
         const queryParams: any[] = [];
         let searchCondition = '';
-
         if (search) {
             queryParams.push(`%${search}%`);
             searchCondition = `AND (w.wo_number ILIKE $1 OR b.batch_number ILIKE $1 OR w.model ILIKE $1)`;
@@ -46,9 +41,7 @@ export const getBatches = async (req: Request, res: Response) => {
                 w.wo_number, w.customer_name, w.model, w.quantity as "workOrderQty",
                 ps.stage_name as "sourceStage",
                 COUNT(bt.id)::int as debug,
-                0 as rework,
-                0 as passed,
-                'in_progress' as status
+                0 as rework, 0 as passed, 'in_progress' as status
             FROM debug_batches b
             JOIN work_orders w ON b.work_order_id = w.id
             JOIN master_batches mb ON mb.work_order_id = w.id
@@ -62,17 +55,9 @@ export const getBatches = async (req: Request, res: Response) => {
 
         const countResult = await pool.query(`SELECT COUNT(*) FROM (${baseQuery}) as t`, queryParams);
         const total = parseInt(countResult.rows[0].count);
-
         const paginatedQuery = `${baseQuery} ORDER BY b.created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
         const result = await pool.query(paginatedQuery, [...queryParams, limit, offset]);
-        
-        return res.status(200).json({
-            data: result.rows,
-            total,
-            page,
-            limit,
-            totalPages: Math.ceil(total / limit)
-        });
+        return res.status(200).json({ data: result.rows, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (err: any) {
         console.error("Error in debug getBatches:", err);
         return sendError(res, err.message, 500);
@@ -83,10 +68,7 @@ export const deleteBatch = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { deleted_by } = req.body;
     try {
-        await pool.query(
-            "UPDATE debug_batches SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1 WHERE id = $2",
-            [deleted_by || 'system', id]
-        );
+        await pool.query("UPDATE debug_batches SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1 WHERE id = $2", [deleted_by || 'system', id]);
         return sendSuccess(res, "Batch soft deleted");
     } catch (err: any) {
         return sendError(res, err.message, 500);
@@ -94,21 +76,31 @@ export const deleteBatch = async (req: Request, res: Response) => {
 };
 
 export const createDebugScan = async (req: Request, res: Response) => {
-    const { batch_id, barcode, scanned_by, status, remarks, failed_at, failed_remarks } = req.body;
+    const { batch_id, barcode: inputBarcode, scanned_by, status, remarks, failed_at, failed_remarks } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // Lock barcode tracking row
-        await client.query("SELECT * FROM barcode_tracking WHERE barcode = $1 FOR UPDATE", [barcode]);
+        // --- USN Resolution ---
+        // Boards from Assembly+ use Unit Serial Number. Boards from PTH-PCBA-FCT use PCB barcode.
+        const usnCheck = await client.query(
+            `SELECT barcode, unit_serial_number FROM unit_serial_mapping WHERE unit_serial_number = $1`,
+            [(inputBarcode || '').trim().toUpperCase()]
+        );
+        const resolvedBarcode = (usnCheck.rowCount ?? 0) > 0 ? usnCheck.rows[0].barcode : (inputBarcode || '').trim().toUpperCase();
+        const resolvedUSN: string | null = (usnCheck.rowCount ?? 0) > 0 ? usnCheck.rows[0].unit_serial_number : null;
 
-        const checkQuery = `
+        // Lock barcode tracking row
+        await client.query("SELECT * FROM barcode_tracking WHERE barcode = $1 FOR UPDATE", [resolvedBarcode]);
+
+        const checkResult = await client.query(`
             SELECT bt.barcode, bt.failed_stage_id, ps.stage_name
             FROM barcode_tracking bt
             JOIN production_stages ps ON bt.failed_stage_id = ps.id
-            WHERE bt.barcode = $1 AND bt.current_stage_id = (SELECT id FROM production_stages WHERE LOWER(stage_name) = 'debug' LIMIT 1) AND bt.current_status = 'DEBUG'
-        `;
-        const checkResult = await client.query(checkQuery, [barcode]);
+            WHERE bt.barcode = $1 
+              AND bt.current_stage_id = (SELECT id FROM production_stages WHERE LOWER(stage_name) = 'debug' LIMIT 1)
+              AND bt.current_status = 'DEBUG'`, [resolvedBarcode]);
+
         if (checkResult.rowCount === 0) {
             throw new Error("This barcode is not in DEBUG state or already resolved.");
         }
@@ -116,35 +108,31 @@ export const createDebugScan = async (req: Request, res: Response) => {
         const failedStageId = checkResult.rows[0].failed_stage_id;
         const originStation = (checkResult.rows[0].stage_name || 'PTH').toUpperCase();
 
-        const updateTable = (originStation === 'PCBA-FCT' ? 'pcba_fct_scans' : 
-                            originStation === 'UNIT TESTING' ? 'unit_testing_scans' : 
+        const updateTable = (originStation === 'PCBA-FCT' ? 'pcba_fct_scans' :
+                            originStation === 'UNIT TESTING' ? 'unit_testing_scans' :
                             originStation.toLowerCase().replace(/[ -]/g, '_') + '_scans');
 
         const failedRecordRes = await client.query(
             `SELECT scanned_at, remarks FROM ${updateTable} WHERE barcode = $1 AND status IN ('debug', 'DEBUG') ORDER BY scanned_at DESC LIMIT 1`,
-            [barcode]
+            [resolvedBarcode]
         );
         const originalFailedAt = failedRecordRes.rows[0]?.scanned_at || new Date();
         const originalFailedRemarks = failedRecordRes.rows[0]?.remarks || '-';
 
         const result = await client.query(
-            `INSERT INTO debug_scans (batch_id, barcode, scanned_by, status, remarks, stage, failed_at, failed_remarks, repair_remark, repair_time) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP) RETURNING *`,
-            [batch_id, barcode, scanned_by, 'ACCEPTED', remarks || 'Fixed', originStation, originalFailedAt, originalFailedRemarks, remarks || 'Fixed']
+            `INSERT INTO debug_scans (batch_id, barcode, unit_serial_number, scanned_by, status, remarks, stage, failed_at, failed_remarks, repair_remark, repair_time)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP) RETURNING *`,
+            [batch_id, resolvedBarcode, resolvedUSN, scanned_by, 'ACCEPTED', remarks || 'Fixed', originStation, originalFailedAt, originalFailedRemarks, remarks || 'Fixed']
         );
 
         await client.query(
             `UPDATE ${updateTable} SET resolution_remarks = 'Fixed', repair_time = CURRENT_TIMESTAMP, repair_remark = $1 WHERE barcode = $2 AND status IN ('debug', 'DEBUG')`,
-            [remarks || 'Fixed', barcode]
+            [remarks || 'Fixed', resolvedBarcode]
         );
-
-        // Return to original failed stage so it can be scanned again in that stage
-        // e.g., if failed in PTH, return to PTH stage so operator can scan it again
-
 
         await client.query(
             "UPDATE barcode_tracking SET current_stage_id = $1, current_status = 'READY_FOR_RESCAN', last_updated_at = CURRENT_TIMESTAMP, last_updated_by = $2, repair_completed_at = CURRENT_TIMESTAMP WHERE barcode = $3",
-            [failedStageId, scanned_by, barcode]
+            [failedStageId, scanned_by, resolvedBarcode]
         );
 
         await client.query('COMMIT');

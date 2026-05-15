@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 import { sendSuccess, sendError } from '../utils/response';
-import { processMESScan } from '../utils/mesLogic';
+import { processMESScan, resolveUnitSerial } from '../utils/mesLogic';
 
 export const createBatch = async (req: Request, res: Response) => {
     try {
@@ -33,6 +33,7 @@ export const getBatches = async (req: Request, res: Response) => {
     const search = req.query.search as string;
 
     try {
+        // previousStagePassed = count of boards that passed PCBA-FCT AND have a USN linked
         let baseQuery = `
             SELECT * FROM (
                 SELECT 
@@ -41,9 +42,9 @@ export const getBatches = async (req: Request, res: Response) => {
                 w.customer_name,
                 w.model,
                 w.quantity as "workOrderQty",
-                (SELECT COUNT(DISTINCT ps.barcode) FROM pcba_fct_scans ps JOIN pcba_fct_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as "previousStagePassed",
+                (SELECT COUNT(*) FROM unit_serial_mapping usm WHERE usm.work_order_id = w.id) as "previousStagePassed",
                 stats.scanned,
-                ((SELECT COUNT(DISTINCT ps.barcode) FROM pcba_fct_scans ps JOIN pcba_fct_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) - stats.scanned) as pending,
+                ((SELECT COUNT(*) FROM unit_serial_mapping usm WHERE usm.work_order_id = w.id) - stats.scanned) as pending,
                 stats.passed,
                 stats.rework,
                 stats.debug,
@@ -123,14 +124,26 @@ export const deleteBatch = async (req: Request, res: Response) => {
 };
 
 export const createAssemblyScan = async (req: Request, res: Response) => {
-    const { work_order_id, batch_id, barcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
+    const { work_order_id, batch_id, barcode: inputBarcode, scanned_by, status, remarks, resolution_remarks, failed_at, failed_remarks } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        // --- MANDATORY USN VALIDATION ---
+        // Assembly only accepts Unit Serial Number scans (not PCB barcodes).
+        const usnResolved = await resolveUnitSerial(client, inputBarcode);
+        if (!usnResolved) {
+            throw new Error(
+                "Invalid scan. Assembly only accepts the Unit Serial Number sticker. " +
+                "Please scan the Unit Serial Number (not the PCB barcode)."
+            );
+        }
+        const { pcb_barcode, unit_serial_number } = usnResolved;
+
         const scanResult = await processMESScan({
             client,
             batch_id,
-            barcode,
+            barcode: pcb_barcode,          // Internal PCB barcode used for tracking
             scanned_by,
             status,
             remarks,
@@ -141,16 +154,17 @@ export const createAssemblyScan = async (req: Request, res: Response) => {
             prev_stage_id: 5,
             batch_table: 'assembly_batches',
             scans_table: 'assembly_scans',
-            work_order_id
+            work_order_id,
+            unit_serial_number             // Stored in scan record for display
         });
 
         // Fetch updated counters
         const statsResult = await client.query(`
             SELECT 
                 w.quantity as "workOrderQty",
-                (SELECT COUNT(DISTINCT ps.barcode) FROM pth_scans ps JOIN pth_batches pb ON ps.batch_id = pb.id WHERE pb.work_order_id = w.id AND ps.status IN ('accepted', 'ACCEPTED', 'passed', 'PASSED')) as "previousStagePassed",
+                (SELECT COUNT(*) FROM unit_serial_mapping usm WHERE usm.work_order_id = w.id) as "previousStagePassed",
                 stats.scanned,
-                (w.quantity - stats.scanned) as pending,
+                ((SELECT COUNT(*) FROM unit_serial_mapping usm WHERE usm.work_order_id = w.id) - stats.scanned) as pending,
                 stats.passed,
                 stats.rework,
                 stats.debug,
@@ -236,4 +250,3 @@ export const updateScanStatus = async (req: Request, res: Response) => {
         return sendError(res, err.message, 500);
     }
 };
-

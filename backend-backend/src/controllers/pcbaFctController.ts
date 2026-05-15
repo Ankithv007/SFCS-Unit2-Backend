@@ -127,10 +127,47 @@ export const createPcbaFctScan = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        const normalizedBarcode = (barcode || '').trim().toUpperCase();
+
+        // --- USN-Orphan Recovery ---
+        // If this barcode already has an ACCEPTED pcba_fct_scans record but NO USN mapping,
+        // the operator previously closed the USN modal. Re-prompt them for the USN.
+        if ((status || '').toUpperCase() === 'ACCEPTED' || !(status)) {
+            const orphanCheck = await client.query(
+                `SELECT pfs.id
+                 FROM pcba_fct_scans pfs
+                 JOIN pcba_fct_batches pb ON pfs.batch_id = pb.id
+                 WHERE pfs.barcode = $1
+                   AND pb.work_order_id = $2
+                   AND pfs.status = 'ACCEPTED'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM unit_serial_mapping usm WHERE usm.barcode = pfs.barcode
+                   )
+                 ORDER BY pfs.scanned_at DESC LIMIT 1`,
+                [normalizedBarcode, work_order_id]
+            );
+
+            if ((orphanCheck.rowCount ?? 0) > 0) {
+                await client.query('COMMIT');
+                return res.status(200).json({
+                    success: true,
+                    message: "Unit Serial Number not yet linked. Please scan the Unit Serial Number sticker.",
+                    data: {
+                        scan: orphanCheck.rows[0],
+                        counters: null,
+                        requiresUnitSerial: true,
+                        requiresUsnOnly: true
+                    }
+                });
+            }
+        }
+
+        // --- Normal Scan Flow ---
         const scanResult = await processMESScan({
             client,
             batch_id,
-            barcode,
+            barcode: normalizedBarcode,
             scanned_by,
             status,
             remarks,
@@ -143,6 +180,9 @@ export const createPcbaFctScan = async (req: Request, res: Response) => {
             scans_table: 'pcba_fct_scans',
             work_order_id
         });
+
+        const finalStatus = (status || 'ACCEPTED').toUpperCase();
+        const requiresUnitSerial = finalStatus === 'ACCEPTED';
 
         // Fetch updated counters
         const statsResult = await client.query(`
@@ -184,12 +224,98 @@ export const createPcbaFctScan = async (req: Request, res: Response) => {
             message: "Scan completed successfully",
             data: {
                 scan: scanResult,
-                counters: counters
+                counters: counters,
+                requiresUnitSerial,
+                requiresUsnOnly: false
             }
         });
     } catch (err: any) {
         await client.query('ROLLBACK');
         return sendError(res, err.message);
+    } finally {
+        client.release();
+    }
+};
+
+/**
+ * POST /api/backend/pcba-fct/link-serial
+ * Second mandatory step after PCBA-FCT PASS.
+ * Links the PCB barcode to the Unit Serial Number sticker scanned by operator.
+ */
+export const linkUnitSerial = async (req: Request, res: Response) => {
+    const { barcode, unit_serial_number, linked_by, batch_id, work_order_id } = req.body;
+
+    if (!barcode || !unit_serial_number || !linked_by) {
+        return sendError(res, "barcode, unit_serial_number, and linked_by are required");
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const normalizedBarcode = barcode.trim().toUpperCase();
+        const normalizedUSN = unit_serial_number.trim().toUpperCase();
+
+        // Validate PCB barcode passed PCBA-FCT
+        const passedCheck = await client.query(
+            `SELECT pfs.id FROM pcba_fct_scans pfs
+             JOIN pcba_fct_batches pb ON pfs.batch_id = pb.id
+             WHERE pfs.barcode = $1 AND pfs.status = 'ACCEPTED'
+             ORDER BY pfs.scanned_at DESC LIMIT 1`,
+            [normalizedBarcode]
+        );
+        if ((passedCheck.rowCount ?? 0) === 0) {
+            throw new Error("Barcode has not passed PCBA-FCT. Cannot link Unit Serial Number.");
+        }
+
+        // Check USN not already used by another barcode
+        const usnCheck = await client.query(
+            `SELECT barcode FROM unit_serial_mapping WHERE unit_serial_number = $1`,
+            [normalizedUSN]
+        );
+        if ((usnCheck.rowCount ?? 0) > 0) {
+            const existingBarcode = usnCheck.rows[0].barcode;
+            if (existingBarcode !== normalizedBarcode) {
+                throw new Error(`Unit Serial Number "${normalizedUSN}" is already linked to barcode "${existingBarcode}".`);
+            }
+            // Same barcode → already linked (idempotent)
+            await client.query('COMMIT');
+            return sendSuccess(res, "Unit Serial Number already linked", { barcode: normalizedBarcode, unit_serial_number: normalizedUSN });
+        }
+
+        // Check this barcode not already linked to a different USN
+        const barcodeCheck = await client.query(
+            `SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`,
+            [normalizedBarcode]
+        );
+        if ((barcodeCheck.rowCount ?? 0) > 0) {
+            throw new Error(`Barcode "${normalizedBarcode}" is already linked to Unit Serial Number "${barcodeCheck.rows[0].unit_serial_number}".`);
+        }
+
+        // Insert mapping
+        await client.query(
+            `INSERT INTO unit_serial_mapping (barcode, unit_serial_number, linked_by, work_order_id)
+             VALUES ($1, $2, $3, $4)`,
+            [normalizedBarcode, normalizedUSN, linked_by, work_order_id || null]
+        );
+
+        // Update the pcba_fct_scans record with the USN
+        await client.query(
+            `UPDATE pcba_fct_scans SET unit_serial_number = $1
+             WHERE barcode = $2 AND status = 'ACCEPTED'`,
+            [normalizedUSN, normalizedBarcode]
+        );
+
+        await client.query('COMMIT');
+        return sendSuccess(res, "Unit Serial Number linked successfully", {
+            barcode: normalizedBarcode,
+            unit_serial_number: normalizedUSN,
+            linked_by,
+            linked_at: new Date()
+        });
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        return sendError(res, err.message, 500);
     } finally {
         client.release();
     }
@@ -206,7 +332,11 @@ export const getScansByBatchId = async (req: Request, res: Response) => {
         const total = parseInt(countResult.rows[0].count);
 
         const result = await pool.query(
-            `SELECT * FROM pcba_fct_scans WHERE batch_id = $1 ORDER BY scanned_at DESC LIMIT $2 OFFSET $3`,
+            `SELECT pfs.*, usm.unit_serial_number as usn_from_map
+             FROM pcba_fct_scans pfs
+             LEFT JOIN unit_serial_mapping usm ON usm.barcode = pfs.barcode
+             WHERE pfs.batch_id = $1
+             ORDER BY pfs.scanned_at DESC LIMIT $2 OFFSET $3`,
             [batchId, limit, offset]
         );
         
@@ -236,4 +366,3 @@ export const updateScanStatus = async (req: Request, res: Response) => {
         return sendError(res, err.message, 500);
     }
 };
-

@@ -373,6 +373,29 @@ CREATE TABLE IF NOT EXISTS debug_scans (
   failed_remarks TEXT
 );
 
+-- 10. Unit Serial Number Mapping (PCB Barcode ↔ External Unit Serial Number)
+-- Created after PCBA-FCT PASS. Mandatory before Assembly can scan the board.
+CREATE TABLE IF NOT EXISTS unit_serial_mapping (
+    id SERIAL PRIMARY KEY,
+    barcode VARCHAR(255) NOT NULL,              -- Internal PCB barcode
+    unit_serial_number VARCHAR(255) NOT NULL,   -- External Unit Serial Number (sticker)
+    linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    linked_by VARCHAR(255) NOT NULL,
+    work_order_id INT REFERENCES work_orders(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usm_barcode ON unit_serial_mapping(barcode);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usm_usn ON unit_serial_mapping(unit_serial_number);
+
+-- Add unit_serial_number tracking column to all relevant scan tables
+-- These are safe to run multiple times (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS)
+ALTER TABLE pcba_fct_scans    ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE assembly_scans    ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE unit_testing_scans ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE qi_scans          ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE packing_scans     ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE rework_scans      ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+ALTER TABLE debug_scans       ADD COLUMN IF NOT EXISTS unit_serial_number VARCHAR(255);
+
 -- Legacy table cleanup
 -- DROP TABLE IF EXISTS pth_batches, pth_scans, vi_batches, vi_scans, qa_batches, qa_scans, etc.
 
