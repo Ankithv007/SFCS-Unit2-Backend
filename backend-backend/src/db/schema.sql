@@ -83,14 +83,253 @@ CREATE TABLE IF NOT EXISTS stage_scan_history (
   resolution_remarks TEXT
 );
 
--- 7. Rework (formerly Remark) Tables
+-- 7. Production Stage Batch & Scan Tables (Restored for application compatibility)
+
+-- PTH
+CREATE TABLE IF NOT EXISTS pth_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS pth_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES pth_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- VI
+CREATE TABLE IF NOT EXISTS vi_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS vi_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES vi_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- QA
+CREATE TABLE IF NOT EXISTS qa_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS qa_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES qa_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- Flashing
+CREATE TABLE IF NOT EXISTS flashing_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS flashing_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES flashing_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- PCBA-FCT
+CREATE TABLE IF NOT EXISTS pcba_fct_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS pcba_fct_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES pcba_fct_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- Assembly
+CREATE TABLE IF NOT EXISTS assembly_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS assembly_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES assembly_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- Unit Testing
+CREATE TABLE IF NOT EXISTS unit_testing_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS unit_testing_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES unit_testing_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- QI
+CREATE TABLE IF NOT EXISTS qi_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS qi_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES qi_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- Packing
+CREATE TABLE IF NOT EXISTS packing_batches (
+    id SERIAL PRIMARY KEY,
+    work_order_id INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+    batch_number VARCHAR(255) UNIQUE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_at TIMESTAMP,
+    deleted_by VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS packing_scans (
+    id SERIAL PRIMARY KEY,
+    batch_id INTEGER REFERENCES packing_batches(id) ON DELETE CASCADE,
+    barcode VARCHAR(255) NOT NULL,
+    scanned_by VARCHAR(255) NOT NULL,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'ACCEPTED',
+    remarks TEXT,
+    resolution_remarks TEXT,
+    failed_at TIMESTAMP,
+    failed_remarks TEXT
+);
+
+-- 8. Rework (formerly Remark) Tables
 CREATE TABLE IF NOT EXISTS rework_batches (
   id SERIAL PRIMARY KEY,
   work_order_id INT REFERENCES work_orders(id) ON DELETE CASCADE,
   batch_number VARCHAR(100) UNIQUE NOT NULL,
   created_by VARCHAR(100) NOT NULL,
   status VARCHAR(20) DEFAULT 'active',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  is_deleted BOOLEAN DEFAULT FALSE,
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(255)
 );
 
 CREATE TABLE IF NOT EXISTS rework_scans (
@@ -107,14 +346,17 @@ CREATE TABLE IF NOT EXISTS rework_scans (
   failed_remarks TEXT
 );
 
--- 8. Debug Tables
+-- 9. Debug Tables
 CREATE TABLE IF NOT EXISTS debug_batches (
   id SERIAL PRIMARY KEY,
   work_order_id INT REFERENCES work_orders(id) ON DELETE CASCADE,
   batch_number VARCHAR(100) UNIQUE NOT NULL,
   created_by VARCHAR(100) NOT NULL,
   status VARCHAR(20) DEFAULT 'active',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  is_deleted BOOLEAN DEFAULT FALSE,
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(255)
 );
 
 CREATE TABLE IF NOT EXISTS debug_scans (
@@ -131,7 +373,6 @@ CREATE TABLE IF NOT EXISTS debug_scans (
   failed_remarks TEXT
 );
 
--- Legacy table cleanup (If tables exist but are no longer needed, they can be dropped)
+-- Legacy table cleanup
 -- DROP TABLE IF EXISTS pth_batches, pth_scans, vi_batches, vi_scans, qa_batches, qa_scans, etc.
--- However, for safety, we keep them until data is verified or migration is complete.
 
