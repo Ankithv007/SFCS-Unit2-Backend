@@ -138,7 +138,7 @@ export const generateSerials = async (req: Request, res: Response) => {
         `;
 
         const snResult = await pool.query(snQuery, snValues);
-        
+
         // 2. Bulk insert initial inspections for NEW serials only
         if (snResult.rows.length > 0) {
             const inspValues: any[] = [];
@@ -158,8 +158,8 @@ export const generateSerials = async (req: Request, res: Response) => {
         }
 
         await pool.query('COMMIT');
-        res.status(201).json({ 
-            message: "Serials generated successfully", 
+        res.status(201).json({
+            message: "Serials generated successfully",
             inserted: snResult.rows.length,
             total: cleanSerials.length
         });
