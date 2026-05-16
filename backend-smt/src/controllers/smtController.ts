@@ -6,12 +6,12 @@ const logger = createLogger('SMT_CONTROLLER');
 
 // === Work Orders ===
 export const createWorkOrder = async (req: Request, res: Response) => {
-    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by } = req.body;
+    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source } = req.body;
     try {
         const result = await pool.query(
-            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by]
+            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source || 'GENERATED']
         );
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -25,11 +25,10 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
         const query = `
             SELECT 
                 wo.*, 
-                COUNT(sn.id) as generated_count
+                (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id) as generated_count
             FROM smt_work_orders wo
-            LEFT JOIN smt_serial_numbers sn ON wo.id = sn.work_order_id
-            GROUP BY wo.id
-            HAVING COUNT(sn.id) < wo.panel_quantity
+            WHERE wo.is_registered = false
+            AND NOT EXISTS (SELECT 1 FROM smt_serial_numbers sn2 WHERE sn2.work_order_id = wo.id)
             ORDER BY wo.created_at DESC
         `;
         const result = await pool.query(query);
@@ -52,10 +51,11 @@ export const getWorkOrders = async (req: Request, res: Response) => {
 
 export const registerWorkOrder = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const { barcode_source } = req.body;
     try {
         const result = await pool.query(
-            'UPDATE smt_work_orders SET is_registered = true WHERE id = $1 RETURNING *',
-            [id]
+            'UPDATE smt_work_orders SET is_registered = true, barcode_source = COALESCE($2, barcode_source) WHERE id = $1 RETURNING *',
+            [id, barcode_source]
         );
         if (result.rowCount === 0) return res.status(404).json({ error: "Work order not found" });
         res.status(200).json(result.rows[0]);
@@ -65,11 +65,36 @@ export const registerWorkOrder = async (req: Request, res: Response) => {
     }
 };
 
+export const deleteWorkOrder = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({ error: "Only Super Admin can delete work orders" });
+    }
+
+    try {
+        const result = await pool.query('DELETE FROM smt_work_orders WHERE id = $1 RETURNING *', [id]);
+        if (result.rowCount === 0) return res.status(404).json({ error: "Work order not found" });
+        res.status(200).json({ message: "Work order deleted successfully" });
+    } catch (err) {
+        logger.error("Error deleting work order:", err);
+        res.status(500).json({ error: "Failed to delete work order" });
+    }
+};
+
 export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
     const { last_status } = req.query;
     try {
         let query = `
-            SELECT DISTINCT wo.* 
+            SELECT 
+                wo.*,
+                (
+                    SELECT COUNT(DISTINCT i.serial_id) 
+                    FROM smt_inspections i 
+                    JOIN smt_serial_numbers sn ON i.serial_id = sn.id 
+                    WHERE sn.work_order_id = wo.id AND i.process_step = 'PCB Generation' AND i.status = 'PASS'
+                ) as scanned_count
             FROM smt_work_orders wo
             WHERE 1=1
         `;
@@ -89,10 +114,7 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
                 AND latest.status = $${params.length}
             )`;
         } else {
-            query += ` AND EXISTS (
-                SELECT 1 FROM smt_serial_numbers sn3
-                WHERE sn3.work_order_id = wo.id AND sn3.status = 'SCANNED'
-            )`;
+            query += ` AND (wo.is_registered = true OR EXISTS (SELECT 1 FROM smt_serial_numbers sn3 WHERE sn3.work_order_id = wo.id))`;
         }
 
         query += ` ORDER BY wo.created_at DESC`;
@@ -107,18 +129,31 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
 
 // === Serial Numbers ===
 export const generateSerials = async (req: Request, res: Response) => {
-    const { work_order_id, format, serials, created_by } = req.body;
+    const { work_order_id, format, serials, created_by, barcode_source } = req.body;
 
-    // Safety Layer: Aggressive cleaning
-    const cleanFormat = (format || "").replace(/-/g, "").toUpperCase();
-    const cleanSerials = (serials || []).map((s: string) => s.replace(/-/g, "").toUpperCase());
+    // Safety Layer: Aggressive cleaning - preserved dashes for traceability
+    const cleanFormat = (format || "").toUpperCase();
+    const cleanSerials = (serials || []).map((s: string) => s.toUpperCase());
 
     if (!cleanSerials || cleanSerials.length === 0) {
+        // If it's "Barcode Already Available", we might just want to register it without serials
+        if (barcode_source === 'PRE_EXISTING') {
+            try {
+                await pool.query('UPDATE smt_work_orders SET is_registered = true, barcode_source = $1 WHERE id = $2', [barcode_source, work_order_id]);
+                return res.status(200).json({ message: "Work order registered with existing barcodes", inserted: 0, total: 0 });
+            } catch (err) {
+                logger.error("Error registering WO without serials:", err);
+                return res.status(500).json({ error: "Failed to register work order" });
+            }
+        }
         return res.status(400).json({ error: "No serial numbers provided" });
     }
 
     try {
         await pool.query('BEGIN');
+
+        // Update WO barcode source
+        await pool.query('UPDATE smt_work_orders SET barcode_source = $1 WHERE id = $2', [barcode_source || 'GENERATED', work_order_id]);
 
         // 1. Bulk insert serial numbers, skipping duplicates
         const snValues: any[] = [];
@@ -192,29 +227,35 @@ export const getSerials = async (req: Request, res: Response) => {
 
         let query = `
             SELECT 
-                sn.*, 
+                sn.id,
+                wo.id as work_order_id,
+                sn.serial_number,
+                sn.serial_format,
+                sn.created_by,
+                sn.created_at,
                 wo.product_name, 
                 wo.quantity as wo_qty, 
                 wo.panel_quantity as panel_qty, 
                 wo.created_by as wo_created_by,
                 wo.is_registered,
+                wo.barcode_source,
                 last_insp.status as last_status,
                 last_insp.process_step as last_step,
                 last_insp.rework_reason,
                 ${completedHereSelect}
-            FROM smt_serial_numbers sn
-            JOIN smt_work_orders wo ON sn.work_order_id = wo.id
+            FROM smt_work_orders wo
+            LEFT JOIN smt_serial_numbers sn ON wo.id = sn.work_order_id
             LEFT JOIN (
                 SELECT DISTINCT ON (serial_id) serial_id, status, process_step, rework_reason, scanned_at
                 FROM smt_inspections
                 ORDER BY serial_id, scanned_at DESC
             ) last_insp ON sn.id = last_insp.serial_id
         `;
-        const conditions: string[] = [];
+        const conditions: string[] = ["(wo.is_registered = true OR sn.id IS NOT NULL)"];
 
         if (work_order_id) {
             params.push(work_order_id);
-            conditions.push(`sn.work_order_id = $${params.length}`);
+            conditions.push(`wo.id = $${params.length}`);
         }
 
         if (filter_step && filter_status) {
@@ -251,6 +292,7 @@ export const getSerials = async (req: Request, res: Response) => {
 
         query += ` ORDER BY sn.id ASC`;
 
+        logger.info(`Executing getSerials query: ${query} with params: ${JSON.stringify(params)}`);
         const result = await pool.query(query, params);
 
         // Safety Layer: Clean API Response
@@ -269,6 +311,12 @@ export const getSerials = async (req: Request, res: Response) => {
 
 export const deleteSerials = async (req: Request, res: Response) => {
     const { work_order_id } = req.query;
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({ error: "Only Super Admin can delete serials" });
+    }
+
     try {
         if (work_order_id) {
             await pool.query('DELETE FROM smt_serial_numbers WHERE work_order_id = $1', [work_order_id]);
@@ -325,6 +373,12 @@ export const updateEmployee = async (req: Request, res: Response) => {
 
 export const deleteEmployee = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({ error: "Only Super Admin can delete employees" });
+    }
+
     try {
         await pool.query('DELETE FROM smt_printing_employees WHERE id = $1', [id]);
         res.status(200).json({ message: "Employee deleted" });
@@ -389,6 +443,35 @@ export const updateSerialNumberStatus = async (req: Request, res: Response) => {
 };
 
 // === Inspections ===
+export const deleteInspectionsForBatch = async (req: Request, res: Response) => {
+    const { work_order_id, process_step } = req.query;
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin' && userRole !== 'Admin') {
+        return res.status(403).json({ error: "Only Super Admin or Admin can delete scan sessions" });
+    }
+
+    if (!work_order_id || !process_step) {
+        return res.status(400).json({ error: "Missing work_order_id or process_step" });
+    }
+
+    try {
+        const query = `
+            DELETE FROM smt_inspections 
+            WHERE process_step = $1 
+            AND serial_id IN (
+                SELECT id FROM smt_serial_numbers WHERE work_order_id = $2
+            )
+            RETURNING *
+        `;
+        const result = await pool.query(query, [process_step, work_order_id]);
+        res.status(200).json({ message: "Scan session reset successfully", deleted_count: result.rowCount });
+    } catch (err) {
+        logger.error("Error deleting scan session:", err);
+        res.status(500).json({ error: "Failed to delete scan session" });
+    }
+};
+
 export const createInspection = async (req: Request, res: Response) => {
     const { serial_id, process_step, scanned_by, status, rework_reason } = req.body;
     try {
@@ -498,6 +581,12 @@ export const getProcessSetups = async (req: Request, res: Response) => {
 
 export const deleteProcessSetup = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({ error: "Only Super Admin can delete process setups" });
+    }
+
     try {
         await pool.query('DELETE FROM smt_process_setups WHERE id = $1', [id]);
         res.status(200).json({ message: "Process setup deleted" });

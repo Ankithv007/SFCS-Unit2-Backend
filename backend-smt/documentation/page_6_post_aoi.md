@@ -33,7 +33,7 @@
     *   Operator scans the PCB serial number.
     *   **Sequence Check:** System verifies the board passed **SPI** (Page 4).
 4.  **Result Entry:**
-    *   **PASS:** Board is clear to move to the next soldering stage.
+    *   **PASS:** Board is clear to move to the next stage.
     *   **FAIL:** Operator clicks FAIL and enters the component-level defect (e.g., "R12 Missing", "C5 Reversed").
 5.  **Database Update:** Record is stored in `smt_inspections` with `process_step = 'Post AOI'`.
 
@@ -76,7 +76,7 @@
 ### 9. STATUS FLOW
 1.  **ELIGIBLE:** Board passed SPI.
 2.  **PENDING:** Board scanned at AOI but result not yet clicked.
-3.  **PASS:** Ready for Reflow/Post-Work Soldering.
+3.  **PASS:** SMT process complete.
 4.  **FAIL:** Blocked; sent to Rework station.
 
 ---

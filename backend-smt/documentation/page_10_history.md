@@ -60,7 +60,7 @@
 ---
 
 ### 7. BACKEND LOGIC
-*   **Complex Aggregation:** The backend doesn't just "read" a number; it calculates the `completed_qty` in real-time by counting how many serial numbers for that WO reached the "Post-Work Soldering" or "VI" stage with a "PASS" status.
+*   **Complex Aggregation:** The backend doesn't just "read" a number; it calculates the `completed_qty` in real-time by counting how many serial numbers for that WO reached the "Post AOI" stage with a "PASS" status.
 
 ---
 

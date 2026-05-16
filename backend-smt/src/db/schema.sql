@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS smt_work_orders (
     quantity INTEGER NOT NULL,
     panel_quantity INTEGER NOT NULL,
     status VARCHAR(50) DEFAULT 'Created',
+    barcode_source VARCHAR(100) DEFAULT 'Generate Barcode',
     is_registered BOOLEAN DEFAULT false,
     created_by VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

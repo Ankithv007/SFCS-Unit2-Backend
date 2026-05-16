@@ -36,7 +36,7 @@
     *   If the machine shows Pass: Operator clicks **PASS**.
     *   If the machine shows Fail: Operator clicks **FAIL** and enters a **Rework Reason** (e.g., "Solder Bridge", "Insufficient Paste").
 5.  **Database Update:** Record is saved in `smt_inspections` with `process_step = 'SPI'`.
-6.  **Next Step Unlock:** If PASS, the board is now eligible for the "Previous Soldering" or "Pick & Place" stages.
+6.  **Next Step Unlock:** If PASS, the board is now eligible for the "Post AOI" stage.
 
 ---
 

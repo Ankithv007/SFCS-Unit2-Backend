@@ -165,9 +165,9 @@ export const getBatchScans = async (req: Request, res: Response) => {
 export const deleteBatch = async (req: Request, res: Response) => {
     const { batch_id } = req.params;
     const userRole = (req as any).user?.role;
-    console.log('Delete Batch Request - User Role:', userRole);
-
-    if (userRole !== 'Admin' && userRole !== 'Super Admin' && userRole !== 'Manager') {
+    const lowerRole = userRole?.toLowerCase();
+    
+    if (lowerRole !== 'admin' && lowerRole !== 'super admin' && lowerRole !== 'manager') {
         return res.status(403).json({ error: `Only Admin, Super Admin, or Manager can delete this batch. Your role: ${userRole}` });
     }
 
