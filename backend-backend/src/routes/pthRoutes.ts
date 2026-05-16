@@ -5,13 +5,13 @@ import {
     createPthScan,
     getScansByBatchId
 } from '../controllers/pthController';
-import { authenticateToken } from '../middleware/authMiddleware';
+import { authenticateToken, authorizeSuperAdmin } from '../middleware/authMiddleware';
 
 const router = Router();
 
 // Batch Management
 router.get('/batch', authenticateToken, getBatches);
-router.delete('/batch/:id', authenticateToken, deleteBatch);
+router.delete('/batch/:id', authenticateToken, authorizeSuperAdmin, deleteBatch);
 
 // Scanning
 router.post('/scan', authenticateToken, createPthScan);
