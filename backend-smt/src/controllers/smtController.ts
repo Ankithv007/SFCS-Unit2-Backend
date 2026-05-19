@@ -94,7 +94,12 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
                     FROM smt_inspections i 
                     JOIN smt_serial_numbers sn ON i.serial_id = sn.id 
                     WHERE sn.work_order_id = wo.id AND i.process_step = 'PCB Generation' AND i.status = 'PASS'
-                ) as scanned_count
+                ) as scanned_count,
+                (
+                    SELECT COUNT(*)
+                    FROM smt_serial_numbers sn4
+                    WHERE sn4.work_order_id = wo.id
+                ) as generated_qty
             FROM smt_work_orders wo
             WHERE 1=1
         `;
@@ -210,7 +215,13 @@ export const getSerials = async (req: Request, res: Response) => {
     try {
         const params: any[] = [];
         const currentStep = typeof current_step === 'string' ? current_step : null;
-        let completedHereSelect = `false as is_completed_here`;
+        let completedHereSelect = `
+            false as is_completed_here,
+            null::text as step_status,
+            null::text as step_scanned_by,
+            null::timestamp as step_scanned_at,
+            null::text as step_remark
+        `;
 
         if (currentStep) {
             params.push(currentStep);
@@ -221,7 +232,39 @@ export const getSerials = async (req: Request, res: Response) => {
                     WHERE step_done.serial_id = sn.id
                     AND step_done.process_step = $${params.length}
                     AND step_done.status = 'PASS'
-                ) as is_completed_here
+                ) as is_completed_here,
+                (
+                    SELECT step_done.status
+                    FROM smt_inspections step_done
+                    WHERE step_done.serial_id = sn.id
+                    AND step_done.process_step = $${params.length}
+                    ORDER BY step_done.scanned_at DESC
+                    LIMIT 1
+                ) as step_status,
+                (
+                    SELECT step_done.scanned_by
+                    FROM smt_inspections step_done
+                    WHERE step_done.serial_id = sn.id
+                    AND step_done.process_step = $${params.length}
+                    ORDER BY step_done.scanned_at DESC
+                    LIMIT 1
+                ) as step_scanned_by,
+                (
+                    SELECT step_done.scanned_at
+                    FROM smt_inspections step_done
+                    WHERE step_done.serial_id = sn.id
+                    AND step_done.process_step = $${params.length}
+                    ORDER BY step_done.scanned_at DESC
+                    LIMIT 1
+                ) as step_scanned_at,
+                (
+                    SELECT step_done.rework_reason
+                    FROM smt_inspections step_done
+                    WHERE step_done.serial_id = sn.id
+                    AND step_done.process_step = $${params.length}
+                    ORDER BY step_done.scanned_at DESC
+                    LIMIT 1
+                ) as step_remark
             `;
         }
 
@@ -549,12 +592,22 @@ export const deleteInspection = async (req: Request, res: Response) => {
 export const createProcessSetup = async (req: Request, res: Response) => {
     const { work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side } = req.body;
     try {
-        const result = await pool.query(
+        const insertResult = await pool.query(
             `INSERT INTO smt_process_setups (work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
             [work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side]
         );
-        res.status(201).json(result.rows[0]);
+        
+        const newId = insertResult.rows[0].id;
+        const joinedResult = await pool.query(
+            `SELECT ps.*, wo.panel_quantity as panel_qty 
+             FROM smt_process_setups ps
+             LEFT JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+             WHERE ps.id = $1`,
+            [newId]
+        );
+        
+        res.status(201).json(joinedResult.rows[0]);
     } catch (err) {
         logger.error("Error creating process setup:", err);
         res.status(500).json({ error: "Failed to create process setup" });
@@ -564,13 +617,17 @@ export const createProcessSetup = async (req: Request, res: Response) => {
 export const getProcessSetups = async (req: Request, res: Response) => {
     const { process_name } = req.query;
     try {
-        let query = 'SELECT * FROM smt_process_setups';
+        let query = `
+            SELECT ps.*, wo.panel_quantity as panel_qty 
+            FROM smt_process_setups ps
+            LEFT JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+        `;
         const params = [];
         if (process_name) {
-            query += ' WHERE process_name = $1';
+            query += ' WHERE ps.process_name = $1';
             params.push(process_name);
         }
-        query += ' ORDER BY timestamp DESC';
+        query += ' ORDER BY ps.timestamp DESC';
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
     } catch (err) {
