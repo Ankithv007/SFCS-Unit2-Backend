@@ -6,7 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
-    "build": "tsc",
+    "build": "tsc && copyfiles -u 1 \"src/db/**/*.sql\" \"src/db/*.sql\" dist/",
     "migrate": "ts-node src/db/migrate.ts"
   },
   "keywords": [],
@@ -35,6 +35,7 @@
     "@types/node": "^24.10.1",
     "@types/nodemailer": "^7.0.4",
     "@types/pg": "^8.15.6",
+    "copyfiles": "^2.4.1",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
