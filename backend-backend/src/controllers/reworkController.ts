@@ -77,6 +77,12 @@ export const deleteBatch = async (req: Request, res: Response) => {
 
 export const createReworkScan = async (req: Request, res: Response) => {
     const { batch_id, barcode: inputBarcode, scanned_by, status, remarks, failed_at, failed_remarks } = req.body;
+    
+    if (!remarks || typeof remarks !== 'string' || !remarks.trim()) {
+        return sendError(res, "Repair remark is mandatory to complete rework.", 400);
+    }
+
+    const cleanRemarks = remarks.trim();
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -123,12 +129,12 @@ export const createReworkScan = async (req: Request, res: Response) => {
         const result = await client.query(
             `INSERT INTO rework_scans (batch_id, barcode, unit_serial_number, scanned_by, status, remarks, stage, failed_at, failed_remarks, repair_remark, repair_time)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP) RETURNING *`,
-            [batch_id, resolvedBarcode, resolvedUSN, scanned_by, 'ACCEPTED', remarks || 'Fixed', originStation, originalFailedAt, originalFailedRemarks, remarks || 'Fixed']
+            [batch_id, resolvedBarcode, resolvedUSN, scanned_by, 'ACCEPTED', cleanRemarks, originStation, originalFailedAt, originalFailedRemarks, cleanRemarks]
         );
 
         await client.query(
             `UPDATE ${updateTable} SET resolution_remarks = 'Fixed', repair_time = CURRENT_TIMESTAMP, repair_remark = $1 WHERE barcode = $2 AND status IN ('rework', 'REWORK')`,
-            [remarks || 'Fixed', resolvedBarcode]
+            [cleanRemarks, resolvedBarcode]
         );
 
         await client.query(

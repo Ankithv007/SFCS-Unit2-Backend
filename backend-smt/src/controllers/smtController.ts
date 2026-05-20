@@ -99,7 +99,31 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
                     SELECT COUNT(*)
                     FROM smt_serial_numbers sn4
                     WHERE sn4.work_order_id = wo.id
-                ) as generated_qty
+                ) as generated_qty,
+                (
+                    SELECT COUNT(*)
+                    FROM smt_serial_numbers sn
+                    JOIN (
+                        SELECT DISTINCT ON (serial_id) serial_id, process_step, status
+                        FROM smt_inspections
+                        ORDER BY serial_id, scanned_at DESC
+                    ) latest ON sn.id = latest.serial_id
+                    WHERE sn.work_order_id = wo.id
+                      AND latest.process_step = 'Post AOI'
+                      AND latest.status = 'PASS'
+                ) as passed_count,
+                (
+                    SELECT COUNT(*)
+                    FROM smt_serial_numbers sn
+                    JOIN (
+                        SELECT DISTINCT ON (serial_id) serial_id, process_step, status
+                        FROM smt_inspections
+                        ORDER BY serial_id, scanned_at DESC
+                    ) latest ON sn.id = latest.serial_id
+                    WHERE sn.work_order_id = wo.id
+                      AND latest.process_step = 'Post AOI'
+                      AND latest.status = 'FAIL'
+                ) as active_failed_count
             FROM smt_work_orders wo
             WHERE 1=1
         `;
@@ -518,19 +542,61 @@ export const deleteInspectionsForBatch = async (req: Request, res: Response) => 
 export const createInspection = async (req: Request, res: Response) => {
     const { serial_id, process_step, scanned_by, status, rework_reason } = req.body;
     try {
+        // Duplicate validation check: BLOCK duplicate PASS scans
+        if (status !== 'FAIL') {
+            const dupCheck = await pool.query(
+                `SELECT * FROM smt_inspections 
+                 WHERE serial_id = $1 AND process_step = $2 
+                 ORDER BY scanned_at DESC LIMIT 1`,
+                [serial_id, process_step]
+            );
+
+            if ((dupCheck.rowCount ?? 0) > 0 && dupCheck.rows[0].status === 'PASS') {
+                return res.status(400).json({ error: "Barcode already processed successfully" });
+            }
+        }
+
+        if (process_step === 'Post AOI') {
+            // Find the absolute latest inspection for this serial_id
+            const latestRes = await pool.query(
+                `SELECT * FROM smt_inspections WHERE serial_id = $1 ORDER BY scanned_at DESC LIMIT 1`,
+                [serial_id]
+            );
+
+            if ((latestRes.rowCount ?? 0) > 0 && latestRes.rows[0].process_step === 'Post AOI') {
+                const latestId = latestRes.rows[0].id;
+                // Update the existing row instead of inserting a new one
+                const result = await pool.query(
+                    `UPDATE smt_inspections 
+                     SET status = $1, rework_reason = $2, scanned_by = $3, scanned_at = CURRENT_TIMESTAMP
+                     WHERE id = $4 RETURNING *`,
+                    [status || 'PASS', rework_reason || null, scanned_by, latestId]
+                );
+
+                // Also update the main status in serial_numbers
+                const serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
+                await pool.query(
+                    'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
+                    [serialStatus, serial_id]
+                );
+
+                return res.status(200).json(result.rows[0]);
+            }
+        }
+
+        // Standard Insert Logic for other steps or new Post AOI / revalidation scans
         const result = await pool.query(
             `INSERT INTO smt_inspections (serial_id, process_step, scanned_by, status, rework_reason) 
              VALUES ($1, $2, $3, $4, $5) RETURNING *`,
             [serial_id, process_step, scanned_by, status || 'PASS', rework_reason || null]
         );
 
-        // Also update the main status in serial_numbers if it's a pass
-        if (status !== 'FAIL') {
-            await pool.query(
-                'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
-                ['SCANNED', serial_id]
-            );
-        }
+        // Also update the main status in serial_numbers
+        const serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
+        await pool.query(
+            'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
+            [serialStatus, serial_id]
+        );
 
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -663,17 +729,27 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
                 wo.line_id,
                 wo.product_name,
                 wo.quantity as total_qty,
-                COUNT(CASE WHEN sn.status = 'SCANNED' THEN 1 END) as completed_qty,
-                (wo.quantity - COUNT(CASE WHEN sn.status = 'SCANNED' THEN 1 END)) as balance_qty,
+                COALESCE(passed.passed_count, 0)::int as completed_qty,
+                (wo.quantity - COALESCE(passed.passed_count, 0))::int as balance_qty,
                 CASE 
-                    WHEN COUNT(CASE WHEN sn.status = 'SCANNED' THEN 1 END) >= wo.quantity THEN 'COMPLETED'
-                    WHEN COUNT(CASE WHEN sn.status = 'SCANNED' THEN 1 END) > 0 THEN 'ACTIVE'
+                    WHEN COALESCE(passed.passed_count, 0) >= wo.quantity THEN 'COMPLETED'
+                    WHEN COALESCE(passed.passed_count, 0) > 0 THEN 'ACTIVE'
                     ELSE 'INACTIVE'
                 END as status,
                 wo.created_by,
                 wo.created_at as run_date_time
             FROM smt_work_orders wo
-            LEFT JOIN smt_serial_numbers sn ON wo.id = sn.work_order_id
+            LEFT JOIN (
+                SELECT sn.work_order_id, COUNT(*) as passed_count
+                FROM smt_serial_numbers sn
+                JOIN (
+                    SELECT DISTINCT ON (serial_id) serial_id, process_step, status
+                    FROM smt_inspections
+                    ORDER BY serial_id, scanned_at DESC
+                ) latest ON sn.id = latest.serial_id
+                WHERE latest.process_step = 'Post AOI' AND latest.status = 'PASS'
+                GROUP BY sn.work_order_id
+            ) passed ON wo.id = passed.work_order_id
             WHERE wo.area_id = $1
         `;
         const params: any[] = [areaId || 'SMT'];
@@ -693,7 +769,7 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
             query += ` AND wo.created_at <= $${params.length}`;
         }
 
-        query += ` GROUP BY wo.id ORDER BY wo.created_at DESC`;
+        query += ` GROUP BY wo.id, passed.passed_count ORDER BY wo.created_at DESC`;
 
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
