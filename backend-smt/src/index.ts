@@ -6,6 +6,7 @@ import smtRoutes from './routes/smtRoutes';
 import workorderHistoryRoutes from './routes/workorderHistory.routes';
 import pool from './config/db';
 import { createLogger } from './utils/logger';
+import { runMigrations } from './db/runMigrations';
 
 const logger = createLogger('SMT');
 const app = express();
@@ -30,18 +31,18 @@ const initDB = async () => {
             const schema = fs.readFileSync(schemaPath, 'utf8');
             await pool.query(schema);
             logger.info("SMT Database tables initialized successfully from schema.sql.");
-
-            // Run migrations/initial data if needed
-            await pool.query(`
-                UPDATE smt_serial_numbers SET serial_number = REPLACE(serial_number, '-', '') WHERE serial_number LIKE '%-%';
-                UPDATE smt_serial_numbers SET serial_format = REPLACE(serial_format, '-', '') WHERE serial_format LIKE '%-%';
-            `);
+            
+            // Run enterprise migrations
+            await runMigrations();
+            
             logger.info("SMT migrations completed.");
         } else {
             logger.warn(`schema.sql not found at ${schemaPath}`);
         }
     } catch (err: any) {
         logger.error(`Error initializing SMT database tables: ${err.message}`);
+        // Let the failure bubble up to startServer
+        throw err;
     }
 };
 

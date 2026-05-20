@@ -80,6 +80,8 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     });
 });
 
+import { runMigrations } from './db/runMigrations';
+
 const setupDatabase = async () => {
     try {
         logger.info('[Database] Initializing schema...');
@@ -87,48 +89,12 @@ const setupDatabase = async () => {
         const schema = fs.readFileSync(schemaPath, 'utf8');
         await pool.query(schema);
 
-        // Seed Production Stages
-        logger.info('[Database] Seeding production stages...');
-        const stages = [
-            { name: 'PTH', order: 1 },
-            { name: 'VI', order: 2 },
-            { name: 'QA', order: 3 },
-            { name: 'Flashing', order: 4 },
-            { name: 'PCBA-FCT', order: 5 },
-            { name: 'Assembly', order: 6 },
-            { name: 'Unit Testing', order: 7 },
-            { name: 'QI', order: 8 },
-            { name: 'Packing', order: 9 },
-            { name: 'Rework', order: 10 },
-            { name: 'Debug', order: 11 }
-        ];
-
-        for (const stage of stages) {
-            await pool.query(
-                `INSERT INTO production_stages (stage_name, stage_order) 
-                 VALUES ($1, $2) ON CONFLICT (stage_name) DO NOTHING`,
-                [stage.name, stage.order]
-            );
-        }
-
-        // Rename Remark Tables if they exist and target names don't
-        logger.info('[Database] Checking for remark table renames...');
-        await pool.query(`
-            DO $$ 
-            BEGIN 
-                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'remark_batches') 
-                   AND NOT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'rework_batches') THEN
-                    ALTER TABLE IF EXISTS remark_batches RENAME TO rework_batches;
-                END IF;
-                
-                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'remark_scans') 
-                   AND NOT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'rework_scans') THEN
-                    ALTER TABLE IF EXISTS remark_scans RENAME TO rework_scans;
-                END IF;
-            END $$;
-        `);
-
-        logger.info('[Database] Schema and seeding completed successfully.');
+        logger.info('[Database] Schema initialized successfully.');
+        
+        // Run enterprise migrations
+        await runMigrations();
+        
+        logger.info('[Database] Migrations completed successfully.');
     } catch (error: any) {
         logger.error(`[Database] Failed to initialize schema: ${error.message}`);
         throw error;

@@ -55,6 +55,8 @@ app.get('/', (req, res) => {
     res.send('QC Inspection Service is running');
 });
 
+import { runMigrations } from './db/runMigrations';
+
 const setupDatabase = async () => {
     try {
         logger.info('[Database] Checking schema for QC Service...');
@@ -62,8 +64,13 @@ const setupDatabase = async () => {
         const schema = fs.readFileSync(schemaPath, 'utf8');
         await pool.query(schema);
         logger.info('[Database] Schema initialized successfully.');
+        
+        // Run enterprise migrations
+        await runMigrations();
+        
+        logger.info('[Database] Migrations completed successfully.');
     } catch (error) {
-        logger.error('[Database] Failed to initialize schema:', error);
+        logger.error(`[Database] Failed to initialize schema: ${error}`);
         throw error;
     }
 };

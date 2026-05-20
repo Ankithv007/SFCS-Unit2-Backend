@@ -70,6 +70,8 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // ======================
 // Startup
 // ======================
+import { runMigrations } from './db/runMigrations';
+
 const setupDatabase = async () => {
     try {
         logger.info('[Database] Checking schema for Auth Service...');
@@ -77,6 +79,11 @@ const setupDatabase = async () => {
         const schema = fs.readFileSync(schemaPath, 'utf8');
         await pool.query(schema);
         logger.info('[Database] Schema initialized successfully.');
+        
+        // Run enterprise migrations
+        await runMigrations();
+        
+        logger.info('[Database] Migrations completed successfully.');
     } catch (error) {
         logger.error('[Database] Failed to initialize schema:', error);
         throw error;
