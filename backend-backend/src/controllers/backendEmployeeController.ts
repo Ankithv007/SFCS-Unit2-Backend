@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 
 export const getEmployees = async (req: Request, res: Response) => {
     try {
-        const result = await pool.query('SELECT id, name, user_id, is_active FROM backend_employees ORDER BY created_at DESC');
+        const result = await pool.query('SELECT id, name, user_id, is_active FROM employees ORDER BY created_at DESC');
         res.status(200).json(result.rows);
     } catch (err) {
         console.error("Error fetching backend employees:", err);
@@ -15,11 +15,11 @@ export const getEmployees = async (req: Request, res: Response) => {
 export const createEmployee = async (req: Request, res: Response) => {
     const { name, user_id, password } = req.body;
     try {
-        const salt = await bcrypt.genSalt(10);
+        const salt = await bcrypt.genSalt(5);
         const hashedPassword = await bcrypt.hash(password, salt);
 
         const result = await pool.query(
-            'INSERT INTO backend_employees (name, user_id, password) VALUES ($1, $2, $3) RETURNING id, name, user_id, is_active',
+            'INSERT INTO employees (name, user_id, password) VALUES ($1, $2, $3) RETURNING id, name, user_id, is_active',
             [name, user_id, hashedPassword]
         );
         res.status(201).json(result.rows[0]);
@@ -37,15 +37,15 @@ export const updateEmployee = async (req: Request, res: Response) => {
     const { name, user_id, password } = req.body;
     try {
         if (password) {
-            const salt = await bcrypt.genSalt(10);
+            const salt = await bcrypt.genSalt(5);
             const hashedPassword = await bcrypt.hash(password, salt);
             await pool.query(
-                'UPDATE backend_employees SET name = $1, user_id = $2, password = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4',
+                'UPDATE employees SET name = $1, user_id = $2, password = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4',
                 [name, user_id, hashedPassword, id]
             );
         } else {
             await pool.query(
-                'UPDATE backend_employees SET name = $1, user_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+                'UPDATE employees SET name = $1, user_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
                 [name, user_id, id]
             );
         }
@@ -63,7 +63,7 @@ export const toggleEmployeeStatus = async (req: Request, res: Response) => {
     const { id } = req.params;
     try {
         const result = await pool.query(
-            'UPDATE backend_employees SET is_active = NOT is_active, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING id, is_active',
+            'UPDATE employees SET is_active = NOT is_active, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING id, is_active',
             [id]
         );
         if (result.rowCount === 0) {
@@ -79,7 +79,7 @@ export const toggleEmployeeStatus = async (req: Request, res: Response) => {
 export const deleteEmployee = async (req: Request, res: Response) => {
     const { id } = req.params;
     try {
-        const result = await pool.query('DELETE FROM backend_employees WHERE id = $1 RETURNING *', [id]);
+        const result = await pool.query('DELETE FROM employees WHERE id = $1 RETURNING *', [id]);
         if (result.rowCount === 0) {
             return res.status(404).json({ error: "Employee not found" });
         }
@@ -93,7 +93,7 @@ export const deleteEmployee = async (req: Request, res: Response) => {
 export const loginEmployee = async (req: Request, res: Response) => {
     const { userId, password } = req.body;
     try {
-        const result = await pool.query('SELECT * FROM backend_employees WHERE user_id = $1', [userId]);
+        const result = await pool.query('SELECT * FROM employees WHERE user_id = $1', [userId]);
         const employee = result.rows[0];
 
         if (!employee) {

@@ -15,26 +15,40 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         );
         const newWO = result.rows[0];
 
-        // 2. Auto-create master batch for traceability
-        await client.query(
-            `INSERT INTO master_batches (work_order_id, batch_number, customer_name, model, total_qty, created_by, status) 
-             VALUES ($1, $2, $3, $4, $5, $6, 'active') ON CONFLICT (batch_number) DO NOTHING`,
-            [newWO.id, wo_number, customer_name, model, quantity, created_by || 'system']
-        );
-
-        // 3. Auto-create batches for ALL production stages so it appears in Pending Batches immediately
-        const stages = [
-            'pth_batches', 'vi_batches', 'qa_batches', 'flashing_batches', 
-            'pcba_fct_batches', 'assembly_batches', 'unit_testing_batches', 
-            'qi_batches', 'packing_batches', 'rework_batches', 'debug_batches'
-        ];
-
-        for (const table of stages) {
-            await client.query(
-                `INSERT INTO ${table} (work_order_id, batch_number, created_by) 
-                 VALUES ($1, $2, $3) ON CONFLICT (batch_number) DO NOTHING`,
-                [newWO.id, wo_number, created_by || 'system']
+        // 2. Create the master Centralized Batch for this Work Order
+        // A single batch tracks through stages. We initialize it at Stage 1.
+        const stagesRes = await client.query(`SELECT id FROM production_stages ORDER BY stage_order ASC`);
+        const stageIds = stagesRes.rows.map(row => row.id);
+        
+        let newBatchId = null;
+        if (stageIds.length > 0) {
+            const firstStageId = stageIds[0];
+            const batchResult = await client.query(
+                `INSERT INTO batches (work_order_id, batch_number, current_stage_id, created_by) 
+                 VALUES ($1, $2, $3, $4) 
+                 ON CONFLICT (batch_number) DO NOTHING RETURNING id`,
+                [newWO.id, wo_number, firstStageId, created_by || 'system']
             );
+            
+            if (batchResult.rowCount && batchResult.rowCount > 0) {
+                newBatchId = batchResult.rows[0].id;
+            } else {
+                // Fetch if existed
+                const existingBatch = await client.query(`SELECT id FROM batches WHERE batch_number = $1`, [wo_number]);
+                if (existingBatch.rows.length > 0) newBatchId = existingBatch.rows[0].id;
+            }
+
+            // 3. Auto-create batch_stage_progress for ALL production stages 
+            // so it appears in Pending Batches immediately across all frontend pages.
+            if (newBatchId) {
+                for (const stageId of stageIds) {
+                    await client.query(
+                        `INSERT INTO batch_stage_progress (batch_id, stage_id) 
+                         VALUES ($1, $2) ON CONFLICT (batch_id, stage_id) DO NOTHING`,
+                        [newBatchId, stageId]
+                    );
+                }
+            }
         }
 
         await client.query('COMMIT');

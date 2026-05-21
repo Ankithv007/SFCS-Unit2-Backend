@@ -76,13 +76,30 @@ app.use((req: Request, res: Response) => {
 // Centralized Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     logger.error(`Unhandled error: ${err.message}`);
+    
+    if (err.name === 'ValidationError') {
+        return res.status(400).json({
+            success: false,
+            error: err.message,
+            errorCode: err.errorCode,
+            currentStage: err.currentStage,
+            requiredStage: err.requiredStage,
+            workOrder: err.workOrder,
+            batch: err.batch,
+            actualBatch: err.actualBatch,
+            actualStage: err.actualStage,
+            suggestedAction: err.suggestedAction,
+            severity: err.severity
+        });
+    }
+
     res.status(err.status || 500).json({
         success: false,
         error: err.message || 'Internal Server Error'
     });
 });
 
-import { runMigrations } from './db/runMigrations';
+// import { runMigrations } from './db/runMigrations';
 
 const setupDatabase = async () => {
     try {
@@ -93,10 +110,10 @@ const setupDatabase = async () => {
 
         logger.info('[Database] Schema initialized successfully.');
         
-        // Run enterprise migrations
-        await runMigrations();
+        // Run enterprise migrations (DISABLED for Pure Centralized Architecture)
+        // await runMigrations();
         
-        logger.info('[Database] Migrations completed successfully.');
+        logger.info('[Database] Ready.');
     } catch (error: any) {
         logger.error(`[Database] Failed to initialize schema: ${error.message}`);
         throw error;
