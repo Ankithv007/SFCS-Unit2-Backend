@@ -399,3 +399,15 @@ ALTER TABLE debug_scans       ADD COLUMN IF NOT EXISTS unit_serial_number VARCHA
 -- Legacy table cleanup
 -- DROP TABLE IF EXISTS pth_batches, pth_scans, vi_batches, vi_scans, qa_batches, qa_scans, etc.
 
+
+-- 11. Backend Employees (Authentication)
+CREATE TABLE IF NOT EXISTS backend_employees (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+

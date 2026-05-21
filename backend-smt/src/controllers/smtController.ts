@@ -365,8 +365,8 @@ export const getSerials = async (req: Request, res: Response) => {
         // Safety Layer: Clean API Response
         const cleanedRows = result.rows.map(row => ({
             ...row,
-            serial_number: (row.serial_number || "").replace(/-/g, ""),
-            serial_format: (row.serial_format || "").replace(/-/g, "")
+            serial_number: row.serial_number || "",
+            serial_format: row.serial_format || ""
         }));
 
         res.status(200).json(cleanedRows);
