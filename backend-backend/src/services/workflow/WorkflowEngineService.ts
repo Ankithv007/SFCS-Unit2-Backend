@@ -14,12 +14,16 @@ export class WorkflowEngineService {
             // New unit scanning for the first time
             if (!unit) {
                 if (targetStage.stage_order !== 1) {
+                    const firstStageRes = await pool.query('SELECT stage_name, stage_code FROM production_stages WHERE stage_order = 1 AND is_active = true');
+                    const firstStageName = firstStageRes.rows.length > 0 
+                        ? `${firstStageRes.rows[0].stage_name} (${firstStageRes.rows[0].stage_code})`
+                        : 'Pre-Soldering (PTH)';
                     throw new ValidationError({
                         errorCode: 'INVALID_STAGE',
                         message: 'Previous required stage is missing.',
-                        requiredStage: 'PTH',
+                        requiredStage: firstStageName,
                         currentStage: targetStage.stage_name,
-                        suggestedAction: 'Scan this barcode in PTH stage',
+                        suggestedAction: `Please scan this barcode in ${firstStageName} stage first before proceeding.`,
                         severity: 'error'
                     });
                 }
@@ -31,6 +35,7 @@ export class WorkflowEngineService {
                 throw new ValidationError({
                     errorCode: 'ALREADY_COMPLETED',
                     message: 'Barcode already completed this stage.',
+                    currentStage: targetStage.stage_name,
                     actualStage: targetStage.stage_name,
                     severity: 'warning'
                 });
@@ -43,6 +48,7 @@ export class WorkflowEngineService {
                     throw new ValidationError({
                         errorCode: 'UNDER_REWORK',
                         message: 'Barcode currently under Rework process.',
+                        currentStage: targetStage.stage_name,
                         suggestedAction: `Complete Rework and ${targetStage.stage_name} validation before proceeding.`,
                         severity: 'error'
                     });
@@ -51,6 +57,7 @@ export class WorkflowEngineService {
                     throw new ValidationError({
                         errorCode: 'UNDER_DEBUG',
                         message: 'Barcode currently under Debug process.',
+                        currentStage: targetStage.stage_name,
                         suggestedAction: `Complete Debug and ${targetStage.stage_name} validation before proceeding.`,
                         severity: 'error'
                     });
@@ -73,18 +80,51 @@ export class WorkflowEngineService {
             
             if (!validTransitions.includes(targetStage.id)) {
                 // Fetch the name of the stage it's currently at for a better error message
-                const currentStageRes = await pool.query(`SELECT stage_name FROM production_stages WHERE id = $1`, [unit.current_stage_id]);
-                const currentStageName = currentStageRes.rows.length > 0 ? currentStageRes.rows[0].stage_name : 'Unknown';
+                const currentStageRes = await pool.query(`SELECT stage_name, stage_code FROM production_stages WHERE id = $1`, [unit.current_stage_id]);
+                const currentStageName = currentStageRes.rows.length > 0 
+                    ? `${currentStageRes.rows[0].stage_name} (${currentStageRes.rows[0].stage_code})`
+                    : 'Unknown';
                 
+                // Fetch allowed next stage names dynamically
+                const nextStagesQuery = `
+                    SELECT ps.stage_name, ps.stage_code 
+                    FROM workflow_transitions wt
+                    JOIN production_stages ps ON wt.to_stage_id = ps.id
+                    WHERE wt.from_stage_id = $1 AND wt.on_scan_result = $2 AND wt.is_active = true
+                `;
+                const nextStagesRes = await pool.query(nextStagesQuery, [unit.current_stage_id, unit.current_status]);
+                const expectedStageNames = nextStagesRes.rows.map(row => `${row.stage_name} (${row.stage_code})`).join(' or ');
+                const requiredStageName = expectedStageNames || 'the correct next stage';
+
                 throw new ValidationError({
                     errorCode: 'INVALID_TRANSITION',
                     message: 'Previous required stage is missing or invalid sequence.',
-                    requiredStage: 'the correct next',
+                    requiredStage: requiredStageName,
                     currentStage: targetStage.stage_name,
                     actualStage: currentStageName,
                     suggestedAction: `Barcode must complete the correct previous stage sequence. It is currently at ${currentStageName}.`,
                     severity: 'error'
                 });
+            }
+
+            // Dynamic check for USN requirement: if target stage is after any stage requiring a USN, check mapping
+            const usnStagesRes = await pool.query(
+                `SELECT id FROM production_stages WHERE requires_usn = true AND stage_order < $1`,
+                [targetStage.stage_order]
+            );
+            if (usnStagesRes.rows.length > 0) {
+                const mappingRes = await pool.query(
+                    `SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`,
+                    [unit.barcode]
+                );
+                if (mappingRes.rows.length === 0) {
+                    throw new ValidationError({
+                        errorCode: 'USN_REQUIRED',
+                        message: 'Barcode has not been linked to a Unit Serial Number.',
+                        suggestedAction: 'Please scan and complete PCBA-FCT with USN linking first.',
+                        severity: 'error'
+                    });
+                }
             }
 
             return true;

@@ -76,11 +76,12 @@ export const getScans = async (req: Request, res: Response) => {
     const { failedStageId } = req.query;
     try {
         const query = `
-            SELECT s.*, u.failed_stage_id 
+            SELECT s.*, u.failed_stage_id, u.failed_at, u.failure_remark, u.repair_remark, m.unit_serial_number 
             FROM scans s 
             JOIN units u ON s.barcode = u.barcode
+            LEFT JOIN unit_serial_mapping m ON s.barcode = m.barcode
             WHERE s.batch_id = $1 AND s.stage_id = 11
-            ${failedStageId ? 'AND u.failed_stage_id = $2' : ''}
+            ${failedStageId ? 'AND u.failed_stage_id = $2::int' : ''}
             ORDER BY s.scanned_at DESC
         `;
         const params = failedStageId ? [batch_id, failedStageId] : [batch_id];

@@ -77,8 +77,32 @@ export const linkUnitSerial = async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Missing required fields for USN linking" });
         }
         
-        // This relies on the central table unit_serial_mapping which is perfect
         const pool = require('../config/db').default;
+
+        // 1. Check if the USN is already mapped to ANOTHER barcode
+        const usnCheck = await pool.query(
+            `SELECT barcode FROM unit_serial_mapping WHERE unit_serial_number = $1`,
+            [unit_serial_number]
+        );
+        if (usnCheck.rows.length > 0) {
+            const existingBarcode = usnCheck.rows[0].barcode;
+            if (existingBarcode !== barcode) {
+                return res.status(400).json({ error: "Unit Serial Number already linked to another PCB barcode." });
+            }
+        }
+        
+        // 2. Check if the barcode is already mapped to a DIFFERENT USN (block remapping)
+        const barcodeCheck = await pool.query(
+            `SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`,
+            [barcode]
+        );
+        if (barcodeCheck.rows.length > 0) {
+            const existingUsn = barcodeCheck.rows[0].unit_serial_number;
+            if (existingUsn !== unit_serial_number) {
+                return res.status(400).json({ error: "PCB barcode already linked to another Unit Serial Number." });
+            }
+        }
+        
         await pool.query(
             `INSERT INTO unit_serial_mapping (barcode, unit_serial_number, linked_by)
              VALUES ($1, $2, $3)

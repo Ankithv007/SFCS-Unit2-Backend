@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
+import { ValidationService } from '../services/validation/ValidationService';
 
 export const trackBarcode = async (req: Request, res: Response) => {
     const { id } = req.params;
@@ -15,45 +16,49 @@ export const trackBarcode = async (req: Request, res: Response) => {
         let barcode = inputValue;
         let unitSerialNumber: string | null = null;
 
-        // Check if input is a Unit Serial Number
-        const usnResult = await pool.query(
-            `SELECT barcode, unit_serial_number FROM unit_serial_mapping WHERE unit_serial_number = $1`,
-            [inputValue]
-        );
-        if ((usnResult.rowCount ?? 0) > 0) {
-            barcode = usnResult.rows[0].barcode;
-            unitSerialNumber = usnResult.rows[0].unit_serial_number;
+        // Check if the input is direct PCB barcode in units table
+        const pcbCheck = await pool.query(`SELECT barcode FROM units WHERE barcode = $1`, [inputValue]);
+        if (pcbCheck.rows.length > 0) {
+            barcode = pcbCheck.rows[0].barcode;
+            // Lookup its USN if mapped
+            const usnRes = await pool.query(`SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`, [barcode]);
+            if (usnRes.rows.length > 0) {
+                unitSerialNumber = usnRes.rows[0].unit_serial_number;
+            }
         } else {
-            // Input might be a PCB barcode — also try to find its linked USN
-            const barcodeUsnResult = await pool.query(
-                `SELECT unit_serial_number FROM unit_serial_mapping WHERE barcode = $1`,
+            // Check if it's a mapped Unit Serial Number
+            const usnResult = await pool.query(
+                `SELECT barcode, unit_serial_number FROM unit_serial_mapping WHERE unit_serial_number = $1`,
                 [inputValue]
             );
-            if ((barcodeUsnResult.rowCount ?? 0) > 0) {
-                unitSerialNumber = barcodeUsnResult.rows[0].unit_serial_number;
+            if (usnResult.rows.length > 0) {
+                barcode = usnResult.rows[0].barcode;
+                unitSerialNumber = usnResult.rows[0].unit_serial_number;
+            } else {
+                return res.status(404).json({ error: `"${inputValue}" was not found in the system. Please check the barcode or Unit Serial Number.` });
             }
         }
 
-        // 1. Main tracking info (current state)
+        // 1. Main tracking info (current state) from units ledger
         const trackingResult = await pool.query(`
             SELECT 
-                bt.barcode,
-                bt.current_status,
-                bt.failure_created_at,
-                bt.repair_completed_at,
-                bt.revalidated_passed_at,
-                bt.last_updated_at,
-                mb.batch_number,
+                u.barcode,
+                u.current_status,
+                u.failed_at AS failure_created_at,
+                u.last_scanned_at AS last_updated_at,
+                b.batch_number,
                 wo.wo_number,
                 wo.customer_name,
                 wo.model,
                 wo.quantity,
-                ps.stage_name AS current_stage
-            FROM barcode_tracking bt
-            LEFT JOIN master_batches mb ON bt.batch_id = mb.id
-            LEFT JOIN work_orders wo ON mb.work_order_id = wo.id
-            LEFT JOIN production_stages ps ON bt.current_stage_id = ps.id
-            WHERE bt.barcode = $1
+                ps.stage_name AS current_stage,
+                fps.stage_name AS failed_stage
+            FROM units u
+            LEFT JOIN batches b ON u.batch_id = b.id
+            LEFT JOIN work_orders wo ON b.work_order_id = wo.id
+            LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+            LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+            WHERE u.barcode = $1
         `, [barcode]);
 
         if ((trackingResult.rowCount ?? 0) === 0) {
@@ -62,53 +67,78 @@ export const trackBarcode = async (req: Request, res: Response) => {
 
         const tracking = trackingResult.rows[0];
 
-        // 2. Full scan history from ALL production stage tables
+        // 2. Full scan history from centralized scans log
         const historyResult = await pool.query(`
-            SELECT 'PTH'          AS station, 1  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM pth_scans          WHERE barcode = $1
-            UNION ALL
-            SELECT 'VI'           AS station, 2  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM vi_scans           WHERE barcode = $1
-            UNION ALL
-            SELECT 'QA'           AS station, 3  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM qa_scans           WHERE barcode = $1
-            UNION ALL
-            SELECT 'Flashing'     AS station, 4  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, NULL::text AS unit_serial_number FROM flashing_scans     WHERE barcode = $1
-            UNION ALL
-            SELECT 'PCBA-FCT'     AS station, 5  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM pcba_fct_scans     WHERE barcode = $1
-            UNION ALL
-            SELECT 'Assembly'     AS station, 6  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM assembly_scans     WHERE barcode = $1
-            UNION ALL
-            SELECT 'Unit Testing' AS station, 7  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM unit_testing_scans WHERE barcode = $1
-            UNION ALL
-            SELECT 'QI'           AS station, 8  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM qi_scans           WHERE barcode = $1
-            UNION ALL
-            SELECT 'Packing'      AS station, 9  AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, NULL::text AS repair_remark, NULL::timestamptz AS repair_time, unit_serial_number FROM packing_scans      WHERE barcode = $1
-            UNION ALL
-            SELECT 'Rework'       AS station, 10 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time, unit_serial_number FROM rework_scans WHERE barcode = $1
-            UNION ALL
-            SELECT 'Debug'        AS station, 11 AS stage_order, status, scanned_by, scanned_at, remarks, resolution_remarks, failed_at, failed_remarks, repair_remark, repair_time, unit_serial_number FROM debug_scans  WHERE barcode = $1
-            ORDER BY scanned_at ASC
+            SELECT 
+                ps.stage_name AS station,
+                ps.stage_order,
+                s.scan_result AS status,
+                s.scanned_by,
+                s.scanned_at,
+                s.remarks,
+                s.resolution_remarks,
+                m.unit_serial_number
+            FROM scans s
+            JOIN production_stages ps ON s.stage_id = ps.id
+            LEFT JOIN unit_serial_mapping m ON s.barcode = m.barcode
+            WHERE s.barcode = $1
+            ORDER BY s.scanned_at ASC
         `, [barcode]);
 
-        const history = historyResult.rows.map((row: any) => ({
-            station: row.station,
-            stage_order: row.stage_order,
-            status: (row.status || '').toUpperCase(),
-            scanned_by: row.scanned_by || '-',
-            scanned_at: row.scanned_at,
-            remarks: row.remarks || null,
-            resolution_remarks: row.resolution_remarks || null,
-            failed_at: row.failed_at || null,
-            failed_remarks: row.failed_remarks || null,
-            repair_remark: row.repair_remark || null,
-            repair_time: row.repair_time || null,
-            unit_serial_number: row.unit_serial_number || null,
-        }));
+        const history = historyResult.rows.map((row: any) => {
+            const isRework = row.station === 'Rework';
+            const isDebug = row.station === 'Debug';
+            const isFailure = row.status === 'REWORK' || row.status === 'DEBUG' || row.status === 'FAILED';
+            
+            return {
+                station: row.station,
+                stage_order: row.stage_order,
+                status: (row.status || '').toUpperCase(),
+                scanned_by: row.scanned_by || '-',
+                scanned_at: row.scanned_at,
+                remarks: isFailure ? row.remarks : null,
+                resolution_remarks: (!isFailure && !isRework && !isDebug) ? row.resolution_remarks : null,
+                failed_at: isFailure ? row.scanned_at : null,
+                failed_remarks: isFailure ? row.remarks : null,
+                repair_remark: (isRework || isDebug) ? row.remarks : null,
+                repair_time: (isRework || isDebug) ? row.scanned_at : null,
+                unit_serial_number: row.unit_serial_number || null,
+            };
+        });
 
-        // 3. Compute summary stats
-        const totalFailures = history.filter(h => h.status === 'REWORK' || h.status === 'DEBUG').length;
-        const totalReworks = history.filter(h => h.station === 'Rework').length;
-        const totalDebugs = history.filter(h => h.station === 'Debug').length;
+        // 3. Find dynamic repair timestamps
+        const failureCreatedAt = tracking.failure_created_at;
 
-        // 4. Compute "final status" label
+        // Find repair_completed_at: latest scan at stage_id = 10 (Rework) or 11 (Debug) with status RESOLVED or ACCEPTED
+        const repairRes = await pool.query(`
+            SELECT scanned_at FROM scans 
+            WHERE barcode = $1 AND stage_id IN (10, 11) AND scan_result IN ('RESOLVED', 'ACCEPTED', 'PASS') 
+            ORDER BY scanned_at DESC LIMIT 1
+        `, [barcode]);
+        const repairCompletedAt = repairRes.rows.length > 0 ? repairRes.rows[0].scanned_at : null;
+
+        // Find revalidated_passed_at: first successful scan at any stage that was >= the failed stage, scanned after repair_completed_at (if exists), or after failure_created_at
+        let revalidatedPassedAt = null;
+        if (failureCreatedAt) {
+            const revalQuery = `
+                SELECT scanned_at FROM scans 
+                WHERE barcode = $1 
+                  AND scan_result = 'ACCEPTED' 
+                  AND scanned_at > $2
+                ORDER BY scanned_at ASC LIMIT 1
+            `;
+            const revalRes = await pool.query(revalQuery, [barcode, repairCompletedAt || failureCreatedAt]);
+            if (revalRes.rows.length > 0) {
+                revalidatedPassedAt = revalRes.rows[0].scanned_at;
+            }
+        }
+
+        // 4. Compute summary stats
+        const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'DEBUG' || h.status === 'FAILED').length;
+        const totalReworks = history.filter((h: any) => h.station === 'Rework').length;
+        const totalDebugs = history.filter((h: any) => h.station === 'Debug').length;
+
+        // 5. Compute "final status" label
         const status = (tracking.current_status || '').toUpperCase();
         let finalStatusLabel = 'IN PRODUCTION';
         if (status === 'ACCEPTED' && tracking.current_stage === 'Packing') {
@@ -134,11 +164,12 @@ export const trackBarcode = async (req: Request, res: Response) => {
             quantity: tracking.quantity || '-',
             current_stage: tracking.current_stage || 'Unknown',
             current_status: status,
+            failed_stage: tracking.failed_stage || null,
             final_status_label: finalStatusLabel,
             last_updated_at: tracking.last_updated_at,
-            failure_created_at: tracking.failure_created_at,
-            repair_completed_at: tracking.repair_completed_at,
-            revalidated_passed_at: tracking.revalidated_passed_at,
+            failure_created_at: failureCreatedAt,
+            repair_completed_at: repairCompletedAt,
+            revalidated_passed_at: revalidatedPassedAt,
             total_failures: totalFailures,
             total_reworks: totalReworks,
             total_debugs: totalDebugs,
@@ -148,5 +179,47 @@ export const trackBarcode = async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error('❌ Error in trackBarcode:', err);
         return res.status(500).json({ error: 'Failed to retrieve traceability data: ' + err.message });
+    }
+};
+
+export const validateScanController = async (req: Request, res: Response) => {
+    const { stage_code, barcode, batch_number, work_order_id, failed_stage_id } = req.body;
+
+    if (!stage_code || !barcode || !batch_number) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing required validation parameters: stage_code, barcode, and batch_number are required.'
+        });
+    }
+
+    try {
+        const result = await ValidationService.validateScanBeforeAction(stage_code, {
+            barcode,
+            batch_number,
+            work_order_id: work_order_id ? parseInt(work_order_id) : null,
+            failed_stage_id: failed_stage_id ? parseInt(failed_stage_id) : null
+        });
+
+        return res.status(200).json(result);
+    } catch (err: any) {
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({
+                success: false,
+                error: err.message,
+                errorCode: err.errorCode,
+                suggestedAction: err.suggestedAction,
+                severity: err.severity,
+                currentStage: err.currentStage,
+                requiredStage: err.requiredStage,
+                workOrder: err.workOrder,
+                batch: err.batch,
+                actualBatch: err.actualBatch,
+                actualStage: err.actualStage
+            });
+        }
+        return res.status(500).json({
+            success: false,
+            error: err.message || 'Internal Server Error during pre-validation.'
+        });
     }
 };

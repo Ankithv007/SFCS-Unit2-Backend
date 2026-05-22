@@ -78,16 +78,20 @@ export class BatchManagementService {
         const prevStageId = prevStageIdRes.rows.length > 0 ? prevStageIdRes.rows[0].id : null;
 
         let statusFilter = '';
-        if (status === 'completed') {
-            statusFilter = 'AND COALESCE(p.accepted_qty, 0) >= w.quantity';
-        } else if (status === 'pending') {
-            statusFilter = 'AND COALESCE(p.accepted_qty, 0) < w.quantity';
+        if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
+            if (status === 'completed') {
+                statusFilter = 'AND COALESCE(p.accepted_qty, 0) >= w.quantity';
+            } else if (status === 'pending') {
+                statusFilter = 'AND COALESCE(p.accepted_qty, 0) < w.quantity';
+            }
         }
         
         let searchFilter = '';
+        let searchFilterCount = '';
         const searchParams: any[] = [];
         if (search && search.trim() !== '') {
             searchFilter = `AND (b.batch_number ILIKE $5 OR w.wo_number ILIKE $5 OR w.customer_name ILIKE $5 OR w.model ILIKE $5)`;
+            searchFilterCount = `AND (b.batch_number ILIKE $2 OR w.wo_number ILIKE $2 OR w.customer_name ILIKE $2 OR w.model ILIKE $2)`;
             searchParams.push(`%${search.trim()}%`);
         }
 
@@ -144,14 +148,23 @@ export class BatchManagementService {
                 w.model,
                 w.quantity as "workOrderQty",
                 
-                0 as "previousStagePassed",
-                0 as scanned,
+                (
+                    SELECT COUNT(DISTINCT s.barcode)
+                    FROM scans s
+                    JOIN units u2 ON s.barcode = u2.barcode
+                    WHERE s.batch_id = b.id AND s.stage_id = $1 AND u2.failed_stage_id = ps.id
+                ) as scanned,
                 
                 COUNT(u.barcode) as pending,
                 ps.stage_name as "sourceStage",
                 ps.id as "failedStageId",
                 
-                0 as passed,
+                (
+                    SELECT COUNT(DISTINCT s.barcode)
+                    FROM scans s
+                    JOIN units u2 ON s.barcode = u2.barcode
+                    WHERE s.batch_id = b.id AND s.stage_id = $1 AND u2.failed_stage_id = ps.id AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                ) as passed,
                 COUNT(u.barcode) as rework,
                 COUNT(u.barcode) as debug,
                 b.status
@@ -164,7 +177,7 @@ export class BatchManagementService {
               AND ($1::int IS NULL OR true)
               AND ($4::int IS NULL OR true)
             GROUP BY b.id, w.id, ps.id, ps.stage_name
-            ORDER BY b.created_at DESC LIMIT $2 OFFSET $3
+            ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         ` : `
             SELECT 
                 b.id, 
@@ -210,7 +223,7 @@ export class BatchManagementService {
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
             WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
-            ORDER BY b.created_at DESC LIMIT $2 OFFSET $3
+            ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         `;
         
         const result = await pool.query(query, [stageId, limit, offset, prevStageId, ...searchParams]);
@@ -221,14 +234,14 @@ export class BatchManagementService {
             JOIN work_orders w ON b.work_order_id = w.id
             JOIN units u ON u.batch_id = b.id
             JOIN production_stages ps ON u.failed_stage_id = ps.id
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
+            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
               AND u.current_status = '${stageCode}'
               AND ($1::int IS NULL OR true)
         ` : `
             SELECT COUNT(*) as count FROM batches b 
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
+            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
         `;
         
         const countRes = await pool.query(countQuery, searchParams.length > 0 ? [stageId, searchParams[0]] : [stageId]);

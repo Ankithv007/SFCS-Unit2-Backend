@@ -55,8 +55,10 @@ export class AuditService {
 
     static async getScansByBatchAndStage(batchId: string, stageCode: string) {
         const result = await pool.query(`
-            SELECT s.*, s.scan_result as status FROM scans s
+            SELECT s.*, s.scan_result as status, m.unit_serial_number 
+            FROM scans s
             JOIN production_stages ps ON s.stage_id = ps.id
+            LEFT JOIN unit_serial_mapping m ON s.barcode = m.barcode
             WHERE s.batch_id = $1 AND ps.stage_code = $2
             ORDER BY s.scanned_at DESC
         `, [batchId, stageCode]);
