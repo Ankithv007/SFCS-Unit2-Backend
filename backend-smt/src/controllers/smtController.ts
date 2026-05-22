@@ -584,11 +584,24 @@ export const createInspection = async (req: Request, res: Response) => {
             }
         }
 
+        let finalReworkReason = rework_reason || null;
+        if (process_step === 'SPI' && !finalReworkReason) {
+            const lastFail = await pool.query(
+                `SELECT rework_reason FROM smt_inspections 
+                 WHERE serial_id = $1 AND process_step = $2 AND status = 'FAIL' AND rework_reason IS NOT NULL AND rework_reason != ''
+                 ORDER BY scanned_at DESC LIMIT 1`,
+                [serial_id, process_step]
+            );
+            if ((lastFail.rowCount ?? 0) > 0) {
+                finalReworkReason = lastFail.rows[0].rework_reason;
+            }
+        }
+
         // Standard Insert Logic for other steps or new Post AOI / revalidation scans
         const result = await pool.query(
             `INSERT INTO smt_inspections (serial_id, process_step, scanned_by, status, rework_reason) 
              VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [serial_id, process_step, scanned_by, status || 'PASS', rework_reason || null]
+            [serial_id, process_step, scanned_by, status || 'PASS', finalReworkReason]
         );
 
         // Also update the main status in serial_numbers
@@ -663,7 +676,7 @@ export const createProcessSetup = async (req: Request, res: Response) => {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
             [work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side]
         );
-        
+
         const newId = insertResult.rows[0].id;
         const joinedResult = await pool.query(
             `SELECT ps.*, wo.panel_quantity as panel_qty 
@@ -672,7 +685,7 @@ export const createProcessSetup = async (req: Request, res: Response) => {
              WHERE ps.id = $1`,
             [newId]
         );
-        
+
         res.status(201).json(joinedResult.rows[0]);
     } catch (err) {
         logger.error("Error creating process setup:", err);

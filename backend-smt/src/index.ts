@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import smtRoutes from './routes/smtRoutes';
+import smtTrackRoutes from './routes/smtTrackRoutes';
 import workorderHistoryRoutes from './routes/workorderHistory.routes';
 import pool from './config/db';
 import { createLogger } from './utils/logger';
@@ -49,6 +50,8 @@ const initDB = async () => {
 // Mount routes with multiple possible prefixes for resilience
 app.use('/api', smtRoutes);
 app.use('/api/smt', smtRoutes);
+app.use('/api/track', smtTrackRoutes);
+app.use('/api/smt/track', smtTrackRoutes);
 app.use('/api', workorderHistoryRoutes);
 app.use('/api/smt', workorderHistoryRoutes);
 
