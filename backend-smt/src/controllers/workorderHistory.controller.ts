@@ -13,13 +13,14 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
 
     try {
         let query = `
-            SELECT 
+            SELECT
                 wo.id as work_order_id,
                 wo.area_id,
                 wo.line_id,
                 wo.product_name,
                 wo.quantity as total_qty,
-                (SELECT COUNT(*)::int FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id) as completed_qty,
+                (SELECT COUNT(*)::int FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id) as generated_qty,
+                (SELECT COUNT(*)::int FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status = 'COMPLETED') as completed_qty,
                 wo.created_by,
                 wo.created_at as run_date_time
             FROM smt_work_orders wo
@@ -55,17 +56,18 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
         // Process rows to add status and balanceQty
         const history = result.rows.map(row => {
             const totalQty = parseInt(row.total_qty) || 0;
+            const generatedQty = parseInt(row.generated_qty) || 0;
             const completedQty = parseInt(row.completed_qty) || 0;
             const balanceQty = Math.max(0, totalQty - completedQty);
 
             // STATUS LOGIC (CRITICAL)
             // ACTIVE: If serial generation started (exists in serial table)
             // INACTIVE: If no serial generation yet
-            // COMPLETED: If completedQty == totalQty
+            // COMPLETED: If completedQty >= totalQty
             let status = 'INACTIVE';
             if (completedQty >= totalQty && totalQty > 0) {
                 status = 'COMPLETED';
-            } else if (completedQty > 0) {
+            } else if (generatedQty > 0) {
                 status = 'ACTIVE';
             }
 

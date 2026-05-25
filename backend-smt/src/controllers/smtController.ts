@@ -605,7 +605,11 @@ export const createInspection = async (req: Request, res: Response) => {
         );
 
         // Also update the main status in serial_numbers
-        const serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
+        let serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
+        if (process_step === 'SMT FG' && (!status || status === 'PASS')) {
+            serialStatus = 'COMPLETED';
+        }
+
         await pool.query(
             'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
             [serialStatus, serial_id]
@@ -760,7 +764,7 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
                     FROM smt_inspections
                     ORDER BY serial_id, scanned_at DESC
                 ) latest ON sn.id = latest.serial_id
-                WHERE latest.process_step = 'Post AOI' AND latest.status = 'PASS'
+                WHERE latest.process_step = 'SMT FG' AND latest.status = 'PASS'
                 GROUP BY sn.work_order_id
             ) passed ON wo.id = passed.work_order_id
             WHERE wo.area_id = $1

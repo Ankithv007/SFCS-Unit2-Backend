@@ -102,3 +102,107 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to retrieve traceability data: ' + err.message });
     }
 };
+
+export const trackWorkOrder = async (req: Request, res: Response) => {
+    const { woId } = req.params;
+
+    if (!woId || woId.trim() === '') {
+        return res.status(400).json({ error: 'Work Order ID is required.' });
+    }
+
+    const inputValue = woId.trim().toUpperCase();
+
+    try {
+        // 1. Find the work order record
+        const woResult = await pool.query(
+            `SELECT * FROM smt_work_orders WHERE id = $1`,
+            [inputValue]
+        );
+
+        if ((woResult.rowCount ?? 0) === 0) {
+            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.` });
+        }
+
+        const wo = woResult.rows[0];
+
+        // 2. Fetch all serials for this WO
+        const serialsResult = await pool.query(`
+            SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at
+            FROM smt_serial_numbers sn
+            WHERE sn.work_order_id = $1
+            ORDER BY sn.id ASC
+        `, [wo.id]);
+
+        const serials = serialsResult.rows;
+
+        // 3. Fetch all inspections for these serials
+        const historyResult = await pool.query(`
+            SELECT i.serial_id, i.process_step, i.status, i.scanned_by, i.scanned_at, i.rework_reason
+            FROM smt_inspections i
+            JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+            WHERE sn.work_order_id = $1
+            ORDER BY i.scanned_at ASC
+        `, [wo.id]);
+
+        const historyBySerial: { [key: number]: any[] } = {};
+        historyResult.rows.forEach((row: any) => {
+            if (!historyBySerial[row.serial_id]) historyBySerial[row.serial_id] = [];
+            historyBySerial[row.serial_id].push(row);
+        });
+
+        const mappedSerials = serials.map((s: any) => {
+            const history = historyBySerial[s.id] || [];
+            let currentStage = 'Pending';
+            let currentStatus = 'PENDING';
+            if (history.length > 0) {
+                const last = history[history.length - 1];
+                currentStage = last.process_step;
+                currentStatus = last.status;
+            }
+            const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'FAIL').length;
+            const totalReworks = history.filter((h: any) => h.process_step === 'Rework').length;
+            const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
+
+            const step_status: { [key: string]: string } = {};
+            const stepNames = ['Serial Number', 'PCB Generation', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+            stepNames.forEach(step => {
+                const stepHist = history.filter((h: any) => h.process_step === step);
+                if (stepHist.length > 0) {
+                    step_status[step] = stepHist[stepHist.length - 1].status;
+                } else {
+                    step_status[step] = '-';
+                }
+            });
+
+            let finalStatusLabel = 'Pending';
+            if (step_status['SMT FG'] === 'PASS') {
+                finalStatusLabel = 'Completed';
+            }
+
+            return {
+                serial_number: s.serial_number,
+                current_stage: currentStage,
+                current_status: currentStatus,
+                final_status_label: finalStatusLabel,
+                total_failures: totalFailures,
+                total_reworks: totalReworks,
+                total_passed: totalPassed,
+                step_status: step_status,
+                created_at: s.created_at
+            };
+        });
+
+        return res.status(200).json({
+            work_order_id: wo.id || wo.work_order_id,
+            product_name: wo.product_name,
+            quantity: wo.quantity,
+            line_id: wo.line_id,
+            total_serials: serials.length,
+            serials: mappedSerials
+        });
+
+    } catch (err: any) {
+        logger.error('❌ Error in trackWorkOrder:', err);
+        return res.status(500).json({ error: 'Failed to retrieve traceability data: ' + err.message });
+    }
+};

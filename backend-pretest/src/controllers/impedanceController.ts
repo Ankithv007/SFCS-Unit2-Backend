@@ -537,3 +537,39 @@ export const searchComponent = async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 };
+
+// Delete a single scan
+export const deleteScan = async (req: Request, res: Response) => {
+    const { scan_id } = req.params;
+    const userRole = (req as any).user?.role;
+    const lowerRole = userRole?.toLowerCase();
+    
+    if (lowerRole !== 'admin' && lowerRole !== 'super admin') {
+        return res.status(403).json({ error: `Only Admin or Super Admin can delete this scan.` });
+    }
+
+    try {
+        const scanRes = await pool.query('SELECT barcode, session_id FROM impedance_scans WHERE id = $1', [scan_id]);
+        if (scanRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Scan not found' });
+        }
+        const { barcode, session_id } = scanRes.rows[0];
+
+        const sessionRes = await pool.query('SELECT batch_id FROM impedance_sessions WHERE id = $1', [session_id]);
+        const batch_id = sessionRes.rows.length > 0 ? sessionRes.rows[0].batch_id : null;
+
+        await pool.query('DELETE FROM impedance_scans WHERE id = $1', [scan_id]);
+        
+        if (batch_id) {
+            await pool.query(
+                "DELETE FROM barcode_stage_history WHERE barcode = $1 AND batch_id = $2 AND stage_name = 'Pre-Impedance'",
+                [barcode, batch_id]
+            );
+        }
+
+        res.json({ message: 'Scan deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting impedance scan:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
