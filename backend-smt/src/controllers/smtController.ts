@@ -93,7 +93,7 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
                     SELECT COUNT(DISTINCT i.serial_id) 
                     FROM smt_inspections i 
                     JOIN smt_serial_numbers sn ON i.serial_id = sn.id 
-                    WHERE sn.work_order_id = wo.id AND i.process_step = 'PCB Generation' AND i.status = 'PASS'
+                    WHERE sn.work_order_id = wo.id AND i.process_step = 'PCB Registration' AND i.status = 'PASS'
                 ) as scanned_count,
                 (
                     SELECT COUNT(*)

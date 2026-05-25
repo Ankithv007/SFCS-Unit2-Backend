@@ -164,7 +164,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
-            const stepNames = ['Serial Number', 'PCB Generation', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+            const stepNames = ['Serial Number', 'PCB Registration', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
             stepNames.forEach(step => {
                 const stepHist = history.filter((h: any) => h.process_step === step);
                 if (stepHist.length > 0) {
