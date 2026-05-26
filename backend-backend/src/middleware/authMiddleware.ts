@@ -22,7 +22,7 @@ export const authorizeSuperAdmin = (req: AuthRequest, res: Response, next: NextF
         const token = authHeader.split(' ')[1];
         try {
             const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
-            if (decoded && decoded.role && decoded.role.toLowerCase() === 'superadmin') {
+            if (decoded && decoded.role && (decoded.role === 'Super Admin' || decoded.role.toLowerCase().replace(/\s/g, '') === 'superadmin')) {
                 return next();
             }
         } catch (e) {

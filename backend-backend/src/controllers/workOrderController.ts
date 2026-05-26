@@ -83,14 +83,52 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
         return res.status(403).json({ error: "Access denied: Admins only" });
     }
 
+    const client = await pool.connect();
     try {
-        const result = await pool.query('DELETE FROM work_orders WHERE id = $1 RETURNING *', [id]);
+        await client.query('BEGIN');
+        
+        // Find all batch IDs for this work order
+        const batchRes = await client.query('SELECT id FROM batches WHERE work_order_id = $1', [id]);
+        const batchIds = batchRes.rows.map(r => r.id);
+        
+        if (batchIds.length > 0) {
+            // Find all barcodes for these batches
+            const unitsRes = await client.query('SELECT barcode FROM units WHERE batch_id = ANY($1::int[])', [batchIds]);
+            const barcodes = unitsRes.rows.map(r => r.barcode);
+
+            if (barcodes.length > 0) {
+                // Delete rework/debug sessions first (references scans and units)
+                await client.query('DELETE FROM rework_sessions WHERE barcode = ANY($1::text[])', [barcodes]);
+                await client.query('DELETE FROM debug_sessions WHERE barcode = ANY($1::text[])', [barcodes]);
+                await client.query('DELETE FROM unit_serial_mapping WHERE barcode = ANY($1::text[])', [barcodes]);
+            }
+
+            // Delete all scans referencing these batches
+            await client.query('DELETE FROM scans WHERE batch_id = ANY($1::int[])', [batchIds]);
+            
+            // Now safe to delete units
+            await client.query('DELETE FROM units WHERE batch_id = ANY($1::int[])', [batchIds]);
+
+            // Delete batch stage progress
+            await client.query('DELETE FROM batch_stage_progress WHERE batch_id = ANY($1::int[])', [batchIds]);
+            
+            // Delete batches
+            await client.query('DELETE FROM batches WHERE id = ANY($1::int[])', [batchIds]);
+        }
+        
+        const result = await client.query('DELETE FROM work_orders WHERE id = $1 RETURNING *', [id]);
+        
+        await client.query('COMMIT');
+
         if (result.rowCount === 0) {
             return res.status(404).json({ error: "Work Order not found" });
         }
         res.status(200).json({ message: "Work Order deleted successfully" });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error("Error deleting work order:", err);
         res.status(500).json({ error: "Failed to delete work order" });
+    } finally {
+        client.release();
     }
 };

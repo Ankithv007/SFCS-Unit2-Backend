@@ -161,6 +161,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             }
             const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'FAIL').length;
             const totalReworks = history.filter((h: any) => h.process_step === 'Rework').length;
+            const totalDebugs = history.filter((h: any) => h.process_step === 'Debug').length;
             const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
@@ -186,6 +187,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                 final_status_label: finalStatusLabel,
                 total_failures: totalFailures,
                 total_reworks: totalReworks,
+                total_debugs: totalDebugs,
                 total_passed: totalPassed,
                 step_status: step_status,
                 created_at: s.created_at
