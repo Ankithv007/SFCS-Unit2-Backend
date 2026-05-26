@@ -11,6 +11,29 @@ export class WorkflowEngineService {
      */
     static async validateTransition(unit: any | null, targetStage: any): Promise<boolean> {
         try {
+            // Rework and Debug stages are repair stages that bypass standard production flow validations
+            if (targetStage.stage_code === 'REWORK' || targetStage.stage_code === 'DEBUG') {
+                if (!unit) {
+                    throw new ValidationError({
+                        errorCode: 'NO_PRODUCTION_HISTORY',
+                        message: 'Barcode has no production scan history.',
+                        currentStage: targetStage.stage_name,
+                        suggestedAction: 'Please scan this barcode at its initial production stage first.',
+                        severity: 'error'
+                    });
+                }
+                if (unit.current_status !== targetStage.stage_code) {
+                    throw new ValidationError({
+                        errorCode: 'WRONG_REPAIR_STATUS',
+                        message: `Barcode is not in ${targetStage.stage_code} status. Current status is ${unit.current_status}.`,
+                        currentStage: targetStage.stage_name,
+                        suggestedAction: `Ensure this unit is marked as ${targetStage.stage_code} from its failed production stage first.`,
+                        severity: 'error'
+                    });
+                }
+                return true; // Bypass all standard sequence, transition, and USN checks!
+            }
+
             // New unit scanning for the first time
             if (!unit) {
                 if (targetStage.stage_order !== 1) {

@@ -30,13 +30,14 @@ export class TraceabilityService {
                 // Note: isFailure = 'REWORK' or 'DEBUG' scans. 
                 // Repair completion (RESOLVED/ACCEPTED) will NOT trigger isFailure, so we can save it as repair_remark.
                 const isRepairCompletion = ['RESOLVED', 'ACCEPTED'].includes(status.toUpperCase());
+                const isReworkOrDebugStage = [10, 11].includes(stageId);
 
                 const updateQuery = `
                     UPDATE units 
                     SET batch_id = COALESCE($1, batch_id),
                         current_stage_id = $2,
                         current_status = $3,
-                        ${isFailure ? 'failed_stage_id = $2, failed_at = NOW(), failure_remark = $6,' : ''}
+                        ${(isFailure && !isReworkOrDebugStage) ? 'failed_stage_id = $2, failed_at = NOW(), failure_remark = $6,' : ''}
                         ${isRepairCompletion ? 'repair_remark = $6,' : ''}
                         ${isRepairTransition ? 'repair_count = repair_count + 1,' : ''}
                         last_scanned_at = NOW(),
@@ -46,7 +47,7 @@ export class TraceabilityService {
                 `;
                 
                 const queryParams = [batchId, stageId, status, updatedBy, barcode];
-                if (isFailure || isRepairCompletion) {
+                if ((isFailure && !isReworkOrDebugStage) || isRepairCompletion) {
                     queryParams.push(remarks || null);
                 }
                 

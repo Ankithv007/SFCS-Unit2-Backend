@@ -140,6 +140,10 @@ export class ScanProcessingService {
                     nextStageId = unit.failed_stage_id;
                     nextStatus = 'PENDING'; // Force PENDING at origin stage so it must pass again
                 }
+            } else if (stageCode === 'REWORK' && ['FAILED', 'REWORK'].includes(payload.status.toUpperCase())) {
+                nextStatus = 'REWORK';
+            } else if (stageCode === 'DEBUG' && ['FAILED', 'DEBUG'].includes(payload.status.toUpperCase())) {
+                nextStatus = 'DEBUG';
             }
 
             await TraceabilityService.updateUnitState(
@@ -162,7 +166,47 @@ export class ScanProcessingService {
 
             // Fetch the inserted scan
             const scanRes = await client.query(
-                `SELECT s.*, s.scan_result as status, m.unit_serial_number 
+                `SELECT s.*, s.scan_result as status, m.unit_serial_number,
+                       (SELECT s2.scanned_at 
+                        FROM scans s2 
+                        WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                          AND (SELECT sf.stage_id 
+                               FROM scans sf 
+                               WHERE sf.barcode = s2.barcode 
+                                 AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                 AND sf.scanned_at < s2.scanned_at 
+                               ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                        ORDER BY s2.scanned_at DESC LIMIT 1) as remark_debug_time,
+                       (SELECT s2.scanned_at 
+                        FROM scans s2 
+                        WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                          AND (SELECT sf.stage_id 
+                               FROM scans sf 
+                               WHERE sf.barcode = s2.barcode 
+                                 AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                 AND sf.scanned_at < s2.scanned_at 
+                               ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                        ORDER BY s2.scanned_at DESC LIMIT 1) as repair_time,
+                       (SELECT s2.remarks 
+                        FROM scans s2 
+                        WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                          AND (SELECT sf.stage_id 
+                               FROM scans sf 
+                               WHERE sf.barcode = s2.barcode 
+                                 AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                 AND sf.scanned_at < s2.scanned_at 
+                               ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                        ORDER BY s2.scanned_at DESC LIMIT 1) as remark_debug_remarks,
+                       (SELECT s2.remarks 
+                        FROM scans s2 
+                        WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                          AND (SELECT sf.stage_id 
+                               FROM scans sf 
+                               WHERE sf.barcode = s2.barcode 
+                                 AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                 AND sf.scanned_at < s2.scanned_at 
+                               ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                        ORDER BY s2.scanned_at DESC LIMIT 1) as repair_remark
                  FROM scans s 
                  LEFT JOIN unit_serial_mapping m ON s.barcode = m.barcode
                  WHERE s.barcode = $1 AND s.batch_id = $2 AND s.stage_id = $3 

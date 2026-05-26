@@ -55,7 +55,47 @@ export class AuditService {
 
     static async getScansByBatchAndStage(batchId: string, stageCode: string) {
         const result = await pool.query(`
-            SELECT s.*, s.scan_result as status, m.unit_serial_number 
+            SELECT s.*, s.scan_result as status, m.unit_serial_number,
+                   (SELECT s2.scanned_at 
+                    FROM scans s2 
+                    WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                      AND (SELECT sf.stage_id 
+                           FROM scans sf 
+                           WHERE sf.barcode = s2.barcode 
+                             AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                             AND sf.scanned_at < s2.scanned_at 
+                           ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                    ORDER BY s2.scanned_at DESC LIMIT 1) as remark_debug_time,
+                   (SELECT s2.scanned_at 
+                    FROM scans s2 
+                    WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                      AND (SELECT sf.stage_id 
+                           FROM scans sf 
+                           WHERE sf.barcode = s2.barcode 
+                             AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                             AND sf.scanned_at < s2.scanned_at 
+                           ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                    ORDER BY s2.scanned_at DESC LIMIT 1) as repair_time,
+                   (SELECT s2.remarks 
+                    FROM scans s2 
+                    WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                      AND (SELECT sf.stage_id 
+                           FROM scans sf 
+                           WHERE sf.barcode = s2.barcode 
+                             AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                             AND sf.scanned_at < s2.scanned_at 
+                           ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                    ORDER BY s2.scanned_at DESC LIMIT 1) as remark_debug_remarks,
+                   (SELECT s2.remarks 
+                    FROM scans s2 
+                    WHERE s2.barcode = s.barcode AND s2.stage_id IN (10, 11) 
+                      AND (SELECT sf.stage_id 
+                           FROM scans sf 
+                           WHERE sf.barcode = s2.barcode 
+                             AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                             AND sf.scanned_at < s2.scanned_at 
+                           ORDER BY sf.scanned_at DESC LIMIT 1) = s.stage_id
+                    ORDER BY s2.scanned_at DESC LIMIT 1) as repair_remark
             FROM scans s
             JOIN production_stages ps ON s.stage_id = ps.id
             LEFT JOIN unit_serial_mapping m ON s.barcode = m.barcode

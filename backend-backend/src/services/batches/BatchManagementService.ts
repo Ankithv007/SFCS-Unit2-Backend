@@ -102,7 +102,7 @@ export class BatchManagementService {
                     FROM units u 
                     JOIN batches pb ON u.batch_id = pb.id 
                     WHERE pb.work_order_id = w.id 
-                      AND ($4::int IS NULL OR u.current_stage_id >= $4::int)
+                      AND ($4::int IS NULL OR u.current_stage_id > $4::int OR (u.current_stage_id = $4::int AND u.current_status = 'ACCEPTED'))
                 ), w.quantity
             )
         `;
@@ -151,8 +151,16 @@ export class BatchManagementService {
                 (
                     SELECT COUNT(DISTINCT s.barcode)
                     FROM scans s
-                    JOIN units u2 ON s.barcode = u2.barcode
-                    WHERE s.batch_id = b.id AND s.stage_id = $1 AND u2.failed_stage_id = ps.id
+                    WHERE s.batch_id = b.id 
+                      AND s.stage_id = $1 
+                      AND (
+                          SELECT sf.stage_id 
+                          FROM scans sf 
+                          WHERE sf.barcode = s.barcode 
+                            AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                            AND sf.scanned_at < s.scanned_at 
+                          ORDER BY sf.scanned_at DESC LIMIT 1
+                      ) = ps.id
                 ) as scanned,
                 
                 COUNT(u.barcode) as pending,
@@ -162,8 +170,17 @@ export class BatchManagementService {
                 (
                     SELECT COUNT(DISTINCT s.barcode)
                     FROM scans s
-                    JOIN units u2 ON s.barcode = u2.barcode
-                    WHERE s.batch_id = b.id AND s.stage_id = $1 AND u2.failed_stage_id = ps.id AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                    WHERE s.batch_id = b.id 
+                      AND s.stage_id = $1 
+                      AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                      AND (
+                          SELECT sf.stage_id 
+                          FROM scans sf 
+                          WHERE sf.barcode = s.barcode 
+                            AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                            AND sf.scanned_at < s.scanned_at 
+                          ORDER BY sf.scanned_at DESC LIMIT 1
+                      ) = ps.id
                 ) as passed,
                 COUNT(u.barcode) as rework,
                 COUNT(u.barcode) as debug,
@@ -194,30 +211,58 @@ export class BatchManagementService {
                 -- Previous Stage Passed calculation
                 ${previousStagePassedQuery} as "previousStagePassed",
                 
-                COALESCE(p.scanned_qty, 0) as scanned,
-                
                 (
-                    SELECT COUNT(u.barcode)
-                    FROM units u
-                    JOIN batches b3 ON u.batch_id = b3.id
-                    WHERE b3.work_order_id = w.id AND u.current_stage_id = $1 AND u.current_status = 'PENDING'
-                ) as pending,
+                    SELECT COUNT(DISTINCT s.barcode)
+                    FROM scans s
+                    WHERE s.batch_id = b.id AND s.stage_id = $1
+                ) as scanned,
+                
+                GREATEST(0, w.quantity - (
+                    SELECT COUNT(DISTINCT s.barcode)
+                    FROM scans s
+                    WHERE s.batch_id = b.id AND s.stage_id = $1
+                )) as pending,
+                
                 NULL as "sourceStage",
                 NULL as "failedStageId",
                 
-                COALESCE(p.accepted_qty, 0) as passed,
                 (
-                    SELECT COUNT(u.barcode)
+                    SELECT COUNT(*)
                     FROM units u
-                    JOIN batches b3 ON u.batch_id = b3.id
-                    WHERE b3.work_order_id = w.id AND u.current_stage_id = $1 AND u.current_status = 'REWORK'
+                    WHERE u.batch_id = b.id
+                      AND (u.current_stage_id > $1 OR (u.current_stage_id = $1 AND u.current_status = 'ACCEPTED'))
+                ) as passed,
+                
+                (
+                    SELECT COUNT(*)
+                    FROM units u
+                    WHERE u.batch_id = b.id
+                      AND u.failed_stage_id = $1
+                      AND (u.current_stage_id = $1 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
+                      AND u.current_status != 'ACCEPTED'
+                      AND (
+                          SELECT s.scan_result 
+                          FROM scans s 
+                          WHERE s.barcode = u.barcode AND s.stage_id = $1 AND s.scan_result IN ('REWORK', 'DEBUG') 
+                          ORDER BY s.scanned_at DESC LIMIT 1
+                      ) = 'REWORK'
                 ) as rework,
+                
                 (
-                    SELECT COUNT(u.barcode)
+                    SELECT COUNT(*)
                     FROM units u
-                    JOIN batches b3 ON u.batch_id = b3.id
-                    WHERE b3.work_order_id = w.id AND u.current_stage_id = $1 AND u.current_status = 'DEBUG'
+                    WHERE u.batch_id = b.id
+                      AND u.failed_stage_id = $1
+                      AND (u.current_stage_id = $1 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
+                      AND u.current_status != 'ACCEPTED'
+                      AND (
+                          SELECT s.scan_result 
+                          FROM scans s 
+                          WHERE s.barcode = u.barcode AND s.stage_id = $1 AND s.scan_result IN ('REWORK', 'DEBUG') 
+                          ORDER BY s.scanned_at DESC LIMIT 1
+                      ) = 'DEBUG'
                 ) as debug,
+                
                 b.status
             FROM batches b
             JOIN work_orders w ON b.work_order_id = w.id
