@@ -342,3 +342,376 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to retrieve traceability data: ' + err.message });
     }
 };
+
+export const getBatchUnitDetails = async (req: Request, res: Response) => {
+    const batchId = parseInt(req.query.batchId as string);
+    const stageCode = (req.query.stageCode as string || '').toUpperCase();
+    const columnType = req.query.columnType as string; // 'previousStagePassed' | 'scanned' | 'pending' | 'passed' | 'rework' | 'debug'
+    const failedStageId = req.query.failedStageId ? parseInt(req.query.failedStageId as string) : null;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const search = req.query.search as string || '';
+
+    if (!batchId || !stageCode || !columnType) {
+        return res.status(400).json({ error: 'Missing required parameters: batchId, stageCode, and columnType are required.' });
+    }
+
+    try {
+        // Find stage details
+        const stageRes = await pool.query('SELECT id, stage_order, stage_name FROM production_stages WHERE stage_code = $1', [stageCode]);
+        if (stageRes.rows.length === 0) {
+            return res.status(404).json({ error: `Stage with code "${stageCode}" not found.` });
+        }
+        const stageId = stageRes.rows[0].id;
+        const stageOrder = stageRes.rows[0].stage_order;
+
+        let prevStageId = null;
+        if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
+            const prevStageRes = await pool.query('SELECT id FROM production_stages WHERE stage_order = $1 - 1', [stageOrder]);
+            prevStageId = prevStageRes.rows.length > 0 ? prevStageRes.rows[0].id : null;
+        }
+
+        let baseQuery = '';
+        let queryParams: any[] = [];
+
+        if (stageCode === 'REWORK' || stageCode === 'DEBUG') {
+            // Rework / Debug Pages
+            if (columnType === 'scanned') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        s.scanned_at AS scan_date_time,
+                        s.scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        s.remarks AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.batch_id = $1
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.barcode IN (
+                        SELECT DISTINCT s2.barcode
+                        FROM scans s2
+                        WHERE s2.batch_id = $1 
+                          AND s2.stage_id = $2
+                          AND (
+                              SELECT sf.stage_id 
+                              FROM scans sf 
+                              WHERE sf.barcode = s2.barcode 
+                                AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                AND sf.scanned_at < s2.scanned_at 
+                              ORDER BY sf.scanned_at DESC LIMIT 1
+                          ) = $3
+                    )
+                `;
+                queryParams = [batchId, stageId, failedStageId];
+            } else if (columnType === 'pending' || columnType === 'rework' || columnType === 'debug') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        u.failed_at AS scan_date_time,
+                        u.last_scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.batch_id = $1 
+                      AND u.current_status = $2
+                      AND u.failed_stage_id = $3
+                `;
+                queryParams = [batchId, stageCode, failedStageId];
+            } else if (columnType === 'passed') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        s.scanned_at AS scan_date_time,
+                        s.scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        s.remarks AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.barcode IN (
+                        SELECT DISTINCT s2.barcode
+                        FROM scans s2
+                        WHERE s2.batch_id = $1 
+                          AND s2.stage_id = $2 
+                          AND s2.scan_result IN ('ACCEPTED', 'RESOLVED')
+                          AND (
+                              SELECT sf.stage_id 
+                              FROM scans sf 
+                              WHERE sf.barcode = s2.barcode 
+                                AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                AND sf.scanned_at < s2.scanned_at 
+                              ORDER BY sf.scanned_at DESC LIMIT 1
+                          ) = $3
+                    )
+                `;
+                queryParams = [batchId, stageId, failedStageId];
+            } else {
+                return res.status(400).json({ error: 'Invalid columnType for repair stage.' });
+            }
+        } else {
+            // Standard Stage Pages
+            if (columnType === 'previousStagePassed') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        u.last_scanned_at AS scan_date_time,
+                        u.last_scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE wo.id = (SELECT work_order_id FROM batches WHERE id = $1)
+                      AND ($2::int IS NULL OR u.current_stage_id > $2::int OR (u.current_stage_id = $2::int AND u.current_status = 'ACCEPTED'))
+                `;
+                queryParams = [batchId, prevStageId];
+            } else if (columnType === 'scanned') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        s.scanned_at AS scan_date_time,
+                        s.scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        s.remarks AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.batch_id = $1
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.barcode IN (
+                        SELECT DISTINCT s2.barcode
+                        FROM scans s2
+                        WHERE s2.batch_id = $1 AND s2.stage_id = $2
+                    )
+                `;
+                queryParams = [batchId, stageId];
+            } else if (columnType === 'pending') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        u.created_at AS scan_date_time,
+                        u.last_scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.batch_id = $1
+                      AND u.barcode NOT IN (
+                          SELECT DISTINCT s2.barcode
+                          FROM scans s2
+                          WHERE s2.batch_id = $1 AND s2.stage_id = $2
+                      )
+                `;
+                queryParams = [batchId, stageId];
+            } else if (columnType === 'passed') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        s.scanned_at AS scan_date_time,
+                        s.scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.scan_result = 'ACCEPTED'
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.batch_id = $1
+                      AND (u.current_stage_id > $2 OR (u.current_stage_id = $2 AND u.current_status = 'ACCEPTED'))
+                `;
+                queryParams = [batchId, stageId];
+            } else if (columnType === 'rework') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        u.failed_at AS scan_date_time,
+                        u.last_scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.batch_id = $1
+                      AND u.failed_stage_id = $2
+                      AND (u.current_stage_id = $2 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
+                      AND u.current_status != 'ACCEPTED'
+                      AND (
+                          SELECT s2.scan_result 
+                          FROM scans s2 
+                          WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.scan_result IN ('REWORK', 'DEBUG') 
+                          ORDER BY s2.scanned_at DESC LIMIT 1
+                      ) = 'REWORK'
+                `;
+                queryParams = [batchId, stageId];
+            } else if (columnType === 'debug') {
+                baseQuery = `
+                    SELECT 
+                        u.barcode,
+                        wo.wo_number,
+                        b.batch_number,
+                        wo.customer_name,
+                        wo.model,
+                        ps.stage_name AS current_stage,
+                        u.current_status AS status,
+                        u.failed_at AS scan_date_time,
+                        u.last_scanned_by AS operator,
+                        fps.stage_name AS failed_stage,
+                        u.failure_remark AS rework_debug_reason,
+                        m.unit_serial_number
+                    FROM units u
+                    JOIN batches b ON u.batch_id = b.id
+                    JOIN work_orders wo ON b.work_order_id = wo.id
+                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                    WHERE u.batch_id = $1
+                      AND u.failed_stage_id = $2
+                      AND (u.current_stage_id = $2 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
+                      AND u.current_status != 'ACCEPTED'
+                      AND (
+                          SELECT s2.scan_result 
+                          FROM scans s2 
+                          WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.scan_result IN ('REWORK', 'DEBUG') 
+                          ORDER BY s2.scanned_at DESC LIMIT 1
+                      ) = 'DEBUG'
+                `;
+                queryParams = [batchId, stageId];
+            } else {
+                return res.status(400).json({ error: 'Invalid columnType for standard stage.' });
+            }
+        }
+
+        const searchParamIdx = queryParams.length + 1;
+        let countQuery = `
+            WITH detail_list AS (${baseQuery})
+            SELECT COUNT(*) AS count FROM detail_list
+        `;
+
+        let listQuery = `
+            WITH detail_list AS (${baseQuery})
+            SELECT * FROM detail_list
+        `;
+
+        const finalQueryParams = [...queryParams];
+        if (search && search.trim() !== '') {
+            const searchFilter = `
+                WHERE (
+                    barcode ILIKE $${searchParamIdx} 
+                    OR unit_serial_number ILIKE $${searchParamIdx} 
+                    OR wo_number ILIKE $${searchParamIdx} 
+                    OR batch_number ILIKE $${searchParamIdx} 
+                    OR customer_name ILIKE $${searchParamIdx} 
+                    OR model ILIKE $${searchParamIdx}
+                    OR current_stage ILIKE $${searchParamIdx}
+                    OR status ILIKE $${searchParamIdx}
+                )
+            `;
+            countQuery += searchFilter;
+            listQuery += searchFilter;
+            finalQueryParams.push(`%${search.trim()}%`);
+        }
+
+        const pageIdx = finalQueryParams.length + 1;
+        const limitIdx = finalQueryParams.length + 2;
+        listQuery += ` ORDER BY scan_date_time DESC NULLS LAST LIMIT $${limitIdx} OFFSET $${pageIdx}`;
+
+        const offset = (page - 1) * limit;
+        const countRes = await pool.query(countQuery, finalQueryParams);
+        const listRes = await pool.query(listQuery, [...finalQueryParams, offset, limit]);
+
+        return res.status(200).json({
+            data: listRes.rows,
+            total: parseInt(countRes.rows[0].count),
+            page,
+            limit,
+            totalPages: Math.ceil(parseInt(countRes.rows[0].count) / limit)
+        });
+
+    } catch (err: any) {
+        console.error('❌ Error in getBatchUnitDetails:', err);
+        return res.status(500).json({ error: 'Failed to retrieve batch unit details: ' + err.message });
+    }
+};

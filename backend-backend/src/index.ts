@@ -19,6 +19,7 @@ import reworkRoutes from './routes/reworkRoutes';
 import debugRoutes from './routes/debugRoutes';
 import trackRoutes from './routes/trackRoutes';
 import backendEmployeeRoutes from './routes/backendEmployeeRoutes';
+import exportRoutes from './routes/exportRoutes';
 
 const logger = createLogger('BACKEND');
 const app = express();
@@ -48,6 +49,7 @@ app.use('/api/backend/rework', reworkRoutes);
 app.use('/api/backend/debug', debugRoutes);
 app.use('/api/backend/track', trackRoutes);
 app.use('/api/backend/employees', backendEmployeeRoutes);
+app.use('/api/backend/export', exportRoutes);
 
 // Root Route
 app.get('/', (req: Request, res: Response) => {

@@ -208,3 +208,499 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to retrieve traceability data: ' + err.message });
     }
 };
+
+export const getCountDetails = async (req: Request, res: Response) => {
+    const { workOrderId, stage, type, page = '1', limit = '10', search = '' } = req.query;
+
+    if (!workOrderId) {
+        return res.status(400).json({ error: 'workOrderId is required.' });
+    }
+
+    const woIdStr = (workOrderId as string).trim().toUpperCase();
+    const stageStr = (stage as string || '').trim();
+    const typeStr = (type as string || '').trim();
+    const pageNum = parseInt(page as string || '1');
+    const limitNum = parseInt(limit as string || '10');
+    const searchStr = (search as string || '').trim().toUpperCase();
+
+    try {
+        // Get all serial numbers under this Work Order
+        const serialsResult = await pool.query(
+            `SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at, sn.created_by, sn.status as main_status
+             FROM smt_serial_numbers sn
+             WHERE sn.work_order_id = $1
+             ORDER BY sn.id ASC`,
+            [woIdStr]
+        );
+
+        // Get all inspections under this Work Order
+        const inspectionsResult = await pool.query(
+            `SELECT i.serial_id, i.process_step, i.scanned_by, i.scanned_at, i.status, i.rework_reason
+             FROM smt_inspections i
+             JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+             WHERE sn.work_order_id = $1
+             ORDER BY i.scanned_at ASC`,
+            [woIdStr]
+        );
+
+        const inspectionsBySerial: Record<number, any[]> = {};
+        inspectionsResult.rows.forEach((row: any) => {
+            if (!inspectionsBySerial[row.serial_id]) {
+                inspectionsBySerial[row.serial_id] = [];
+            }
+            inspectionsBySerial[row.serial_id].push(row);
+        });
+
+        const mappedSerials = serialsResult.rows.map((sn: any) => {
+            const history = inspectionsBySerial[sn.id] || [];
+            const stepLatest: Record<string, any> = {};
+            history.forEach((insp: any) => {
+                stepLatest[insp.process_step] = insp;
+            });
+            return {
+                id: sn.id,
+                serial_number: sn.serial_number,
+                serial_format: sn.serial_format,
+                created_at: sn.created_at,
+                created_by: sn.created_by,
+                main_status: sn.main_status,
+                history,
+                stepLatest
+            };
+        });
+
+        const normStage = stageStr.toLowerCase();
+        const normType = typeStr.toLowerCase();
+
+        let filtered: any[] = [];
+
+        switch (normStage) {
+            case 'work order':
+            case 'work_order':
+            case 'work order history':
+            case 'work_order_history': {
+                if (normType === 'passed' || normType === 'completed') {
+                    // SMT FG must be PASS
+                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['SMT FG']?.scanned_by || 'System',
+                        scanned_at: s.stepLatest['SMT FG']?.scanned_at || s.created_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending' || normType === 'balance') {
+                    // SMT FG is NOT PASS
+                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else {
+                    // total/scanned
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['SMT FG']?.status || 'PENDING',
+                        scanned_by: s.created_by || 'System',
+                        scanned_at: s.created_at,
+                        rework_reason: null
+                    }));
+                }
+                break;
+            }
+
+            case 'serial number':
+            case 'serial_number': {
+                filtered = mappedSerials.map(s => ({
+                    serial_number: s.serial_number,
+                    status: 'GENERATED',
+                    scanned_by: s.created_by || 'System',
+                    scanned_at: s.created_at,
+                    rework_reason: null
+                }));
+                break;
+            }
+
+            case 'pcb registration':
+            case 'pcb_registration': {
+                if (normType === 'passed' || normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['PCB Registration']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
+                        scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['PCB Registration']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['PCB Registration']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
+                        scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
+                        rework_reason: null
+                    }));
+                }
+                break;
+            }
+
+            case 'printing': {
+                if (normType === 'passed' || normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'FAIL').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'FAIL',
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        rework_reason: s.stepLatest['Printing']?.rework_reason
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['Printing']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        rework_reason: s.stepLatest['Printing']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
+            case 'spi': {
+                if (normType === 'passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'FAIL').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'FAIL',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        rework_reason: s.stepLatest['SPI']?.rework_reason
+                    }));
+                } else if (normType === 'printing_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS' && s.stepLatest['SPI']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI'] !== undefined).map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['SPI']?.status,
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        rework_reason: s.stepLatest['SPI']?.rework_reason
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['SPI']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        rework_reason: s.stepLatest['SPI']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
+            case 'pre aoi':
+            case 'pre_aoi': {
+                if (normType === 'passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'FAIL').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'FAIL',
+                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Pre AOI']?.rework_reason
+                    }));
+                } else if (normType === 'spi_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS' && s.stepLatest['Pre AOI']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI'] !== undefined).map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['Pre AOI']?.status,
+                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Pre AOI']?.rework_reason
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['Pre AOI']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Pre AOI']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
+            case 'post aoi':
+            case 'post_aoi': {
+                if (normType === 'passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'FAIL').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'FAIL',
+                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Post AOI']?.rework_reason
+                    }));
+                } else if (normType === 'pre_aoi_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'PASS' && s.stepLatest['Post AOI']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI'] !== undefined).map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['Post AOI']?.status,
+                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Post AOI']?.rework_reason
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['Post AOI']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        rework_reason: s.stepLatest['Post AOI']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
+            case 'rework': {
+                const processedReworks = mappedSerials.map((s: any) => {
+                    const sorted = [...s.history].sort((a: any, b: any) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime());
+                    let latestFailure: any = null;
+                    for (let i = sorted.length - 1; i >= 0; i--) {
+                        if (sorted[i].process_step === 'Post AOI' && sorted[i].status === 'FAIL') {
+                            latestFailure = sorted[i];
+                            break;
+                        }
+                    }
+                    if (!latestFailure) return null;
+
+                    let latestRepair: any = null;
+                    for (let i = sorted.length - 1; i >= 0; i--) {
+                        if (sorted[i].process_step === 'Rework' && sorted[i].status === 'PASS' && new Date(sorted[i].scanned_at).getTime() > new Date(latestFailure.scanned_at).getTime()) {
+                            latestRepair = sorted[i];
+                            break;
+                        }
+                    }
+
+                    let latestRevalidation: any = null;
+                    if (latestRepair) {
+                        for (let i = sorted.length - 1; i >= 0; i--) {
+                            if (sorted[i].process_step === 'Post AOI' && new Date(sorted[i].scanned_at).getTime() > new Date(latestRepair.scanned_at).getTime()) {
+                                latestRevalidation = sorted[i];
+                                break;
+                            }
+                        }
+                    }
+
+                    let currentStatus = 'FAILED';
+                    if (latestRevalidation) {
+                        currentStatus = latestRevalidation.status === 'PASS' ? 'REVALIDATED_PASS' : 'FAILED_AGAIN';
+                    } else if (latestRepair) {
+                        currentStatus = 'READY_FOR_RECHECK';
+                    }
+
+                    return {
+                        serial_number: s.serial_number,
+                        status: currentStatus,
+                        failure_remark: latestFailure.rework_reason || 'Defect Registered',
+                        failed_time: latestFailure.scanned_at,
+                        failed_by: latestFailure.scanned_by,
+                        repair_remark: latestRepair ? latestRepair.rework_reason : null,
+                        repair_time: latestRepair ? latestRepair.scanned_at : null,
+                        repaired_by: latestRepair ? latestRepair.scanned_by : null
+                    };
+                }).filter((item: any) => item !== null);
+
+                if (normType === 'pending') {
+                    filtered = processedReworks.filter((s: any) => s.status === 'FAILED' || s.status === 'FAILED_AGAIN').map((s: any) => ({
+                        serial_number: s.serial_number,
+                        status: s.status === 'FAILED_AGAIN' ? 'FAILED AGAIN' : 'PENDING REPAIR',
+                        scanned_by: s.failed_by,
+                        scanned_at: s.failed_time,
+                        rework_reason: s.failure_remark
+                    }));
+                } else if (normType === 'passed' || normType === 'repaired') {
+                    filtered = processedReworks.filter((s: any) => s.status === 'READY_FOR_RECHECK' || s.status === 'REVALIDATED_PASS').map((s: any) => ({
+                        serial_number: s.serial_number,
+                        status: s.status === 'REVALIDATED_PASS' ? 'PASSED RECHECK' : 'READY FOR RECHECK',
+                        scanned_by: s.repaired_by,
+                        scanned_at: s.repair_time,
+                        rework_reason: s.repair_remark
+                    }));
+                } else {
+                    filtered = processedReworks.map((s: any) => ({
+                        serial_number: s.serial_number,
+                        status: s.status,
+                        scanned_by: s.failed_by,
+                        scanned_at: s.failed_time,
+                        rework_reason: s.failure_remark
+                    }));
+                }
+                break;
+            }
+
+            case 'smt fg':
+            case 'smt_fg': {
+                if (normType === 'passed' || normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['SMT FG']?.scanned_by,
+                        scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status === 'FAIL').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'FAIL',
+                        scanned_by: s.stepLatest['SMT FG']?.scanned_by,
+                        scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        rework_reason: s.stepLatest['SMT FG']?.rework_reason
+                    }));
+                } else if (normType === 'post_aoi_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
+                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'PASS' && s.stepLatest['SMT FG']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        rework_reason: null
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['SMT FG']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['SMT FG']?.scanned_by,
+                        scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        rework_reason: s.stepLatest['SMT FG']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
+            default:
+                filtered = mappedSerials.map(s => ({
+                    serial_number: s.serial_number,
+                    status: s.main_status || 'PENDING',
+                    scanned_by: s.created_by,
+                    scanned_at: s.created_at,
+                    rework_reason: null
+                }));
+                break;
+        }
+
+        if (searchStr) {
+            filtered = filtered.filter(item => (item.serial_number || '').toUpperCase().includes(searchStr));
+        }
+
+        const total = filtered.length;
+        const startIndex = (pageNum - 1) * limitNum;
+        const paginated = filtered.slice(startIndex, startIndex + limitNum);
+
+        return res.status(200).json({
+            total,
+            page: pageNum,
+            limit: limitNum,
+            data: paginated
+        });
+
+    } catch (err: any) {
+        logger.error('❌ Error in getCountDetails:', err);
+        return res.status(500).json({ error: 'Failed to retrieve count details: ' + err.message });
+    }
+};
