@@ -217,11 +217,24 @@ export class BatchManagementService {
                     WHERE s.batch_id = b.id AND s.stage_id = $1
                 ) as scanned,
                 
-                GREATEST(0, w.quantity - (
-                    SELECT COUNT(DISTINCT s.barcode)
-                    FROM scans s
-                    WHERE s.batch_id = b.id AND s.stage_id = $1
-                )) as pending,
+                CASE WHEN $4::int IS NULL THEN
+                    GREATEST(0, w.quantity - (
+                        SELECT COUNT(DISTINCT s.barcode)
+                        FROM scans s
+                        WHERE s.batch_id = b.id AND s.stage_id = $1
+                    ))
+                ELSE
+                    (
+                        SELECT COUNT(DISTINCT u.barcode)
+                        FROM units u
+                        WHERE u.batch_id = b.id
+                          AND u.barcode NOT IN (
+                              SELECT s2.barcode
+                              FROM scans s2
+                              WHERE s2.batch_id = b.id AND s2.stage_id = $1
+                          )
+                    )
+                END as pending,
                 
                 NULL as "sourceStage",
                 NULL as "failedStageId",

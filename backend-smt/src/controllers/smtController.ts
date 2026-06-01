@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
+import * as ExcelJS from 'exceljs';
+
 
 const logger = createLogger('SMT_CONTROLLER');
 
@@ -795,3 +797,215 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
         res.status(500).json({ error: "Failed to fetch work order history" });
     }
 };
+
+export const downloadSmtReport = async (req: Request, res: Response) => {
+    const { work_order_id, process_step } = req.query as { work_order_id?: string; process_step?: string };
+    if (!work_order_id || !process_step) {
+        return res.status(400).json({ error: 'work_order_id and process_step are required.' });
+    }
+
+    try {
+        const woRes = await pool.query(
+            'SELECT * FROM smt_work_orders WHERE id = $1',
+            [work_order_id]
+        );
+        if (woRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Work Order not found.' });
+        }
+        const wo = woRes.rows[0];
+
+        let query = '';
+        let params: any[] = [work_order_id, process_step];
+        
+        if (process_step === 'Rework') {
+            query = `
+                SELECT 
+                    sn.serial_number AS barcode,
+                    r.scanned_by AS scanned_by,
+                    r.scanned_at AS scan_date_time,
+                    'ACCEPTED' AS status,
+                    (
+                        SELECT f.rework_reason 
+                        FROM smt_inspections f 
+                        WHERE f.serial_id = sn.id 
+                          AND f.status = 'FAIL' 
+                          AND f.scanned_at < r.scanned_at 
+                        ORDER BY f.scanned_at DESC LIMIT 1
+                    ) AS failure_remark,
+                    r.scanned_at AS repair_time,
+                    COALESCE(r.rework_reason, '-') AS repair_remark
+                FROM smt_serial_numbers sn
+                JOIN smt_inspections r ON sn.id = r.serial_id AND r.process_step = 'Rework' AND r.status = 'PASS'
+                WHERE sn.work_order_id = $1
+                ORDER BY r.scanned_at DESC
+            `;
+            params = [work_order_id];
+        } else {
+            query = `
+                SELECT DISTINCT ON (sn.serial_number)
+                    sn.serial_number AS barcode,
+                    COALESCE(i.scanned_by, '-') AS scanned_by,
+                    i.scanned_at AS scan_date_time,
+                    COALESCE(i.status, 'PENDING') AS status,
+                    COALESCE(i.rework_reason, '-') AS failure_remark,
+                    '-' AS repair_time,
+                    '-' AS repair_remark
+                FROM smt_serial_numbers sn
+                LEFT JOIN smt_inspections i ON sn.id = i.serial_id AND i.process_step = $2
+                WHERE sn.work_order_id = $1
+                ORDER BY sn.serial_number ASC, i.scanned_at DESC
+            `;
+        }
+
+        const result = await pool.query(query, params);
+        const rows = result.rows;
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet(`${process_step} Report`);
+
+        const labelStyle: Partial<ExcelJS.Style> = {
+            font: { bold: true, color: { argb: 'FF595959' }, name: 'Segoe UI', size: 10 },
+            alignment: { horizontal: 'left' }
+        };
+        const valueStyle: Partial<ExcelJS.Style> = {
+            font: { bold: true, name: 'Segoe UI', size: 10 },
+            alignment: { horizontal: 'left' }
+        };
+        const borderStyle: Partial<ExcelJS.Borders> = {
+            top: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            left: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            right: { style: 'thin', color: { argb: 'FFE0E0E0' } }
+        };
+
+        const metadata = [
+            { label: 'WO Number:', val: wo.id },
+            { label: 'Customer:', val: 'N/A' },
+            { label: 'Quantity:', val: wo.quantity },
+            { label: 'Model:', val: wo.product_name },
+            { label: 'Stage/Page Name:', val: process_step },
+            { label: 'Downloaded Date & Time:', val: new Date().toLocaleString() }
+        ];
+
+        metadata.forEach((item, idx) => {
+            const rowNumber = idx + 1;
+            worksheet.getCell(`A${rowNumber}`).value = item.label;
+            worksheet.getCell(`A${rowNumber}`).style = labelStyle;
+            worksheet.getCell(`B${rowNumber}`).value = item.val;
+            worksheet.getCell(`B${rowNumber}`).style = valueStyle;
+        });
+
+        worksheet.addRow([]);
+
+        const tableHeaders = [
+            'BARCODE',
+            'SCANNED BY',
+            'DATE & TIME',
+            'STATUS',
+            'FAILURE REMARK',
+            'REPAIR TIME',
+            'REPAIR REMARK'
+        ];
+        const headerRow = worksheet.addRow(tableHeaders);
+        headerRow.height = 26;
+
+        const headerFill: ExcelJS.Fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF2B579A' }
+        };
+
+        headerRow.eachCell((cell) => {
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI', size: 10 };
+            cell.fill = headerFill;
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = borderStyle;
+        });
+
+        rows.forEach((r: any) => {
+            const formatTime = (time: string | Date | null) => {
+                if (!time || time === '-') return '-';
+                return new Date(time).toLocaleString();
+            };
+
+            let displayStatus = r.status || 'PENDING';
+            if (displayStatus === 'PASS') displayStatus = 'ACCEPTED';
+            if (displayStatus === 'FAIL') displayStatus = 'REWORK';
+
+            const dataRow = worksheet.addRow([
+                r.barcode,
+                r.scanned_by,
+                formatTime(r.scan_date_time),
+                displayStatus,
+                r.failure_remark || '-',
+                formatTime(r.repair_time),
+                r.repair_remark || '-'
+            ]);
+            dataRow.height = 20;
+
+            const isRework = displayStatus === 'REWORK';
+
+            dataRow.eachCell((cell, colNumber) => {
+                cell.font = { name: 'Segoe UI', size: 10 };
+                cell.border = borderStyle;
+                
+                if (colNumber === 3 || colNumber === 4 || colNumber === 6) {
+                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                } else {
+                    cell.alignment = { horizontal: 'left', vertical: 'middle' };
+                }
+
+                if (isRework) {
+                    cell.fill = {
+                        type: 'pattern',
+                        pattern: 'solid',
+                        fgColor: { argb: 'FFFFF9C4' }
+                    };
+                }
+
+                if (colNumber === 4) {
+                    if (displayStatus === 'ACCEPTED') {
+                        cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (displayStatus === 'REWORK') {
+                        cell.font = { color: { argb: 'FFFFAF33' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (displayStatus === 'PENDING') {
+                        cell.font = { color: { argb: 'FF808080' }, italic: true, name: 'Segoe UI', size: 10 };
+                    }
+                }
+            });
+        });
+
+        worksheet.columns.forEach((column) => {
+            let maxLen = 0;
+            column.eachCell!({ includeEmpty: true }, (cell) => {
+                if (cell.row && (cell.row as any).number <= 7) return;
+                const len = cell.value ? cell.value.toString().length : 0;
+                if (len > maxLen) maxLen = len;
+            });
+            column.width = maxLen < 14 ? 14 : maxLen + 5;
+        });
+
+        worksheet.getColumn(1).width = 25; 
+        worksheet.getColumn(2).width = 25; 
+
+        worksheet.views = [{ state: 'frozen', ySplit: 8 }];
+
+        const safeWoId = work_order_id.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const nowStr = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        const filename = `SMT_${process_step}_Report_${safeWoId}_${nowStr}.xlsx`;
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
+        await workbook.xlsx.write(res);
+        res.end();
+
+    } catch (err: any) {
+        logger.error('Error generating Excel file for SMT:', err);
+        return res.status(500).json({ error: 'Failed to generate SMT Excel report: ' + err.message });
+    }
+};
+

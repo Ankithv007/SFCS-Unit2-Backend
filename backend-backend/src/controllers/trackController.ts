@@ -366,10 +366,16 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
         const stageOrder = stageRes.rows[0].stage_order;
 
         let prevStageId = null;
+        let prevStageName = '';
         if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
-            const prevStageRes = await pool.query('SELECT id FROM production_stages WHERE stage_order = $1 - 1', [stageOrder]);
-            prevStageId = prevStageRes.rows.length > 0 ? prevStageRes.rows[0].id : null;
+            const prevStageRes = await pool.query('SELECT id, stage_name FROM production_stages WHERE stage_order = $1 - 1', [stageOrder]);
+            if (prevStageRes.rows.length > 0) {
+                prevStageId = prevStageRes.rows[0].id;
+                prevStageName = prevStageRes.rows[0].stage_name;
+            }
         }
+        const prevStageLabel = prevStageName ? `${prevStageName} - Passed` : '-';
+        const prevStageEscaped = prevStageLabel.replace(/'/g, "''");
 
         let baseQuery = '';
         let queryParams: any[] = [];
@@ -385,6 +391,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        fps.stage_name AS previous_stage,
                         u.current_status AS status,
                         s.scanned_at AS scan_date_time,
                         s.scanned_by AS operator,
@@ -395,7 +402,12 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                     JOIN batches b ON u.batch_id = b.id
                     JOIN work_orders wo ON b.work_order_id = wo.id
                     LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.batch_id = $1
+                    LEFT JOIN scans s ON s.id = (
+                        SELECT s2.id 
+                        FROM scans s2 
+                        WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.batch_id = $1 
+                        ORDER BY s2.scanned_at DESC LIMIT 1
+                    )
                     LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
                     LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
                     WHERE u.barcode IN (
@@ -423,6 +435,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        fps.stage_name AS previous_stage,
                         u.current_status AS status,
                         u.failed_at AS scan_date_time,
                         u.last_scanned_by AS operator,
@@ -449,6 +462,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        fps.stage_name AS previous_stage,
                         u.current_status AS status,
                         s.scanned_at AS scan_date_time,
                         s.scanned_by AS operator,
@@ -459,7 +473,12 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                     JOIN batches b ON u.batch_id = b.id
                     JOIN work_orders wo ON b.work_order_id = wo.id
                     LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                    LEFT JOIN scans s ON s.id = (
+                        SELECT s2.id 
+                        FROM scans s2 
+                        WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.scan_result IN ('ACCEPTED', 'RESOLVED') 
+                        ORDER BY s2.scanned_at DESC LIMIT 1
+                    )
                     LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
                     LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
                     WHERE u.barcode IN (
@@ -493,6 +512,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        '${prevStageEscaped}'::varchar AS previous_stage,
                         u.current_status AS status,
                         u.last_scanned_at AS scan_date_time,
                         u.last_scanned_by AS operator,
@@ -518,6 +538,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        '${prevStageEscaped}'::varchar AS previous_stage,
                         u.current_status AS status,
                         s.scanned_at AS scan_date_time,
                         s.scanned_by AS operator,
@@ -528,7 +549,12 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                     JOIN batches b ON u.batch_id = b.id
                     JOIN work_orders wo ON b.work_order_id = wo.id
                     LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.batch_id = $1
+                    LEFT JOIN scans s ON s.id = (
+                        SELECT s2.id 
+                        FROM scans s2 
+                        WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.batch_id = $1 
+                        ORDER BY s2.scanned_at DESC LIMIT 1
+                    )
                     LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
                     LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
                     WHERE u.barcode IN (
@@ -539,34 +565,59 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                 `;
                 queryParams = [batchId, stageId];
             } else if (columnType === 'pending') {
-                baseQuery = `
-                    SELECT 
-                        u.barcode,
-                        wo.wo_number,
-                        b.batch_number,
-                        wo.customer_name,
-                        wo.model,
-                        ps.stage_name AS current_stage,
-                        u.current_status AS status,
-                        u.created_at AS scan_date_time,
-                        u.last_scanned_by AS operator,
-                        fps.stage_name AS failed_stage,
-                        u.failure_remark AS rework_debug_reason,
-                        m.unit_serial_number
-                    FROM units u
-                    JOIN batches b ON u.batch_id = b.id
-                    JOIN work_orders wo ON b.work_order_id = wo.id
-                    LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                    LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
-                    LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
-                    WHERE u.batch_id = $1
-                      AND u.barcode NOT IN (
-                          SELECT DISTINCT s2.barcode
-                          FROM scans s2
-                          WHERE s2.batch_id = $1 AND s2.stage_id = $2
-                      )
-                `;
-                queryParams = [batchId, stageId];
+                if (prevStageId === null) {
+                    baseQuery = `
+                        SELECT 
+                            NULL::varchar AS barcode,
+                            wo.wo_number,
+                            b.batch_number,
+                            wo.customer_name,
+                            wo.model,
+                            'Expected'::varchar AS current_stage,
+                            NULL::varchar AS previous_stage,
+                            'PENDING'::varchar AS status,
+                            NULL::timestamp AS scan_date_time,
+                            NULL::varchar AS operator,
+                            NULL::varchar AS failed_stage,
+                            NULL::varchar AS rework_debug_reason,
+                            NULL::varchar AS unit_serial_number
+                        FROM batches b
+                        JOIN work_orders wo ON b.work_order_id = wo.id
+                        WHERE b.id = $1
+                        LIMIT 0
+                    `;
+                    queryParams = [batchId];
+                } else {
+                    baseQuery = `
+                        SELECT 
+                            u.barcode,
+                            wo.wo_number,
+                            b.batch_number,
+                            wo.customer_name,
+                            wo.model,
+                            ps.stage_name AS current_stage,
+                            '${prevStageEscaped}'::varchar AS previous_stage,
+                            'PENDING'::varchar AS status,
+                            u.last_scanned_at AS scan_date_time,
+                            u.last_scanned_by AS operator,
+                            fps.stage_name AS failed_stage,
+                            u.failure_remark AS rework_debug_reason,
+                            m.unit_serial_number
+                        FROM units u
+                        JOIN batches b ON u.batch_id = b.id
+                        JOIN work_orders wo ON b.work_order_id = wo.id
+                        LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                        LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
+                        LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
+                        WHERE u.batch_id = $1
+                          AND u.barcode NOT IN (
+                              SELECT DISTINCT s2.barcode
+                              FROM scans s2
+                              WHERE s2.batch_id = $1 AND s2.stage_id = $2
+                          )
+                    `;
+                    queryParams = [batchId, stageId];
+                }
             } else if (columnType === 'passed') {
                 baseQuery = `
                     SELECT 
@@ -576,6 +627,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        '${prevStageEscaped}'::varchar AS previous_stage,
                         u.current_status AS status,
                         s.scanned_at AS scan_date_time,
                         s.scanned_by AS operator,
@@ -586,7 +638,12 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                     JOIN batches b ON u.batch_id = b.id
                     JOIN work_orders wo ON b.work_order_id = wo.id
                     LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                    LEFT JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2 AND s.scan_result = 'ACCEPTED'
+                    LEFT JOIN scans s ON s.id = (
+                        SELECT s2.id 
+                        FROM scans s2 
+                        WHERE s2.barcode = u.barcode AND s2.stage_id = $2 AND s2.scan_result = 'ACCEPTED' 
+                        ORDER BY s2.scanned_at DESC LIMIT 1
+                    )
                     LEFT JOIN production_stages fps ON u.failed_stage_id = fps.id
                     LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
                     WHERE u.batch_id = $1
@@ -602,6 +659,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        '${prevStageEscaped}'::varchar AS previous_stage,
                         u.current_status AS status,
                         u.failed_at AS scan_date_time,
                         u.last_scanned_by AS operator,
@@ -635,6 +693,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
                         wo.customer_name,
                         wo.model,
                         ps.stage_name AS current_stage,
+                        '${prevStageEscaped}'::varchar AS previous_stage,
                         u.current_status AS status,
                         u.failed_at AS scan_date_time,
                         u.last_scanned_by AS operator,
@@ -702,14 +761,29 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
         const countRes = await pool.query(countQuery, finalQueryParams);
         const listRes = await pool.query(listQuery, [...finalQueryParams, offset, limit]);
 
+        let totalRecords = parseInt(countRes.rows[0].count);
+        if (stageCode === 'PTH' && columnType === 'pending') {
+            const woRes = await pool.query(`
+                SELECT w.quantity, 
+                       (SELECT COUNT(DISTINCT s.barcode) FROM scans s WHERE s.batch_id = $1 AND s.stage_id = $2) as scanned
+                FROM batches b
+                JOIN work_orders w ON b.work_order_id = w.id
+                WHERE b.id = $1
+            `, [batchId, stageId]);
+            if (woRes.rows.length > 0) {
+                const qty = woRes.rows[0].quantity;
+                const scanned = parseInt(woRes.rows[0].scanned || 0);
+                totalRecords = Math.max(0, qty - scanned);
+            }
+        }
+
         return res.status(200).json({
             data: listRes.rows,
-            total: parseInt(countRes.rows[0].count),
+            total: totalRecords,
             page,
             limit,
-            totalPages: Math.ceil(parseInt(countRes.rows[0].count) / limit)
+            totalPages: Math.ceil(totalRecords / limit)
         });
-
     } catch (err: any) {
         console.error('❌ Error in getBatchUnitDetails:', err);
         return res.status(500).json({ error: 'Failed to retrieve batch unit details: ' + err.message });

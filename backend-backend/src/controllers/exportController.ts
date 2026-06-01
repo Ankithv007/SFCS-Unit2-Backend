@@ -42,6 +42,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
         const unitsQuery = `
             SELECT DISTINCT ON (u.barcode)
                 u.barcode,
+                m.unit_serial_number AS usn,
                 COALESCE(s.scanned_by, '-') AS scanned_by,
                 s.scanned_at AS scan_date_time,
                 s.scan_result AS status,
@@ -76,10 +77,11 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
                             AND sf.scanned_at < r.scanned_at 
                           ORDER BY sf.scanned_at DESC LIMIT 1
                       ) = $2
-                    ORDER BY r.scanned_at DESC LIMIT 1
+                    ORDER BY r.remarks DESC LIMIT 1
                 ) AS repair_remark
             FROM units u
             JOIN scans s ON u.barcode = s.barcode AND s.stage_id = $2
+            LEFT JOIN unit_serial_mapping m ON u.barcode = m.barcode
             WHERE u.batch_id = $1
             ORDER BY u.barcode ASC, s.scanned_at DESC
         `;
@@ -130,6 +132,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
         // Table Header Row (Row 8)
         const tableHeaders = [
             'BARCODE',
+            'USN',
             'SCANNED BY',
             'DATE & TIME',
             'STATUS',
@@ -162,6 +165,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
 
             const dataRow = worksheet.addRow([
                 u.barcode,
+                u.usn || '-',
                 u.scanned_by,
                 formatTime(u.scan_date_time),
                 u.status,
@@ -179,7 +183,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
                 cell.border = borderStyle;
                 
                 // Alignment
-                if (colNumber === 3 || colNumber === 4 || colNumber === 6) {
+                if (colNumber === 2 || colNumber === 4 || colNumber === 5 || colNumber === 7) {
                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 } else {
                     cell.alignment = { horizontal: 'left', vertical: 'middle' };
@@ -201,7 +205,7 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
                 }
 
                 // Status coloring
-                if (colNumber === 4) {
+                if (colNumber === 5) {
                     if (u.status === 'ACCEPTED' || u.status === 'PASSED') {
                         cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 }; // Rich Green
                     } else if (u.status === 'REWORK') {

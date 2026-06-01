@@ -22,7 +22,8 @@ import {
     getWorkOrderHistory,
     deleteProcessSetup,
     deleteWorkOrder,
-    deleteInspectionsForBatch
+    deleteInspectionsForBatch,
+    downloadSmtReport
 } from '../controllers/smtController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
@@ -47,6 +48,7 @@ router.patch('/serial-numbers/:id/status', updateSerialNumberStatus);
 router.post('/inspections', createInspection);
 router.get('/inspections', getInspections);
 router.delete('/inspections/batch', deleteInspectionsForBatch);
+router.get('/export/excel', downloadSmtReport);
 
 // Process Setups (SPI, AOI, etc.)
 router.post('/process-setups', createProcessSetup);

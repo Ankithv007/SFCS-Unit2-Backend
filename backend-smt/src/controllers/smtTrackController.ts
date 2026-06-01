@@ -272,6 +272,36 @@ export const getCountDetails = async (req: Request, res: Response) => {
         const normStage = stageStr.toLowerCase();
         const normType = typeStr.toLowerCase();
 
+        // Dynamic Previous Stage Calculator for SMT
+        const getSMTPreviousStage = (s: any, currentProcessStage: string) => {
+            const stg = currentProcessStage.toLowerCase();
+            if (stg === 'pcb registration' || stg === 'pcb_registration') {
+                return 'Serial Number';
+            }
+            if (stg === 'printing') {
+                return 'PCB Registration';
+            }
+            if (stg === 'spi') {
+                return 'Printing';
+            }
+            if (stg === 'pre aoi' || stg === 'pre_aoi') {
+                return 'SPI';
+            }
+            if (stg === 'post aoi' || stg === 'post_aoi') {
+                return 'Pre AOI';
+            }
+            if (stg === 'rework') {
+                return 'Post AOI';
+            }
+            if (stg === 'smt fg' || stg === 'smt_fg') {
+                return (s && s.stepLatest && s.stepLatest['Rework']) ? 'Rework' : 'Post AOI';
+            }
+            if (stg === 'work order' || stg === 'work_order' || stg === 'work order history' || stg === 'work_order_history') {
+                return (s && s.stepLatest && s.stepLatest['Rework']) ? 'Rework' : 'Post AOI';
+            }
+            return '-';
+        };
+
         let filtered: any[] = [];
 
         switch (normStage) {
@@ -286,6 +316,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['SMT FG']?.scanned_by || 'System',
                         scanned_at: s.stepLatest['SMT FG']?.scanned_at || s.created_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending' || normType === 'balance') {
@@ -295,6 +326,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else {
@@ -304,6 +336,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['SMT FG']?.status || 'PENDING',
                         scanned_by: s.created_by || 'System',
                         scanned_at: s.created_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 }
@@ -317,6 +350,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                     status: 'GENERATED',
                     scanned_by: s.created_by || 'System',
                     scanned_at: s.created_at,
+                    previous_stage: getSMTPreviousStage(s, stageStr),
                     rework_reason: null
                 }));
                 break;
@@ -330,6 +364,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
                         scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending') {
@@ -338,6 +373,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else {
@@ -346,6 +382,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['PCB Registration']?.status || 'PENDING',
                         scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
                         scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 }
@@ -359,6 +396,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Printing']?.scanned_by,
                         scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
@@ -367,6 +405,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'FAIL',
                         scanned_by: s.stepLatest['Printing']?.scanned_by,
                         scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Printing']?.rework_reason
                     }));
                 } else if (normType === 'pending') {
@@ -375,6 +414,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else {
@@ -383,6 +423,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['Printing']?.status || 'PENDING',
                         scanned_by: s.stepLatest['Printing']?.scanned_by,
                         scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Printing']?.rework_reason
                     }));
                 }
@@ -396,6 +437,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['SPI']?.scanned_by,
                         scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
@@ -404,6 +446,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'FAIL',
                         scanned_by: s.stepLatest['SPI']?.scanned_by,
                         scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['SPI']?.rework_reason
                     }));
                 } else if (normType === 'printing_passed' || normType === 'previous_passed') {
@@ -412,14 +455,16 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Printing']?.scanned_by,
                         scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS' && s.stepLatest['SPI']?.status !== 'PASS').map(s => ({
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status !== 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'scanned') {
@@ -428,6 +473,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['SPI']?.status,
                         scanned_by: s.stepLatest['SPI']?.scanned_by,
                         scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['SPI']?.rework_reason
                     }));
                 } else {
@@ -436,6 +482,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['SPI']?.status || 'PENDING',
                         scanned_by: s.stepLatest['SPI']?.scanned_by,
                         scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['SPI']?.rework_reason
                     }));
                 }
@@ -450,6 +497,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
@@ -458,6 +506,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'FAIL',
                         scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Pre AOI']?.rework_reason
                     }));
                 } else if (normType === 'spi_passed' || normType === 'previous_passed') {
@@ -466,14 +515,16 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['SPI']?.scanned_by,
                         scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS' && s.stepLatest['Pre AOI']?.status !== 'PASS').map(s => ({
+                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status !== 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'scanned') {
@@ -482,6 +533,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['Pre AOI']?.status,
                         scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Pre AOI']?.rework_reason
                     }));
                 } else {
@@ -490,6 +542,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['Pre AOI']?.status || 'PENDING',
                         scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Pre AOI']?.rework_reason
                     }));
                 }
@@ -504,6 +557,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Post AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
@@ -512,6 +566,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'FAIL',
                         scanned_by: s.stepLatest['Post AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Post AOI']?.rework_reason
                     }));
                 } else if (normType === 'pre_aoi_passed' || normType === 'previous_passed') {
@@ -520,14 +575,16 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'PASS' && s.stepLatest['Post AOI']?.status !== 'PASS').map(s => ({
+                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status !== 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'scanned') {
@@ -536,6 +593,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['Post AOI']?.status,
                         scanned_by: s.stepLatest['Post AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Post AOI']?.rework_reason
                     }));
                 } else {
@@ -544,6 +602,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['Post AOI']?.status || 'PENDING',
                         scanned_by: s.stepLatest['Post AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Post AOI']?.rework_reason
                     }));
                 }
@@ -595,7 +654,8 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         failed_by: latestFailure.scanned_by,
                         repair_remark: latestRepair ? latestRepair.rework_reason : null,
                         repair_time: latestRepair ? latestRepair.scanned_at : null,
-                        repaired_by: latestRepair ? latestRepair.scanned_by : null
+                        repaired_by: latestRepair ? latestRepair.scanned_by : null,
+                        previous_stage: 'Post AOI'
                     };
                 }).filter((item: any) => item !== null);
 
@@ -605,6 +665,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.status === 'FAILED_AGAIN' ? 'FAILED AGAIN' : 'PENDING REPAIR',
                         scanned_by: s.failed_by,
                         scanned_at: s.failed_time,
+                        previous_stage: s.previous_stage,
                         rework_reason: s.failure_remark
                     }));
                 } else if (normType === 'passed' || normType === 'repaired') {
@@ -613,6 +674,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.status === 'REVALIDATED_PASS' ? 'PASSED RECHECK' : 'READY FOR RECHECK',
                         scanned_by: s.repaired_by,
                         scanned_at: s.repair_time,
+                        previous_stage: s.previous_stage,
                         rework_reason: s.repair_remark
                     }));
                 } else {
@@ -621,6 +683,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.status,
                         scanned_by: s.failed_by,
                         scanned_at: s.failed_time,
+                        previous_stage: s.previous_stage,
                         rework_reason: s.failure_remark
                     }));
                 }
@@ -635,6 +698,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['SMT FG']?.scanned_by,
                         scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
@@ -643,6 +707,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'FAIL',
                         scanned_by: s.stepLatest['SMT FG']?.scanned_by,
                         scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['SMT FG']?.rework_reason
                     }));
                 } else if (normType === 'post_aoi_passed' || normType === 'previous_passed') {
@@ -651,14 +716,16 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: 'PASS',
                         scanned_by: s.stepLatest['Post AOI']?.scanned_by,
                         scanned_at: s.stepLatest['Post AOI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'PASS' && s.stepLatest['SMT FG']?.status !== 'PASS').map(s => ({
+                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status !== 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PENDING',
                         scanned_by: null,
                         scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
                 } else {
@@ -667,6 +734,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         status: s.stepLatest['SMT FG']?.status || 'PENDING',
                         scanned_by: s.stepLatest['SMT FG']?.scanned_by,
                         scanned_at: s.stepLatest['SMT FG']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['SMT FG']?.rework_reason
                     }));
                 }
@@ -679,6 +747,7 @@ export const getCountDetails = async (req: Request, res: Response) => {
                     status: s.main_status || 'PENDING',
                     scanned_by: s.created_by,
                     scanned_at: s.created_at,
+                    previous_stage: getSMTPreviousStage(s, stageStr),
                     rework_reason: null
                 }));
                 break;
@@ -704,3 +773,4 @@ export const getCountDetails = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to retrieve count details: ' + err.message });
     }
 };
+
