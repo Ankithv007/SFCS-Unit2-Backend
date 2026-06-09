@@ -108,4 +108,45 @@ export class AuditService {
     static async updateScanStatus(scanId: string, status: string, remarks: string) {
         await pool.query(`UPDATE scans SET scan_result = $1, remarks = $2 WHERE id = $3`, [status, remarks, scanId]);
     }
+
+    static async deleteScanById(scanId: string, actor?: string) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            const scanRes = await client.query('SELECT barcode, batch_id, stage_id FROM scans WHERE id = $1', [scanId]);
+            if (scanRes.rows.length === 0) {
+                await client.query('ROLLBACK');
+                throw new Error('Scan not found');
+            }
+
+            const { barcode, batch_id, stage_id } = scanRes.rows[0];
+
+            // determine stage code/name
+            const stageRes = await client.query('SELECT stage_code, stage_name FROM production_stages WHERE id = $1', [stage_id]);
+            const stageCode = stageRes.rows.length > 0 ? stageRes.rows[0].stage_code : null;
+            const stageName = stageRes.rows.length > 0 ? stageRes.rows[0].stage_name : null;
+
+            // delete the scan
+            await client.query('DELETE FROM scans WHERE id = $1', [scanId]);
+
+            // Note: barcode_stage_history table exists in some modules but may not be present
+            // in this service's database schema. Avoid attempting to delete from that
+            // table here to prevent errors when the table is absent.
+
+            // add audit log entry
+            try {
+                const desc = `Scan ${scanId} for barcode ${barcode} deleted by ${actor || 'system'}`;
+                await AuditService.createAuditLog('DELETE', 'scan', scanId.toString(), actor || 'system', desc, null, null);
+            } catch (e) {
+                // ignore audit log failures
+            }
+
+            await client.query('COMMIT');
+        } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
 }

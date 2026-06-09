@@ -1,4 +1,5 @@
 import express from 'express';
+import { authenticateToken, authorizeAdminOrSuperAdmin } from '../middleware/authMiddleware';
 import { 
     getEmployees, 
     createEmployee, 
@@ -15,6 +16,6 @@ router.post('/', createEmployee);
 router.post('/login', loginEmployee);
 router.put('/:id', updateEmployee);
 router.patch('/:id/status', toggleEmployeeStatus);
-router.delete('/:id', deleteEmployee);
+router.delete('/:id', authenticateToken, authorizeAdminOrSuperAdmin, deleteEmployee);
 
 export default router;

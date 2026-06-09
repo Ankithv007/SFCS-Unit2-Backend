@@ -79,8 +79,10 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
     const { id } = req.params;
     
     // Server-side role check
-    if (!['Admin', 'Super Admin'].includes(req.user?.role || '')) {
-        return res.status(403).json({ error: "Access denied: Admins only" });
+    const userRole = req.user?.role;
+    const allowed = (userRole || '').toString().toLowerCase().replace(/\s/g, '');
+    if (allowed !== 'admin' && allowed !== 'superadmin') {
+        return res.status(403).json({ error: 'You do not have permission to delete this record.' });
     }
 
     const client = await pool.connect();

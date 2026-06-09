@@ -62,9 +62,14 @@ export const updateScanStatus = async (req: Request, res: Response) => {
 };
 
 export const deleteBatch = async (req: Request, res: Response) => {
+    const userRole = (req as any).user?.role;
+    const lowerRole = (userRole || '').toString().toLowerCase().replace(/\s/g, '');
+    if (lowerRole !== 'admin' && lowerRole !== 'superadmin') {
+        return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+    }
     try {
         await BatchManagementService.deleteBatch(req.params.id, req.body.deleted_by || 'system');
-        res.status(200).json({ message: "Batch soft deleted" });
+        res.status(200).json({ message: 'Record deleted successfully.' });
     } catch (err) {
         res.status(500).json({ error: "Failed to delete batch" });
     }

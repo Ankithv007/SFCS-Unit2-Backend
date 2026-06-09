@@ -78,12 +78,17 @@ export const toggleEmployeeStatus = async (req: Request, res: Response) => {
 
 export const deleteEmployee = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userRole = (req as any).user?.role;
+    const lowerRole = (userRole || '').toString().toLowerCase().replace(/\s/g, '');
+    if (lowerRole !== 'admin' && lowerRole !== 'superadmin') {
+        return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+    }
     try {
         const result = await pool.query('DELETE FROM employees WHERE id = $1 RETURNING *', [id]);
         if (result.rowCount === 0) {
             return res.status(404).json({ error: "Employee not found" });
         }
-        res.status(200).json({ message: "Employee deleted successfully" });
+        res.status(200).json({ message: 'Record deleted successfully.' });
     } catch (err) {
         console.error("Error deleting employee:", err);
         res.status(500).json({ error: "Failed to delete employee" });

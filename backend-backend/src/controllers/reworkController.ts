@@ -39,9 +39,14 @@ export const getBatches = async (req: Request, res: Response) => {
 export const deleteBatch = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { deleted_by } = req.body;
+    const userRole = (req as any).user?.role;
+    const lowerRole = (userRole || '').toString().toLowerCase().replace(/\s/g, '');
+    if (lowerRole !== 'admin' && lowerRole !== 'superadmin') {
+        return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+    }
     try {
         await pool.query("UPDATE rework_batches SET is_deleted = TRUE, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1 WHERE id = $2", [deleted_by || 'system', id]);
-        return sendSuccess(res, "Batch soft deleted");
+        return sendSuccess(res, 'Record deleted successfully.');
     } catch (err: any) {
         return sendError(res, err.message, 500);
     }
