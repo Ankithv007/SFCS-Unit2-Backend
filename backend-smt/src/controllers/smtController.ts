@@ -1,24 +1,133 @@
 import { Request, Response } from 'express';
+import * as ExcelJS from 'exceljs';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
-import * as ExcelJS from 'exceljs';
-
+import {
+    savePoDocument,
+    deletePoDocument,
+    parseExcelPreview
+} from '../services/poDocumentService';
 
 const logger = createLogger('SMT_CONTROLLER');
 
 // === Work Orders ===
 export const createWorkOrder = async (req: Request, res: Response) => {
-    const { work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source } = req.body;
+    const { 
+        work_order_id, 
+        po_id,
+        remark,
+        area_id, 
+        line_id, 
+        priority, 
+        product_name, 
+        product_description, 
+        quantity, 
+        panel_quantity, 
+        created_by, 
+        barcode_source,
+        po_document 
+    } = req.body;
+
+    // 1. Input Normalization for Work Order ID
+    const normalizedWorkOrderId = typeof work_order_id === 'string' 
+        ? work_order_id.trim().toUpperCase() 
+        : '';
+
+    // 2. Length Validation for Work Order ID
+    if (normalizedWorkOrderId.length < 3 || normalizedWorkOrderId.length > 50) {
+        return res.status(400).json({
+            success: false,
+            message: "Work Order ID must be between 3 and 50 characters"
+        });
+    }
+
+    // 3. Character Validation for Work Order ID
+    if (!/^[A-Z0-9\-_]+$/.test(normalizedWorkOrderId)) {
+        return res.status(400).json({
+            success: false,
+            message: "Work Order ID can only contain letters, numbers, hyphens (-), and underscores (_)"
+        });
+    }
+
+    // 4. Validation & Normalization for PO ID
+    const normalizedPoId = typeof po_id === 'string' ? po_id.trim() : '';
+    if (!normalizedPoId) {
+        return res.status(400).json({
+            success: false,
+            message: "PO ID is required"
+        });
+    }
+    if (!/^[a-zA-Z0-9\-_]+$/.test(normalizedPoId)) {
+        return res.status(400).json({
+            success: false,
+            message: "PO ID can only contain letters, numbers, hyphens (-), and underscores (_)"
+        });
+    }
+
     try {
+        let poName: string | null = null;
+        let poPath: string | null = null;
+        let poType: string | null = null;
+
+        // If a PO document is uploaded, process it
+        if (po_document && po_document.data) {
+            logger.info(`Processing PO document upload for WO ${normalizedWorkOrderId}...`);
+            const savedFile = await savePoDocument(po_document, normalizedWorkOrderId);
+            poName = savedFile.originalName;
+            poPath = savedFile.relativePath;
+            poType = savedFile.mimeType;
+            logger.info(`Audit: PO document uploaded successfully for WO ${normalizedWorkOrderId}. Path: ${poPath}`);
+        }
+
         const result = await pool.query(
-            `INSERT INTO smt_work_orders (id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-            [work_order_id, area_id, line_id, priority, product_name, product_description, quantity, panel_quantity, created_by, barcode_source || 'GENERATED']
+            `INSERT INTO smt_work_orders (
+                id, area_id, line_id, priority, product_name, product_description, 
+                quantity, panel_quantity, created_by, barcode_source,
+                po_document_name, po_document_path, po_document_type, uploaded_at,
+                po_id, remark
+            ) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) 
+            RETURNING *`,
+            [
+                normalizedWorkOrderId, 
+                area_id, 
+                line_id, 
+                priority, 
+                product_name, 
+                product_description, 
+                quantity, 
+                panel_quantity, 
+                created_by, 
+                barcode_source || 'GENERATED',
+                poName,
+                poPath,
+                poType,
+                poPath ? new Date() : null,
+                normalizedPoId,
+                remark || null
+            ]
         );
-        res.status(201).json(result.rows[0]);
-    } catch (err) {
+
+        logger.info(`Audit: Work order created successfully: ${normalizedWorkOrderId}`);
+
+        res.status(201).json({
+            success: true,
+            message: "Work order created successfully",
+            data: result.rows[0]
+        });
+    } catch (err: any) {
         logger.error("Error creating work order:", err);
-        res.status(500).json({ error: "Failed to create work order" });
+        // Handle database-level duplicate unique violation
+        if (err.code === '23505') {
+            return res.status(400).json({
+                success: false,
+                message: "Work Order ID already exists"
+            });
+        }
+        res.status(400).json({ 
+            success: false, 
+            message: err.message || "Failed to create work order" 
+        });
     }
 };
 
@@ -42,12 +151,65 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
 };
 
 export const getWorkOrders = async (req: Request, res: Response) => {
+    const { page, limit, search } = req.query;
+
+    // Backwards compatibility: If page and limit query parameters are missing, return legacy array
+    if (!page && !limit) {
+        try {
+            let queryText = 'SELECT * FROM smt_work_orders';
+            const params: any[] = [];
+            
+            if (search) {
+                queryText += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
+                params.push(`%${(search as string).trim()}%`);
+            }
+            queryText += ' ORDER BY created_at DESC';
+            
+            const result = await pool.query(queryText, params);
+            return res.status(200).json(result.rows);
+        } catch (err) {
+            logger.error("Error fetching work orders (legacy):", err);
+            return res.status(500).json({ error: "Failed to fetch work orders" });
+        }
+    }
+
     try {
-        const result = await pool.query('SELECT * FROM smt_work_orders ORDER BY created_at DESC');
-        res.status(200).json(result.rows);
+        const pageNum = parseInt(page as string) || 1;
+        const limitNum = parseInt(limit as string) || 15;
+        const offset = (pageNum - 1) * limitNum;
+
+        let countQuery = 'SELECT COUNT(*) FROM smt_work_orders';
+        let dataQuery = 'SELECT * FROM smt_work_orders';
+        const params: any[] = [];
+
+        if (search) {
+            countQuery += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
+            dataQuery += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
+            params.push(`%${(search as string).trim()}%`);
+        }
+
+        dataQuery += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+        const countResult = await pool.query(countQuery, params);
+        const total = parseInt(countResult.rows[0].count);
+
+        const dataParams = [...params, limitNum, offset];
+        const dataResult = await pool.query(dataQuery, dataParams);
+
+        res.status(200).json({
+            success: true,
+            data: dataResult.rows,
+            total,
+            page: pageNum,
+            limit: limitNum,
+            totalPages: Math.ceil(total / limitNum)
+        });
     } catch (err) {
-        logger.error("Error fetching work orders:", err);
-        res.status(500).json({ error: "Failed to fetch work orders" });
+        logger.error("Error fetching work orders with pagination:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Failed to fetch work orders" 
+        });
     }
 };
 
@@ -72,16 +234,163 @@ export const deleteWorkOrder = async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
 
     if (userRole !== 'Super Admin') {
-        return res.status(403).json({ error: "Only Super Admin can delete work orders" });
+        return res.status(403).json({ 
+            success: false, 
+            message: "Only Super Admin can delete work orders" 
+        });
     }
 
     try {
+        // 1. Fetch the file path if exists
+        const fileQuery = await pool.query(
+            'SELECT po_document_path FROM smt_work_orders WHERE id = $1',
+            [id]
+        );
+        
+        if (fileQuery.rowCount === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                message: "Work order not found" 
+            });
+        }
+
+        const poPath = fileQuery.rows[0].po_document_path;
+
+        // 2. Safe file deletion from uploads folder
+        if (poPath) {
+            logger.info(`Attempting file cleanup for WO ${id} (file: ${poPath})...`);
+            await deletePoDocument(poPath);
+            logger.info(`Audit: PO document cleanup completed for WO ${id}`);
+        }
+
+        // 3. Remove DB record
         const result = await pool.query('DELETE FROM smt_work_orders WHERE id = $1 RETURNING *', [id]);
-        if (result.rowCount === 0) return res.status(404).json({ error: "Work order not found" });
-        res.status(200).json({ message: "Work order deleted successfully" });
+        logger.info(`Audit: Work order deleted successfully from database: ${id}`);
+
+        res.status(200).json({ 
+            success: true, 
+            message: "Work order deleted successfully" 
+        });
     } catch (err) {
         logger.error("Error deleting work order:", err);
-        res.status(500).json({ error: "Failed to delete work order" });
+        res.status(500).json({ 
+            success: false, 
+            message: "Failed to delete work order" 
+        });
+    }
+};
+
+// === PO Document APIs ===
+
+export const viewPoDocumentFile = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1', 
+            [id]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, message: "Work Order not found" });
+        }
+        
+        const { po_document_name, po_document_path, po_document_type } = result.rows[0];
+        if (!po_document_path) {
+            return res.status(404).json({ success: false, message: "No PO document uploaded for this Work Order" });
+        }
+        
+        const uploadsDir = require('../services/poDocumentService').getUploadsDir();
+        const path = require('path');
+        const fs = require('fs');
+        const absolutePath = path.join(uploadsDir, po_document_path);
+        
+        if (!fs.existsSync(absolutePath)) {
+            return res.status(404).json({ success: false, message: "File not found on server" });
+        }
+        
+        logger.info(`Audit: PO document view inline accessed for WO ${id}`);
+        res.setHeader('Content-Type', po_document_type || 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${po_document_name}"`);
+        
+        fs.createReadStream(absolutePath).pipe(res);
+    } catch (err: any) {
+        logger.error("Error viewing PO document file:", err);
+        res.status(500).json({ success: false, message: "Failed to view PO document" });
+    }
+};
+
+export const downloadPoDocument = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1', 
+            [id]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, message: "Work Order not found" });
+        }
+        
+        const { po_document_name, po_document_path, po_document_type } = result.rows[0];
+        if (!po_document_path) {
+            return res.status(404).json({ success: false, message: "No PO document uploaded for this Work Order" });
+        }
+        
+        const uploadsDir = require('../services/poDocumentService').getUploadsDir();
+        const path = require('path');
+        const fs = require('fs');
+        const absolutePath = path.join(uploadsDir, po_document_path);
+        
+        if (!fs.existsSync(absolutePath)) {
+            return res.status(404).json({ success: false, message: "File not found on server" });
+        }
+        
+        logger.info(`Audit: PO document download event triggered for WO ${id}`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${po_document_name}"`);
+        
+        fs.createReadStream(absolutePath).pipe(res);
+    } catch (err: any) {
+        logger.error("Error downloading PO document:", err);
+        res.status(500).json({ success: false, message: "Failed to download PO document" });
+    }
+};
+
+export const previewPoDocument = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1', 
+            [id]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, message: "Work Order not found" });
+        }
+        
+        const { po_document_name, po_document_path, po_document_type } = result.rows[0];
+        if (!po_document_path) {
+            return res.status(404).json({ success: false, message: "No PO document uploaded for this Work Order" });
+        }
+        
+        if (po_document_type === 'application/pdf') {
+            logger.info(`Audit: PO document preview (PDF metadata) accessed for WO ${id}`);
+            return res.status(200).json({
+                success: true,
+                type: 'pdf',
+                url: `/api/smt/work-orders/${id}/view-po-file`,
+                name: po_document_name
+            });
+        }
+        
+        // Excel file
+        logger.info(`Audit: PO document preview (Excel parsing) accessed for WO ${id}`);
+        const previewData = await parseExcelPreview(po_document_path, po_document_name, id);
+        
+        res.status(200).json({
+            success: true,
+            ...previewData
+        });
+    } catch (err: any) {
+        logger.error("Error previewing PO document:", err);
+        res.status(500).json({ success: false, message: err.message || "Failed to generate preview" });
     }
 };
 
@@ -677,6 +986,32 @@ export const deleteInspection = async (req: Request, res: Response) => {
 export const createProcessSetup = async (req: Request, res: Response) => {
     const { work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side } = req.body;
     try {
+        // Enforce Solder Paste Management completion for Printing process setup
+        if (process_name === 'PRINTING') {
+            const woCheck = await pool.query(
+                `SELECT solder_paste_status, solder_paste_barcode FROM smt_work_orders WHERE id = $1`,
+                [work_order_id]
+            );
+
+            if (woCheck.rows.length === 0) {
+                return res.status(404).json({ error: "Work Order not found." });
+            }
+
+            const { solder_paste_status, solder_paste_barcode } = woCheck.rows[0];
+
+            if (solder_paste_status !== 'Completed') {
+                return res.status(400).json({ 
+                    error: "Solder Paste Management is not completed for this Work Order! Solder paste must be mixed and completed first." 
+                });
+            }
+
+            if (solder_paste !== solder_paste_barcode) {
+                return res.status(400).json({ 
+                    error: `Invalid Solder Paste barcode. Enforced barcode is: ${solder_paste_barcode}` 
+                });
+            }
+        }
+
         const insertResult = await pool.query(
             `INSERT INTO smt_process_setups (work_order_id, process_name, product_name, quantity, stencil_name, squeegee_number, solder_paste, side) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
@@ -915,7 +1250,7 @@ export const downloadSmtReport = async (req: Request, res: Response) => {
             fgColor: { argb: 'FF2B579A' }
         };
 
-        headerRow.eachCell((cell) => {
+        headerRow.eachCell((cell: ExcelJS.Cell) => {
             cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI', size: 10 };
             cell.fill = headerFill;
             cell.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -945,7 +1280,7 @@ export const downloadSmtReport = async (req: Request, res: Response) => {
 
             const isRework = displayStatus === 'REWORK';
 
-            dataRow.eachCell((cell, colNumber) => {
+            dataRow.eachCell((cell: ExcelJS.Cell, colNumber: number) => {
                 cell.font = { name: 'Segoe UI', size: 10 };
                 cell.border = borderStyle;
                 
@@ -975,9 +1310,9 @@ export const downloadSmtReport = async (req: Request, res: Response) => {
             });
         });
 
-        worksheet.columns.forEach((column) => {
+        worksheet.columns.forEach((column: any) => {
             let maxLen = 0;
-            column.eachCell!({ includeEmpty: true }, (cell) => {
+            column.eachCell!({ includeEmpty: true }, (cell: ExcelJS.Cell) => {
                 if (cell.row && (cell.row as any).number <= 7) return;
                 const len = cell.value ? cell.value.toString().length : 0;
                 if (len > maxLen) maxLen = len;

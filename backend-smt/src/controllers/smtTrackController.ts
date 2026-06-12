@@ -80,6 +80,42 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             finalStatusLabel = 'IN PRODUCTION';
         }
 
+        // Fetch Solder Paste details for the work order
+        const spResult = await pool.query(
+            `SELECT 
+                solder_paste_barcode, 
+                solder_paste_status,
+                solder_paste_stage1_operator, 
+                solder_paste_stage1_employee_code, 
+                solder_paste_stage1_at, 
+                solder_paste_stage1_status,
+                solder_paste_stage2_start_at, 
+                solder_paste_stage2_status,
+                solder_paste_stage3_start_at, 
+                solder_paste_stage3_completed_at, 
+                solder_paste_stage3_operator, 
+                solder_paste_stage3_employee_code, 
+                solder_paste_stage3_status
+             FROM smt_work_orders WHERE id = $1`,
+            [serial.work_order_id]
+        );
+        const sp = spResult.rows[0] || {};
+        
+        const spLogsResult = await pool.query(
+            `SELECT process_step, scanned_by, scanned_at, status, rework_reason
+             FROM smt_inspections
+             WHERE work_order_id = $1 AND serial_id IS NULL
+             ORDER BY scanned_at ASC`,
+            [serial.work_order_id]
+        );
+        const spLogs = spLogsResult.rows.map((row: any) => ({
+            process_step: row.process_step || '-',
+            status: (row.status || '').toUpperCase(),
+            scanned_by: row.scanned_by || '-',
+            scanned_at: row.scanned_at,
+            rework_reason: row.rework_reason || null
+        }));
+
         return res.status(200).json({
             serial_number: serial.serial_number,
             serial_format: serial.serial_format,
@@ -95,6 +131,28 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             total_reworks: totalReworks,
             total_passed: totalPassed,
             scan_history: history,
+            solder_paste: {
+                barcode: sp.solder_paste_barcode || '-',
+                status: sp.solder_paste_status || 'Pending',
+                stage1: {
+                    operator: sp.solder_paste_stage1_operator || '-',
+                    employee_code: sp.solder_paste_stage1_employee_code || '-',
+                    completed_at: sp.solder_paste_stage1_at || null,
+                    status: sp.solder_paste_stage1_status || 'Pending'
+                },
+                stage2: {
+                    start_at: sp.solder_paste_stage2_start_at || null,
+                    status: sp.solder_paste_stage2_status || 'Pending'
+                },
+                stage3: {
+                    start_at: sp.solder_paste_stage3_start_at || null,
+                    completed_at: sp.solder_paste_stage3_completed_at || null,
+                    operator: sp.solder_paste_stage3_operator || '-',
+                    employee_code: sp.solder_paste_stage3_employee_code || '-',
+                    status: sp.solder_paste_stage3_status || 'Pending'
+                },
+                logs: spLogs
+            }
         });
 
     } catch (err: any) {
@@ -194,13 +252,50 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             };
         });
 
+        const spLogsResult = await pool.query(
+            `SELECT process_step, scanned_by, scanned_at, status, rework_reason
+             FROM smt_inspections
+             WHERE work_order_id = $1 AND serial_id IS NULL
+             ORDER BY scanned_at ASC`,
+            [wo.id]
+        );
+        const spLogs = spLogsResult.rows.map((row: any) => ({
+            process_step: row.process_step || '-',
+            status: (row.status || '').toUpperCase(),
+            scanned_by: row.scanned_by || '-',
+            scanned_at: row.scanned_at,
+            rework_reason: row.rework_reason || null
+        }));
+
         return res.status(200).json({
             work_order_id: wo.id || wo.work_order_id,
             product_name: wo.product_name,
             quantity: wo.quantity,
             line_id: wo.line_id,
             total_serials: serials.length,
-            serials: mappedSerials
+            serials: mappedSerials,
+            solder_paste: {
+                barcode: wo.solder_paste_barcode || '-',
+                status: wo.solder_paste_status || 'Pending',
+                stage1: {
+                    operator: wo.solder_paste_stage1_operator || '-',
+                    employee_code: wo.solder_paste_stage1_employee_code || '-',
+                    completed_at: wo.solder_paste_stage1_at || null,
+                    status: wo.solder_paste_stage1_status || 'Pending'
+                },
+                stage2: {
+                    start_at: wo.solder_paste_stage2_start_at || null,
+                    status: wo.solder_paste_stage2_status || 'Pending'
+                },
+                stage3: {
+                    start_at: wo.solder_paste_stage3_start_at || null,
+                    completed_at: wo.solder_paste_stage3_completed_at || null,
+                    operator: wo.solder_paste_stage3_operator || '-',
+                    employee_code: wo.solder_paste_stage3_employee_code || '-',
+                    status: wo.solder_paste_stage3_status || 'Pending'
+                },
+                logs: spLogs
+            }
         });
 
     } catch (err: any) {

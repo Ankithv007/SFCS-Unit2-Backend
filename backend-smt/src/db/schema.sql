@@ -12,7 +12,13 @@ CREATE TABLE IF NOT EXISTS smt_work_orders (
     barcode_source VARCHAR(100) DEFAULT 'Generate Barcode',
     is_registered BOOLEAN DEFAULT false,
     created_by VARCHAR(255),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    po_document_name VARCHAR(255),
+    po_document_path VARCHAR(500),
+    po_document_type VARCHAR(100),
+    uploaded_at TIMESTAMP,
+    po_id VARCHAR(255),
+    remark TEXT
 );
 
 -- SMT Serial Numbers Table
