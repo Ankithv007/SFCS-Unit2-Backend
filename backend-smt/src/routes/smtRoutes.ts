@@ -38,6 +38,40 @@ import {
     completeStage3Mixing,
     getCompletedBatches
 } from '../controllers/solderPasteController';
+import {
+    getQmsWorkOrders,
+    getQmsRecords,
+    getBomRevisions,
+    getQmsRevisions,
+    createQms,
+    uploadBomRevision,
+    updateQmsFile,
+    serveQmsFile,
+    deleteQms,
+    qmsUpload,
+    uploadRateLimiter,
+    getBomItems
+} from '../controllers/qmsController';
+import {
+    getEligibleWorkOrders as getMMEligibleWorkOrders,
+    createMaterialManagement,
+    getMaterialManagementRecords,
+    getMaterialManagementDetail,
+    getMaterialManagementBom,
+    saveMaterialManagementBom,
+    updateMaterialManagementStatus,
+    syncMaterialManagementBom,
+    exportMaterialManagementExcel
+} from '../controllers/materialManagementController';
+import {
+    getEligibleWorkOrders as getMREligibleWorkOrders,
+    createMaterialReturn,
+    getMaterialReturnRecords,
+    getMaterialReturnDetail,
+    getMaterialReturnBom,
+    saveMaterialReturnBom,
+    exportMaterialReturnExcel
+} from '../controllers/materialReturnController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = express.Router();
@@ -80,6 +114,47 @@ router.post('/solder-paste/stage1', completeStage1);
 router.post('/solder-paste/stage2/start', startStage2Thawing);
 router.post('/solder-paste/stage3/start', startStage3Mixing);
 router.post('/solder-paste/stage3/complete', completeStage3Mixing);
+
+// QMS endpoints
+router.get('/qms/work-orders', authenticateToken, getQmsWorkOrders);
+router.get('/qms/records', authenticateToken, getQmsRecords);
+router.get('/qms/bom-revisions/:qmsId', authenticateToken, getBomRevisions);
+router.get('/qms/revisions/:qmsId', authenticateToken, getQmsRevisions);
+router.get('/qms/bom-items/:revisionId', authenticateToken, getBomItems);
+
+// Material Management
+router.get('/material-management/eligible-wos', authenticateToken, getMMEligibleWorkOrders);
+router.get('/material-management/records', authenticateToken, getMaterialManagementRecords);
+router.post('/material-management/create', authenticateToken, createMaterialManagement);
+router.get('/material-management/records/:id', authenticateToken, getMaterialManagementDetail);
+router.get('/material-management/records/:id/bom', authenticateToken, getMaterialManagementBom);
+router.post('/material-management/records/:id/bom', authenticateToken, saveMaterialManagementBom);
+router.post('/material-management/records/:id/sync-bom', authenticateToken, syncMaterialManagementBom);
+router.put('/material-management/records/:id/status', authenticateToken, updateMaterialManagementStatus);
+router.get('/material-management/records/:id/export/excel', authenticateToken, exportMaterialManagementExcel);
+
+// Material Return
+router.get('/material-return/eligible-wos', authenticateToken, getMREligibleWorkOrders);
+router.get('/material-return/records', authenticateToken, getMaterialReturnRecords);
+router.post('/material-return/create', authenticateToken, createMaterialReturn);
+router.get('/material-return/records/:id', authenticateToken, getMaterialReturnDetail);
+router.get('/material-return/records/:id/bom', authenticateToken, getMaterialReturnBom);
+router.post('/material-return/records/:id/bom', authenticateToken, saveMaterialReturnBom);
+router.get('/material-return/records/:id/export/excel', authenticateToken, exportMaterialReturnExcel);
+
+router.post('/qms/create', authenticateToken, uploadRateLimiter, qmsUpload.fields([
+    { name: 'bom', maxCount: 1 },
+    { name: 'pfc', maxCount: 1 },
+    { name: 'xy', maxCount: 1 },
+    { name: 'ecn', maxCount: 1 },
+    { name: 'drawing', maxCount: 1 }
+]), createQms);
+
+router.post('/qms/bom-revision/:qmsId', authenticateToken, uploadRateLimiter, qmsUpload.single('file'), uploadBomRevision);
+router.post('/qms/update-file/:qmsId', authenticateToken, uploadRateLimiter, qmsUpload.single('file'), updateQmsFile);
+
+router.get('/qms/files/:action/:qmsId/:fileType', serveQmsFile);
+router.post('/qms/delete/:qmsId', authenticateToken, deleteQms);
 
 // Aliases for Requirement 5
 router.get('/serials', getSerials);
