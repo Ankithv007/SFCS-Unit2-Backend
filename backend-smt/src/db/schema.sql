@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS smt_work_orders (
     product_description TEXT,
     quantity INTEGER NOT NULL,
     panel_quantity INTEGER NOT NULL,
+    sides VARCHAR(30) NOT NULL,
     status VARCHAR(50) DEFAULT 'Created',
     barcode_source VARCHAR(100) DEFAULT 'Generate Barcode',
     is_registered BOOLEAN DEFAULT false,
@@ -140,4 +141,69 @@ CREATE INDEX IF NOT EXISTS idx_qms_workorder ON qms_master(work_order_number) WH
 CREATE INDEX IF NOT EXISTS idx_qms_revision ON qms_bom_revisions(qms_id);
 CREATE INDEX IF NOT EXISTS idx_qms_file_revisions_qms_id ON qms_file_revisions(qms_id);
 CREATE INDEX IF NOT EXISTS idx_qms_logs ON qms_activity_logs(qms_id);
+
+-- Stencil Master Records Table
+CREATE TABLE IF NOT EXISTS stencil_master (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stencil_id VARCHAR(50) UNIQUE NOT NULL,
+    stencil_name VARCHAR(255) NOT NULL,
+    revision VARCHAR(50) NOT NULL,
+    thickness_mills VARCHAR(50) NOT NULL,
+    manufacturing_date DATE NOT NULL,
+    side VARCHAR(20) NOT NULL CHECK (side IN ('TOP', 'BOTTOM', 'TOP / BOTTOM')),
+    storage_location VARCHAR(100) NULL,
+    remarks TEXT NULL,
+    status VARCHAR(20) DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'SCRAPPED')),
+    target_life_cycle INTEGER NOT NULL DEFAULT 60000,
+    
+    -- Lifecycle Tracking
+    print_count INTEGER DEFAULT 0,
+    cleaning_count INTEGER DEFAULT 0,
+    inspection_count INTEGER DEFAULT 0,
+    
+    created_by VARCHAR(255),
+    created_by_name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(255) NULL,
+    updated_by_name VARCHAR(255) NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_by VARCHAR(255) NULL,
+    deleted_at TIMESTAMP NULL
+);
+
+-- Stencil Lifecycle Table
+CREATE TABLE IF NOT EXISTS smt_stencil_lifecycle (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stencil_record_id UUID NOT NULL REFERENCES stencil_master(id) ON DELETE RESTRICT,
+    stencil_id VARCHAR(50) NOT NULL,
+    stencil_name VARCHAR(255) NOT NULL,
+    work_order_id VARCHAR(255) NOT NULL REFERENCES smt_work_orders(id) ON DELETE RESTRICT,
+    work_order_number VARCHAR(255) NOT NULL,
+    product_name VARCHAR(255) NOT NULL,
+    product_description TEXT,
+    sides VARCHAR(30) NOT NULL,
+    quantity INTEGER NOT NULL,
+    target_life_cycle INTEGER NOT NULL DEFAULT 60000,
+    qty_life_cycle INTEGER NOT NULL,
+    balance_life_cycle INTEGER NOT NULL,
+    current_used_life_cycle INTEGER NOT NULL,
+    status VARCHAR(50) NOT NULL, -- Available, Running, Completed, Expired
+    remarks TEXT,
+    
+    created_by VARCHAR(255) NOT NULL,
+    created_by_name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(255) NULL,
+    updated_by_name VARCHAR(255) NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    deleted_by VARCHAR(255) NULL,
+    deleted_by_name VARCHAR(255) NULL,
+    deleted_at TIMESTAMP NULL
+);
+
+-- Unique Index to prevent duplicate assignments
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_stencil_wo ON smt_stencil_lifecycle(stencil_record_id, work_order_id) WHERE is_deleted = false;
+
 

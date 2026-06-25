@@ -23,6 +23,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         product_description, 
         quantity, 
         panel_quantity, 
+        sides,
         created_by, 
         barcode_source,
         po_document 
@@ -64,6 +65,21 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         });
     }
 
+    // Validate Sides
+    if (!sides) {
+        return res.status(400).json({
+            success: false,
+            message: "Sides is required"
+        });
+    }
+    const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
+    if (!allowedSides.includes(sides)) {
+        return res.status(400).json({
+            success: false,
+            message: "Sides must be Top, Bottom, or Top / Bottom"
+        });
+    }
+
     try {
         let poName: string | null = null;
         let poPath: string | null = null;
@@ -82,11 +98,11 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         const result = await pool.query(
             `INSERT INTO smt_work_orders (
                 id, area_id, line_id, priority, product_name, product_description, 
-                quantity, panel_quantity, created_by, barcode_source,
+                quantity, panel_quantity, sides, created_by, barcode_source,
                 po_document_name, po_document_path, po_document_type, uploaded_at,
                 po_id, remark
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
             RETURNING *`,
             [
                 normalizedWorkOrderId, 
@@ -97,6 +113,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 product_description, 
                 quantity, 
                 panel_quantity, 
+                sides,
                 created_by, 
                 barcode_source || 'GENERATED',
                 poName,
@@ -276,6 +293,136 @@ export const deleteWorkOrder = async (req: Request, res: Response) => {
         res.status(500).json({ 
             success: false, 
             message: "Failed to delete work order" 
+        });
+    }
+};
+
+export const updateWorkOrder = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { 
+        po_id,
+        remark,
+        line_id, 
+        priority, 
+        product_name, 
+        product_description, 
+        quantity, 
+        panel_quantity, 
+        sides,
+        po_document 
+    } = req.body;
+
+    const normalizedPoId = typeof po_id === 'string' ? po_id.trim() : '';
+    if (!normalizedPoId) {
+        return res.status(400).json({
+            success: false,
+            message: "PO ID is required"
+        });
+    }
+    if (!/^[a-zA-Z0-9\-_]+$/.test(normalizedPoId)) {
+        return res.status(400).json({
+            success: false,
+            message: "PO ID can only contain letters, numbers, hyphens (-), and underscores (_)"
+        });
+    }
+
+    if (!line_id || !priority || !product_name || !product_description || !quantity || !panel_quantity || !sides) {
+        return res.status(400).json({
+            success: false,
+            message: "All mandatory fields are required."
+        });
+    }
+
+    if (parseInt(quantity) <= 0 || parseInt(panel_quantity) <= 0) {
+        return res.status(400).json({
+            success: false,
+            message: "Quantities must be greater than 0"
+        });
+    }
+
+    const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
+    if (!allowedSides.includes(sides)) {
+        return res.status(400).json({
+            success: false,
+            message: "Sides must be Top, Bottom, or Top / Bottom"
+        });
+    }
+
+    try {
+        const currentQuery = await pool.query(
+            'SELECT po_document_name, po_document_path, po_document_type, uploaded_at FROM smt_work_orders WHERE id = $1',
+            [id]
+        );
+        if (currentQuery.rowCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Work Order not found"
+            });
+        }
+
+        let poName = currentQuery.rows[0].po_document_name;
+        let poPath = currentQuery.rows[0].po_document_path;
+        let poType = currentQuery.rows[0].po_document_type;
+        let uploadedAt = currentQuery.rows[0].uploaded_at;
+
+        if (po_document && po_document.data) {
+            logger.info(`Processing updated PO document upload for WO ${id}...`);
+            if (poPath) {
+                await deletePoDocument(poPath).catch(err => logger.error("Failed to delete old file:", err));
+            }
+            const savedFile = await savePoDocument(po_document, id);
+            poName = savedFile.originalName;
+            poPath = savedFile.relativePath;
+            poType = savedFile.mimeType;
+            uploadedAt = new Date();
+            logger.info(`Audit: PO document updated successfully for WO ${id}. Path: ${poPath}`);
+        } else if (po_document === null) {
+            if (poPath) {
+                await deletePoDocument(poPath).catch(err => logger.error("Failed to delete file:", err));
+            }
+            poName = null;
+            poPath = null;
+            poType = null;
+            uploadedAt = null;
+        }
+
+        const result = await pool.query(
+            `UPDATE smt_work_orders 
+             SET po_id = $1, remark = $2, line_id = $3, priority = $4, 
+                 product_name = $5, product_description = $6, quantity = $7, 
+                 panel_quantity = $8, sides = $9, po_document_name = $10, 
+                 po_document_path = $11, po_document_type = $12, uploaded_at = $13
+             WHERE id = $14
+             RETURNING *`,
+            [
+                normalizedPoId,
+                remark || null,
+                line_id,
+                priority,
+                product_name,
+                product_description,
+                quantity,
+                panel_quantity,
+                sides,
+                poName,
+                poPath,
+                poType,
+                uploadedAt,
+                id
+            ]
+        );
+
+        logger.info(`Audit: Work order updated successfully: ${id}`);
+        res.status(200).json({
+            success: true,
+            message: "Work order updated successfully",
+            data: result.rows[0]
+        });
+    } catch (err: any) {
+        logger.error("Error updating work order:", err);
+        res.status(500).json({
+            success: false,
+            message: err.message || "Failed to update work order"
         });
     }
 };

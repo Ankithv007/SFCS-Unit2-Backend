@@ -1,6 +1,7 @@
 import express from 'express';
 import {
     createWorkOrder,
+    updateWorkOrder,
     getWorkOrders,
     getPendingWorkOrders,
     generateSerials,
@@ -72,12 +73,28 @@ import {
     saveMaterialReturnBom,
     exportMaterialReturnExcel
 } from '../controllers/materialReturnController';
+import {
+    createStencilRecord,
+    updateStencilRecord,
+    deleteStencilRecord,
+    getStencilRecords,
+    exportStencilExcel
+} from '../controllers/stencilController';
+import {
+    getActiveStencils,
+    getLifecycleWorkOrders,
+    createLifecycleRecord,
+    getLifecycleRecords,
+    getLifecycleRecordById,
+    deleteLifecycleRecord
+} from '../controllers/stencilLifecycleController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = express.Router();
 
 // Work Orders
 router.post('/work-orders', createWorkOrder);
+router.put('/work-orders/:id', updateWorkOrder);
 router.get('/work-orders', getWorkOrders);
 router.get('/workorders/pending', getPendingWorkOrders);
 router.post('/work-orders/:id/register', registerWorkOrder);
@@ -141,6 +158,21 @@ router.get('/material-return/records/:id', authenticateToken, getMaterialReturnD
 router.get('/material-return/records/:id/bom', authenticateToken, getMaterialReturnBom);
 router.post('/material-return/records/:id/bom', authenticateToken, saveMaterialReturnBom);
 router.get('/material-return/records/:id/export/excel', authenticateToken, exportMaterialReturnExcel);
+
+// Stencil Management
+router.post('/stencil-management/create', authenticateToken, createStencilRecord);
+router.put('/stencil-management/:id', authenticateToken, updateStencilRecord);
+router.delete('/stencil-management/:id', authenticateToken, deleteStencilRecord);
+router.get('/stencil-management/records', authenticateToken, getStencilRecords);
+router.get('/stencil-management/export', authenticateToken, exportStencilExcel);
+
+// Stencil Life Cycle Management
+router.get('/stencil-lifecycle/stencils', authenticateToken, getActiveStencils);
+router.get('/stencil-lifecycle/work-orders', authenticateToken, getLifecycleWorkOrders);
+router.post('/stencil-lifecycle/create', authenticateToken, createLifecycleRecord);
+router.get('/stencil-lifecycle/records', authenticateToken, getLifecycleRecords);
+router.get('/stencil-lifecycle/records/:id', authenticateToken, getLifecycleRecordById);
+router.delete('/stencil-lifecycle/records/:id', authenticateToken, deleteLifecycleRecord);
 
 router.post('/qms/create', authenticateToken, uploadRateLimiter, qmsUpload.fields([
     { name: 'bom', maxCount: 1 },
