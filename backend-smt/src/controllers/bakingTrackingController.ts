@@ -16,6 +16,24 @@ const getSessionUser = (req: Request) => {
     };
 };
 
+const ensureComponentsTable = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS baking_tracking_components (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                baking_id UUID NOT NULL,
+                vepl_part_number VARCHAR(255) NOT NULL,
+                manufacturer_part_number VARCHAR(255) NOT NULL,
+                reel_qty NUMERIC(10,2) NOT NULL,
+                component_thickness VARCHAR(255) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+    } catch (err) {
+        logger.error('Error ensuring baking_tracking_components table exists:', err);
+    }
+};
+
 /**
  * POST /api/smt/baking-tracking/create
  * Create a new Baking Tracking Record
@@ -23,13 +41,10 @@ const getSessionUser = (req: Request) => {
 export const createBakingRecord = async (req: Request, res: Response) => {
     const {
         model_name,
-        vepl_part_number,
-        manufacturing_part_number,
         msl_level,
-        reel_qty,
         baking_temperature,
-        component_thickness,
-        remarks
+        remarks,
+        components
     } = req.body;
 
     const sessionUser = getSessionUser(req);
@@ -37,73 +52,112 @@ export const createBakingRecord = async (req: Request, res: Response) => {
     // 1. Validation
     if (
         !model_name ||
-        !vepl_part_number ||
-        !manufacturing_part_number ||
         !msl_level ||
-        reel_qty === undefined ||
         !baking_temperature ||
-        !component_thickness
+        !components ||
+        !Array.isArray(components) ||
+        components.length === 0
     ) {
-        return res.status(400).json({ message: 'Please fill all mandatory fields.' });
+        return res.status(400).json({ message: 'Please fill all mandatory fields and provide at least one component.' });
     }
 
-    const parsedReelQty = parseInt(reel_qty, 10);
-    if (isNaN(parsedReelQty) || parsedReelQty <= 0) {
-        return res.status(400).json({ message: 'Reel Quantity must be greater than zero.' });
+    for (const comp of components) {
+        if (!comp.vepl_part_number || !comp.manufacturer_part_number || comp.reel_qty === undefined || !comp.component_thickness) {
+            return res.status(400).json({ message: 'All fields in each component are mandatory.' });
+        }
+        const parsedReelQty = parseInt(comp.reel_qty, 10);
+        if (isNaN(parsedReelQty) || parsedReelQty <= 0) {
+            return res.status(400).json({ message: 'Reel Quantity must be greater than zero for all components.' });
+        }
     }
 
     try {
-        const query = `
-            INSERT INTO smt_baking_tracking (
-                model_name,
-                vepl_part_number,
-                manufacturing_part_number,
-                msl_level,
-                reel_qty,
-                baking_temperature,
-                component_thickness,
-                baking_in_time,
-                status,
-                created_by,
-                created_by_name,
-                remarks
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, 'Pending Baking', $8, $9, $10)
-            RETURNING *
-        `;
+        await ensureComponentsTable();
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
 
-        const result = await pool.query(query, [
-            model_name.trim(),
-            vepl_part_number.trim(),
-            manufacturing_part_number.trim(),
-            msl_level.trim(),
-            parsedReelQty,
-            baking_temperature.trim(),
-            component_thickness.trim(),
-            sessionUser.id || 'system',
-            sessionUser.name,
-            remarks ? remarks.trim() : null
-        ]);
+            const query = `
+                INSERT INTO smt_baking_tracking (
+                    model_name,
+                    vepl_part_number,
+                    manufacturing_part_number,
+                    msl_level,
+                    reel_qty,
+                    baking_temperature,
+                    component_thickness,
+                    baking_in_time,
+                    status,
+                    created_by,
+                    created_by_name,
+                    remarks
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, 'Pending Baking', $8, $9, $10)
+                RETURNING *
+            `;
 
-        const savedRecord = result.rows[0];
+            const firstComp = components[0];
 
-        // Audit Log Entry
-        await pool.query(`
-            INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        `, [
-            'CREATE',
-            'BAKING_TRACKING',
-            savedRecord.id,
-            sessionUser.name,
-            `Baking tracking record created for model: ${savedRecord.model_name}, reel quantity: ${savedRecord.reel_qty}.`,
-            JSON.stringify(savedRecord)
-        ]);
+            const result = await client.query(query, [
+                model_name.trim(),
+                firstComp.vepl_part_number.trim(),
+                firstComp.manufacturer_part_number.trim(),
+                msl_level.trim(),
+                parseInt(firstComp.reel_qty, 10),
+                baking_temperature.trim(),
+                firstComp.component_thickness.trim(),
+                sessionUser.id || 'system',
+                sessionUser.name,
+                remarks ? remarks.trim() : null
+            ]);
 
-        return res.status(201).json({
-            message: 'Baking Tracking Record Created Successfully.',
-            record: savedRecord
-        });
+            const savedRecord = result.rows[0];
 
+            // Insert components
+            const compQuery = `
+                INSERT INTO baking_tracking_components (
+                    baking_id,
+                    vepl_part_number,
+                    manufacturer_part_number,
+                    reel_qty,
+                    component_thickness
+                ) VALUES ($1, $2, $3, $4, $5)
+            `;
+
+            for (const comp of components) {
+                await client.query(compQuery, [
+                    savedRecord.id,
+                    comp.vepl_part_number.trim(),
+                    comp.manufacturer_part_number.trim(),
+                    parseInt(comp.reel_qty, 10),
+                    comp.component_thickness.trim()
+                ]);
+            }
+
+            // Audit Log Entry
+            await client.query(`
+                INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            `, [
+                'CREATE',
+                'BAKING_TRACKING',
+                savedRecord.id,
+                sessionUser.name,
+                `Baking tracking record created for model: ${savedRecord.model_name} with ${components.length} components.`,
+                JSON.stringify({ ...savedRecord, components })
+            ]);
+
+            await client.query('COMMIT');
+            client.release();
+
+            return res.status(201).json({
+                message: 'Baking Tracking Record Created Successfully.',
+                record: savedRecord
+            });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            client.release();
+            throw err;
+        }
     } catch (err: any) {
         logger.error('Error creating baking record:', err);
         return res.status(500).json({ message: 'Internal server error while creating baking tracking record.' });
@@ -163,13 +217,11 @@ export const getBakingRecords = async (req: Request, res: Response) => {
             filterSql += ` AND status = $${queryParams.length}`;
         }
 
-        // Search filter matching Model Name, VEPL Part Number, Manufacturing Part Number
+        // Search filter matching Model Name
         if (search) {
             queryParams.push(`%${search}%`);
             filterSql += ` AND (
-                model_name ILIKE $${queryParams.length} OR
-                vepl_part_number ILIKE $${queryParams.length} OR
-                manufacturing_part_number ILIKE $${queryParams.length}
+                model_name ILIKE $${queryParams.length}
             )`;
         }
 
@@ -213,6 +265,7 @@ export const getBakingRecordById = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     try {
+        await ensureComponentsTable();
         const query = `SELECT * FROM smt_baking_tracking WHERE id = $1 AND is_deleted = false`;
         const result = await pool.query(query, [id]);
 
@@ -220,7 +273,15 @@ export const getBakingRecordById = async (req: Request, res: Response) => {
             return res.status(404).json({ message: 'Baking Tracking Record not found.' });
         }
 
-        return res.status(200).json(result.rows[0]);
+        const record = result.rows[0];
+
+        // Fetch components
+        const compQuery = `SELECT * FROM baking_tracking_components WHERE baking_id = $1 ORDER BY created_at ASC`;
+        const compResult = await pool.query(compQuery, [id]);
+
+        record.components = compResult.rows;
+
+        return res.status(200).json(record);
 
     } catch (err: any) {
         logger.error('Error fetching single baking record:', err);
