@@ -19,6 +19,7 @@ const getSessionUser = (req: Request) => {
 export const createStencilRecord = async (req: Request, res: Response) => {
     const {
         stencil_name,
+        job_number,
         revision,
         thickness_mills,
         manufacturing_date,
@@ -30,7 +31,7 @@ export const createStencilRecord = async (req: Request, res: Response) => {
     const sessionUser = getSessionUser(req);
 
     // 1. Mandatory Fields Validation
-    if (!stencil_name || !revision || !thickness_mills || !manufacturing_date || !side) {
+    if (!stencil_name || !job_number || !revision || !thickness_mills || !manufacturing_date || !side) {
         return res.status(400).json({ message: 'Please fill all mandatory fields.' });
     }
 
@@ -67,16 +68,17 @@ export const createStencilRecord = async (req: Request, res: Response) => {
         // 6. Save the record
         const insertQuery = `
             INSERT INTO stencil_master (
-                stencil_id, stencil_name, 
+                stencil_id, stencil_name, job_number,
                 revision, thickness_mills, manufacturing_date, side, storage_location, 
                 remarks, status, created_by, created_by_name, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, $11, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             RETURNING *
         `;
 
         const result = await pool.query(insertQuery, [
             generatedStencilId,
             stencil_name.trim(),
+            job_number.trim(),
             revision.trim(),
             thickness_mills.trim(),
             manufacturing_date,
@@ -123,7 +125,8 @@ export const updateStencilRecord = async (req: Request, res: Response) => {
         remarks,
         status,
         revision,
-        manufacturing_date
+        manufacturing_date,
+        job_number
     } = req.body;
 
     const sessionUser = getSessionUser(req);
@@ -159,9 +162,13 @@ export const updateStencilRecord = async (req: Request, res: Response) => {
         const updatedStatus = status || oldRecord.status;
         const updatedRevision = revision !== undefined ? revision.trim() : oldRecord.revision;
         const updatedMfgDate = manufacturing_date || oldRecord.manufacturing_date;
+        const updatedJobNumber = job_number !== undefined ? job_number.trim() : oldRecord.job_number;
 
         if (revision !== undefined && !updatedRevision) {
             return res.status(400).json({ message: 'Revision is mandatory.' });
+        }
+        if (job_number !== undefined && !updatedJobNumber) {
+            return res.status(400).json({ message: 'Job Number is mandatory.' });
         }
 
         const updateQuery = `
@@ -171,10 +178,11 @@ export const updateStencilRecord = async (req: Request, res: Response) => {
                 status = $3,
                 revision = $4,
                 manufacturing_date = $5,
-                updated_by = $6,
-                updated_by_name = $7,
+                job_number = $6,
+                updated_by = $7,
+                updated_by_name = $8,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $8
+            WHERE id = $9
             RETURNING *
         `;
 
@@ -184,6 +192,7 @@ export const updateStencilRecord = async (req: Request, res: Response) => {
             updatedStatus,
             updatedRevision,
             updatedMfgDate,
+            updatedJobNumber,
             sessionUser.id,
             sessionUser.name,
             id
@@ -283,7 +292,7 @@ export const getStencilRecords = async (req: Request, res: Response) => {
         // Allowed sort columns
         const allowedSortCols = [
             'stencil_id',
-            'unique_id',
+            'job_number',
             'stencil_name',
             'revision',
             'manufacturing_date',
@@ -299,6 +308,7 @@ export const getStencilRecords = async (req: Request, res: Response) => {
             queryParams.push(`%${search}%`);
             filterSql += ` AND (
                 stencil_name ILIKE $1 OR
+                job_number ILIKE $1 OR
                 revision ILIKE $1
             )`;
         }
@@ -356,7 +366,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
         const themeColor = '1F4E79'; // Dark Blue
 
         // Add title row
-        worksheet.mergeCells('A1:J1');
+        worksheet.mergeCells('A1:L1');
         const titleCell = worksheet.getCell('A1');
         titleCell.value = 'SMT STENCIL MASTER RECORD REPORT';
         titleCell.font = { name: 'Arial', size: 16, bold: true, color: { argb: 'FFFFFF' } };
@@ -370,7 +380,9 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
 
         // Define column headers
         const columns = [
+            { header: 'Stencil ID', key: 'stencil_id', width: 15 },
             { header: 'Stencil / Model Name', key: 'stencil_name', width: 25 },
+            { header: 'Job Number', key: 'job_number', width: 20 },
             { header: 'Revision', key: 'revision', width: 10 },
             { header: 'Thickness', key: 'thickness_mills', width: 18 },
             { header: 'Manufacturing Date', key: 'manufacturing_date', width: 20 },
@@ -414,7 +426,9 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
                 : '';
 
             const row = worksheet.addRow({
+                stencil_id: rec.stencil_id,
                 stencil_name: rec.stencil_name,
+                job_number: rec.job_number,
                 revision: rec.revision,
                 thickness_mills: rec.thickness_mills,
                 manufacturing_date: mfgDate,
@@ -438,7 +452,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
                 };
 
                 // Center specific columns for neatness
-                if ([2, 3, 4, 5, 8, 10].includes(colNumber)) {
+                if ([1, 3, 4, 5, 6, 7, 10, 12].includes(colNumber)) {
                     cell.alignment = { vertical: 'middle', horizontal: 'center' };
                 }
 

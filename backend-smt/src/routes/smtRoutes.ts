@@ -88,6 +88,13 @@ import {
     getLifecycleRecordById,
     deleteLifecycleRecord
 } from '../controllers/stencilLifecycleController';
+import {
+    createBakingRecord,
+    getBakingRecords,
+    getBakingRecordById,
+    stopBakingRecord,
+    deleteBakingRecord
+} from '../controllers/bakingTrackingController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = express.Router();
@@ -173,6 +180,13 @@ router.post('/stencil-lifecycle/create', authenticateToken, createLifecycleRecor
 router.get('/stencil-lifecycle/records', authenticateToken, getLifecycleRecords);
 router.get('/stencil-lifecycle/records/:id', authenticateToken, getLifecycleRecordById);
 router.delete('/stencil-lifecycle/records/:id', authenticateToken, deleteLifecycleRecord);
+
+// Baking Tracking Record
+router.post('/baking-tracking/create', authenticateToken, createBakingRecord);
+router.get('/baking-tracking/records', authenticateToken, getBakingRecords);
+router.get('/baking-tracking/records/:id', authenticateToken, getBakingRecordById);
+router.post('/baking-tracking/stop/:id', authenticateToken, stopBakingRecord);
+router.delete('/baking-tracking/records/:id', authenticateToken, deleteBakingRecord);
 
 router.post('/qms/create', authenticateToken, uploadRateLimiter, qmsUpload.fields([
     { name: 'bom', maxCount: 1 },

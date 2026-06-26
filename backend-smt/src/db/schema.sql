@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS stencil_master (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     stencil_id VARCHAR(50) UNIQUE NOT NULL,
     stencil_name VARCHAR(255) NOT NULL,
+    job_number VARCHAR(100) NOT NULL,
     revision VARCHAR(50) NOT NULL,
     thickness_mills VARCHAR(50) NOT NULL,
     manufacturing_date DATE NOT NULL,
