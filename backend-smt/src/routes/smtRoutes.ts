@@ -40,6 +40,17 @@ import {
     getCompletedBatches
 } from '../controllers/solderPasteController';
 import {
+    getEligibleWorkOrders as getMsdEligibleWorkOrders,
+    createMsdRecord,
+    getMsdRecords,
+    getMsdRecordDetail,
+    getMsdBomItems,
+    updateBomItem,
+    getMsdRecordAudit,
+    exportMsdToExcel,
+    updateMsdStatus
+} from '../controllers/msdTrackerController';
+import {
     getQmsWorkOrders,
     getQmsRecords,
     getBomRevisions,
@@ -62,17 +73,12 @@ import {
     saveMaterialManagementBom,
     updateMaterialManagementStatus,
     syncMaterialManagementBom,
-    exportMaterialManagementExcel
+    exportMaterialManagementExcel,
+    scanMaterialBarcode,
+    scanReturnBarcode,
+    globalScanBarcode
 } from '../controllers/materialManagementController';
-import {
-    getEligibleWorkOrders as getMREligibleWorkOrders,
-    createMaterialReturn,
-    getMaterialReturnRecords,
-    getMaterialReturnDetail,
-    getMaterialReturnBom,
-    saveMaterialReturnBom,
-    exportMaterialReturnExcel
-} from '../controllers/materialReturnController';
+
 import {
     createStencilRecord,
     updateStencilRecord,
@@ -156,15 +162,11 @@ router.post('/material-management/records/:id/bom', authenticateToken, saveMater
 router.post('/material-management/records/:id/sync-bom', authenticateToken, syncMaterialManagementBom);
 router.put('/material-management/records/:id/status', authenticateToken, updateMaterialManagementStatus);
 router.get('/material-management/records/:id/export/excel', authenticateToken, exportMaterialManagementExcel);
+router.post('/material-management/records/:id/scan', authenticateToken, scanMaterialBarcode);
+router.post('/material-management/records/:id/return-scan', authenticateToken, scanReturnBarcode);
+router.post('/material-management/global-scan', authenticateToken, globalScanBarcode);
 
-// Material Return
-router.get('/material-return/eligible-wos', authenticateToken, getMREligibleWorkOrders);
-router.get('/material-return/records', authenticateToken, getMaterialReturnRecords);
-router.post('/material-return/create', authenticateToken, createMaterialReturn);
-router.get('/material-return/records/:id', authenticateToken, getMaterialReturnDetail);
-router.get('/material-return/records/:id/bom', authenticateToken, getMaterialReturnBom);
-router.post('/material-return/records/:id/bom', authenticateToken, saveMaterialReturnBom);
-router.get('/material-return/records/:id/export/excel', authenticateToken, exportMaterialReturnExcel);
+
 
 // Stencil Management
 router.post('/stencil-management/create', authenticateToken, createStencilRecord);
@@ -187,6 +189,17 @@ router.get('/baking-tracking/records', authenticateToken, getBakingRecords);
 router.get('/baking-tracking/records/:id', authenticateToken, getBakingRecordById);
 router.post('/baking-tracking/stop/:id', authenticateToken, stopBakingRecord);
 router.delete('/baking-tracking/records/:id', authenticateToken, deleteBakingRecord);
+
+// MSD Tracker Endpoints
+router.get('/msd-tracker/eligible-work-orders', authenticateToken, getMsdEligibleWorkOrders);
+router.post('/msd-tracker', authenticateToken, createMsdRecord);
+router.get('/msd-tracker', authenticateToken, getMsdRecords);
+router.get('/msd-tracker/:id', authenticateToken, getMsdRecordDetail);
+router.get('/msd-tracker/:id/bom', authenticateToken, getMsdBomItems);
+router.patch('/msd-tracker/bom-item/:id', authenticateToken, updateBomItem);
+router.get('/msd-tracker/:id/audit', authenticateToken, getMsdRecordAudit);
+router.get('/msd-tracker/:id/export/excel', authenticateToken, exportMsdToExcel);
+router.patch('/msd-tracker/:id/status', authenticateToken, updateMsdStatus);
 
 router.post('/qms/create', authenticateToken, uploadRateLimiter, qmsUpload.fields([
     { name: 'bom', maxCount: 1 },

@@ -60,6 +60,66 @@ function matchColumn(header: string, targetKey: keyof typeof BOM_COLUMNS_MAPPING
     return BOM_COLUMNS_MAPPING[targetKey].includes(cleaned);
 }
 
+export async function extractBomRevisionFromFile(filePath: string): Promise<string> {
+    let workbook;
+    try {
+        workbook = XLSX.readFile(filePath);
+    } catch (err: any) {
+        logger.error(`Error reading Excel file for revision: ${err.message}`);
+        throw new Error('Unable to read the uploaded Excel file.');
+    }
+
+    const sheetNames = workbook.SheetNames;
+    logger.info(`[QMS_PARSER] Available worksheets: ${JSON.stringify(sheetNames)}`);
+
+    const bomSheetName = sheetNames.find(name => name.trim().toLowerCase() === 'bom');
+    if (!bomSheetName) {
+        logger.error(`[QMS_PARSER] Worksheet "BOM" (case-insensitive) not found in Excel.`);
+        throw new Error('Unable to find BOM worksheet in uploaded file.');
+    }
+
+    logger.info(`[QMS_PARSER] Parsing worksheet: "${bomSheetName}"`);
+    const sheet = workbook.Sheets[bomSheetName];
+    const rangeRows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+
+    const searchLimit = Math.min(20, rangeRows.length);
+    for (let r = 0; r < searchLimit; r++) {
+        const row = rangeRows[r];
+        if (!row || !Array.isArray(row)) continue;
+
+        for (let c = 0; c < row.length; c++) {
+            const cellVal = row[c];
+            if (cellVal === undefined || cellVal === null) continue;
+
+            const cellStr = String(cellVal).trim();
+            const cellAddress = XLSX.utils.encode_cell({ r, c });
+            logger.info(`[QMS_PARSER] Scanning cell ${cellAddress}: "${cellStr}"`);
+
+            // Case-insensitive check for BOM Rev No: (ignore trailing colon, unify inner spaces)
+            const normalizedCell = cellStr.toLowerCase().replace(/\s+/g, ' ').replace(/:$/, '').trim();
+            if (normalizedCell === 'bom rev no') {
+                logger.info(`[QMS_PARSER] Found "BOM Rev No:" label at cell ${cellAddress}`);
+
+                // Look up to 4 columns to the right for the first non-empty cell value
+                for (let offset = 1; offset <= 4; offset++) {
+                    const nextCol = c + offset;
+                    const val = row[nextCol];
+                    const valAddress = XLSX.utils.encode_cell({ r, c: nextCol });
+
+                    if (val !== undefined && val !== null && String(val).trim() !== '') {
+                        const extractedRev = String(val).trim();
+                        logger.info(`[QMS_PARSER] Selected revision value from cell ${valAddress}: "${extractedRev}"`);
+                        return extractedRev;
+                    }
+                }
+            }
+        }
+    }
+
+    logger.error(`[QMS_PARSER] Failed to find "BOM Rev No:" label and value in the first 20 rows of "${bomSheetName}"`);
+    throw new Error('BOM Revision Number not found in the uploaded Excel.');
+}
+
 export async function extractBomItemsFromFile(filePath: string): Promise<any[]> {
     let workbook;
     try {
@@ -438,7 +498,9 @@ export const createQms = async (req: Request, res: Response) => {
 
         const bomFile = files['bom'][0];
         let bomItems: any[] = [];
+        let bomRevision = '';
         try {
+            bomRevision = await extractBomRevisionFromFile(bomFile.path);
             bomItems = await extractBomItemsFromFile(bomFile.path);
         } catch (parseErr: any) {
             for (const key in files) {
@@ -501,7 +563,7 @@ export const createQms = async (req: Request, res: Response) => {
                 
                 // Naming convention
                 const docTypeTag = key === 'drawing' ? 'DRAWING' : key.toUpperCase();
-                const initRev = key === 'bom' ? '1.1' : '1';
+                const initRev = key === 'bom' ? bomRevision : '1';
                 const destName = generateFileName(work_order_number, docTypeTag, initRev, creator, false, file.originalname);
                 
                 // Pipeline process
@@ -549,10 +611,10 @@ export const createQms = async (req: Request, res: Response) => {
                             qms_id, revision_number, bom_file_path, original_name, 
                             original_size, compressed_size, compression_ratio, 
                             file_hash, compressed_file_hash, uploaded_by, remarks
-                        ) VALUES ($1, '1.1', $2, $3, $4, $5, $6, $7, $8, $9, 'Initial upload')
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Initial upload')
                         RETURNING id
                     `, [
-                        qmsId, relativePath, file.originalname, 
+                        qmsId, initRev, relativePath, file.originalname, 
                         result.originalSize, result.compressedSize, compRatio,
                         result.fileHash, result.compressedHash, creator
                     ]);
@@ -577,7 +639,7 @@ export const createQms = async (req: Request, res: Response) => {
                 files_metadata = $6,
                 current_bom_revision = $7
             WHERE id = $8
-        `, [bomFilePath, pfcFilePath, xyFilePath, ecnFilePath, drawingFilePath, JSON.stringify(filesMetadata), '1.1', qmsId]);
+        `, [bomFilePath, pfcFilePath, xyFilePath, ecnFilePath, drawingFilePath, JSON.stringify(filesMetadata), bomRevision, qmsId]);
 
         // Insert audit log
         const ip = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
@@ -690,8 +752,10 @@ async function handleFileUpdate(
     }
 
     let bomItems: any[] = [];
+    let parsedBomRevision = '';
     if (fileType === 'bom') {
         try {
+            parsedBomRevision = await extractBomRevisionFromFile(file.path);
             bomItems = await extractBomItemsFromFile(file.path);
         } catch (parseErr: any) {
             if (file && fs.existsSync(file.path)) {
@@ -724,8 +788,26 @@ async function handleFileUpdate(
         const oldMetadata = master.files_metadata?.[fileType] || null;
         const previousRevision = oldMetadata?.revision || null;
         const nextRev = fileType === 'bom'
-            ? incrementBomRevision(previousRevision || undefined)
+            ? parsedBomRevision
             : incrementRevision(previousRevision);
+
+        if (fileType === 'bom') {
+            const dupCheck = await poolClient.query(
+                `SELECT id FROM qms_bom_revisions WHERE qms_id = $1 AND revision_number = $2`,
+                [qmsId, nextRev]
+            );
+            if (dupCheck.rows.length > 0) {
+                poolClient.release();
+                if (file && fs.existsSync(file.path)) {
+                    try { fs.unlinkSync(file.path); } catch (e) {}
+                }
+                return res.status(400).json({
+                    success: false,
+                    error: `BOM Revision ${nextRev} already exists for this Work Order/QMS record.`,
+                    message: `BOM Revision ${nextRev} already exists for this Work Order/QMS record.`
+                });
+            }
+        }
 
         // Determine old physical file path to delete later (after successful commit)
         if (fileType === 'bom') oldFileToDelete = master.bom_file_path;
