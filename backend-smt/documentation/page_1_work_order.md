@@ -41,7 +41,7 @@
     *   Validates all mandatory fields.
 8.  **Database Persistence:** Records are saved in the `smt_work_orders` table.
 9.  **Real-time Update:** The "Created Work Orders" table on the UI refreshes immediately to show the new entry.
-10. **Activation:** The Work Order is now "Live" and becomes visible in the next production stages (Printing, SPI, etc.).
+10. **Activation:** The Work Order is now "Live" and becomes visible in the next production stages (Printing, Pre AOI, etc.).
 
 ---
 

@@ -31,7 +31,7 @@
 2.  **AOI Machine Check:** The machine scans the board and displays the result on its screen.
 3.  **MES Scanning:**
     *   Operator scans the PCB serial number.
-    *   **Sequence Check:** System verifies the board passed **SPI** (Page 4).
+    *   **Sequence Check:** System verifies the board passed **Pre AOI**.
 4.  **Result Entry:**
     *   **PASS:** Board is clear to move to the next stage.
     *   **FAIL:** Operator clicks FAIL and enters the component-level defect (e.g., "R12 Missing", "C5 Reversed").
@@ -41,7 +41,7 @@
 
 ### 5. UI SECTION EXPLANATION
 *   **Inspection Stats:** 
-    *   **Available:** Boards that successfully cleared SPI.
+    *   **Available:** Boards that successfully cleared Pre AOI.
     *   **Completed:** Boards that have a logged AOI result.
 *   **Item Table:** 
     *   Displays a **QR Code** for each board to allow for secondary manual verification.
@@ -63,18 +63,18 @@
 ---
 
 ### 7. BACKEND LOGIC
-*   **Eligibility API:** The backend uses a SQL filter to ensure that only boards with `SPI = PASS` appear in the "Available" list for Post AOI. This prevents "skipping" the solder paste inspection.
+*   **Eligibility API:** The backend uses a SQL filter to ensure that only boards with `Pre AOI = PASS` appear in the "Available" list for Post AOI. This prevents "skipping" the pre-AOI inspection.
 
 ---
 
 ### 8. FRONTEND LOGIC
-*   **Inline Rework UI:** Unlike SPI (which uses a prompt), Post AOI uses an inline input box within the table row. This allows the operator to stay focused on the list without annoying popups.
+*   **Inline Rework UI:** Post AOI uses an inline input box within the table row. This allows the operator to stay focused on the list without annoying popups.
 *   **Auto-Focus:** The scan input is always focused to ensure high-speed processing.
 
 ---
 
 ### 9. STATUS FLOW
-1.  **ELIGIBLE:** Board passed SPI.
+1.  **ELIGIBLE:** Board passed Pre AOI.
 2.  **PENDING:** Board scanned at AOI but result not yet clicked.
 3.  **PASS:** SMT process complete.
 4.  **FAIL:** Blocked; sent to Rework station.
@@ -82,7 +82,7 @@
 ---
 
 ### 10. VALIDATION RULES
-*   **Sequence Enforcement:** System blocks the scan if `SPI` status is anything other than `PASS`.
+*   **Sequence Enforcement:** System blocks the scan if `Pre AOI` status is anything other than `PASS`.
 *   **Uniqueness:** Prevents scanning the same board twice within the same AOI batch.
 
 ---
@@ -93,7 +93,7 @@
 ---
 
 ### 12. ERROR SCENARIOS
-*   **"Serial not ready":** Usually means the board was never scanned at the SPI station.
+*   **"Serial not ready":** Usually means the board was never scanned at the Pre AOI station.
 *   **"Already In List":** Board was already scanned in the current session.
 
 ---
@@ -117,5 +117,5 @@
 
 ### 16. SIMPLE SUMMARY
 *   **Explanation:** The "Robot Eyes" check. Ensures all components are on the board and correctly aligned.
-*   **Quick Workflow:** Confirm board passed SPI -> Machine Result -> Record PASS or FAIL.
+*   **Quick Workflow:** Confirm board passed Pre AOI -> Machine Result -> Record PASS or FAIL.
 *   **Key Business Importance:** Ensures 100% component placement accuracy.

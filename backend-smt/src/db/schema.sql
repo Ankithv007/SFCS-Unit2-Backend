@@ -37,14 +37,14 @@ CREATE TABLE IF NOT EXISTS smt_serial_numbers (
 CREATE TABLE IF NOT EXISTS smt_inspections (
     id SERIAL PRIMARY KEY,
     serial_id INTEGER REFERENCES smt_serial_numbers(id) ON DELETE CASCADE,
-    process_step VARCHAR(100) NOT NULL, -- SPI, Post AOI, Rework, etc.
+    process_step VARCHAR(100) NOT NULL, -- Post AOI, Rework, etc.
     scanned_by VARCHAR(255),
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(50) DEFAULT 'PASS',
     rework_reason TEXT
 );
 
--- SMT Process Setups Table (For persistent station entries like Printing, SPI, etc.)
+-- SMT Process Setups Table (For persistent station entries like Printing, etc.)
 CREATE TABLE IF NOT EXISTS smt_process_setups (
     id SERIAL PRIMARY KEY,
     work_order_id VARCHAR(255) REFERENCES smt_work_orders(id) ON DELETE CASCADE,

@@ -132,7 +132,7 @@ router.get('/inspections', getInspections);
 router.delete('/inspections/batch', deleteInspectionsForBatch);
 router.get('/export/excel', downloadSmtReport);
 
-// Process Setups (SPI, AOI, etc.)
+// Process Setups (AOI, etc.)
 router.post('/process-setups', createProcessSetup);
 router.get('/process-setups', getProcessSetups);
 router.delete('/process-setups/:id', deleteProcessSetup);

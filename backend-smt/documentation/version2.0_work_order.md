@@ -5,7 +5,7 @@
 ### 1. PAGE NAME
 **Work Order Management (SMT - Version 2.0)**
 *   **What is it?** This is the master control and entry point for all SMT production runs. It allows planners to register Work Orders, define priorities, assign lines, specify product parameters, and trace real-time execution.
-*   **Why does it exist?** SMT manufacturing requires absolute traceability and structured schedules. This page establishes a formal "Work Order ID" that serves as the root container for all downline process tracking (Stencil Printing, SPI, Placement, Reflow, AOI, QC, and Rework).
+*   **Why does it exist?** SMT manufacturing requires absolute traceability and structured schedules. This page establishes a formal "Work Order ID" that serves as the root container for all downline process tracking (Stencil Printing, Pre AOI, Post AOI, and Rework).
 
 ---
 

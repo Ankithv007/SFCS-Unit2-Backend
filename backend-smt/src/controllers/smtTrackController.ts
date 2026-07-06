@@ -223,7 +223,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
-            const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+            const stepNames = ['Serial Number', 'Printing', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
             stepNames.forEach(step => {
                 const stepHist = history.filter((h: any) => h.process_step === step);
                 if (stepHist.length > 0) {
@@ -373,11 +373,8 @@ export const getCountDetails = async (req: Request, res: Response) => {
             if (stg === 'printing') {
                 return 'Serial Number';
             }
-            if (stg === 'spi') {
-                return 'Printing';
-            }
             if (stg === 'pre aoi' || stg === 'pre_aoi') {
-                return 'SPI';
+                return 'Printing';
             }
             if (stg === 'post aoi' || stg === 'post_aoi') {
                 return 'Pre AOI';
@@ -490,65 +487,6 @@ export const getCountDetails = async (req: Request, res: Response) => {
                 break;
             }
 
-            case 'spi': {
-                if (normType === 'passed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'PASS',
-                        scanned_by: s.stepLatest['SPI']?.scanned_by,
-                        scanned_at: s.stepLatest['SPI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                } else if (normType === 'failed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'FAIL').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'FAIL',
-                        scanned_by: s.stepLatest['SPI']?.scanned_by,
-                        scanned_at: s.stepLatest['SPI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['SPI']?.rework_reason
-                    }));
-                } else if (normType === 'printing_passed' || normType === 'previous_passed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'PASS',
-                        scanned_by: s.stepLatest['Printing']?.scanned_by,
-                        scanned_at: s.stepLatest['Printing']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status !== 'PASS').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'PENDING',
-                        scanned_by: null,
-                        scanned_at: null,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                } else if (normType === 'scanned') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI'] !== undefined).map(s => ({
-                        serial_number: s.serial_number,
-                        status: s.stepLatest['SPI']?.status,
-                        scanned_by: s.stepLatest['SPI']?.scanned_by,
-                        scanned_at: s.stepLatest['SPI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['SPI']?.rework_reason
-                    }));
-                } else {
-                    filtered = mappedSerials.map(s => ({
-                        serial_number: s.serial_number,
-                        status: s.stepLatest['SPI']?.status || 'PENDING',
-                        scanned_by: s.stepLatest['SPI']?.scanned_by,
-                        scanned_at: s.stepLatest['SPI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['SPI']?.rework_reason
-                    }));
-                }
-                break;
-            }
-
             case 'pre aoi':
             case 'pre_aoi': {
                 if (normType === 'passed') {
@@ -569,12 +507,12 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: s.stepLatest['Pre AOI']?.rework_reason
                     }));
-                } else if (normType === 'spi_passed' || normType === 'previous_passed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
+                } else if (normType === 'spi_passed' || normType === 'printing_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PASS',
-                        scanned_by: s.stepLatest['SPI']?.scanned_by,
-                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
                         previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));

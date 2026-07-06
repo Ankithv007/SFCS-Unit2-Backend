@@ -4,7 +4,7 @@
 
 ### 1. PAGE NAME
 **Rework Management**
-*   **What is it?** This is the hospital for PCBs. Any board that fails an inspection (SPI or Post AOI) is sent here to be repaired by a skilled technician.
+*   **What is it?** This is the hospital for PCBs. Any board that fails an inspection (Printing, Pre AOI or Post AOI) is sent here to be repaired by a skilled technician.
 *   **Why does it exist?** SMT components are tiny and machines aren't perfect. Instead of throwing away a expensive board due to a single missing resistor, Rework allows the board to be "Saved" and returned to the production line.
 
 ---
@@ -27,7 +27,7 @@
 ---
 
 ### 4. COMPLETE WORKFLOW
-1.  **Fail Event:** A board fails at SPI (Page 4) or Post AOI (Page 6).
+1.  **Fail Event:** A board fails at Printing, Pre AOI or Post AOI.
 2.  **MES Routing:** The board is automatically added to the **Rework Available** list for its specific Work Order.
 3.  **Physical Transport:** The board is physically moved to the Rework Station.
 4.  **Technician Action:**
@@ -74,7 +74,7 @@
 ---
 
 ### 9. STATUS FLOW
-1.  **FAIL (From SPI/AOI):** The entry point.
+1.  **FAIL (From Printing/Pre AOI/Post AOI):** The entry point.
 2.  **WAITING:** Board is physically at the rework station but work hasn't started.
 3.  **PASS (REWORKED):** Board is "Resurrected" and returns to the normal flow.
 4.  **RE-FAIL:** Board is sent back for a second round of repair or scrap.
@@ -106,7 +106,7 @@
 ---
 
 ### 14. DEVELOPMENT CHALLENGES
-*   **Status Complexity:** A board can fail SPI, go to Rework, pass, then fail AOI, and go back to Rework. The logic must track the *entire history* and always show the *most recent* failure.
+*   **Status Complexity:** A board can fail Pre AOI, go to Rework, pass, then fail Post AOI, and go back to Rework. The logic must track the *entire history* and always show the *most recent* failure.
 
 ---
 
