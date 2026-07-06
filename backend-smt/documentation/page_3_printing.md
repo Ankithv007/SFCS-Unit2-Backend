@@ -39,7 +39,7 @@
 1.  The machine prints paste on the PCB.
 2.  The Operator takes the PCB and scans its serial number label.
 3.  **System Validation:**
-    *   System checks if the serial number was previously "Registered".
+    *   System checks if the serial number was generated.
     *   System checks if it hasn't already been printed.
 4.  **Database Update:** A new record is added to `smt_inspections` with `process_step = 'Printing'` and `status = 'PASS'`.
 5.  **UI Feedback:** The progress counter increments, and the row turns green in the "Items" table.
@@ -49,7 +49,7 @@
 ### 5. UI SECTION EXPLANATION
 *   **Shift Indicator:** Automatically detects the current shift (A, B, C, or G) based on system time.
 *   **Setup Form:** 
-    *   **Work Order Selector:** Only shows WOs that have "Registered" serial numbers.
+    *   **Work Order Selector:** Only shows WOs that have generated serial numbers.
     *   **Tooling Fields:** Text inputs for Stencil, Squeegee, and Paste.
     *   **Side Selection:** Toggle between TOP/BOTTOM (Critical for double-sided boards).
 *   **Batch Detail View:**
@@ -97,14 +97,14 @@
 ---
 
 ### 9. STATUS FLOW
-1.  **Pending:** Serial number is registered but has not reached the printer.
+1.  **Pending:** Serial number is generated but has not reached the printer.
 2.  **PASSED (in Printing):** Serial number has been scanned at the Printing station.
 3.  **REWORK:** (Optional) If the paste is smudged, the operator can manually clear the record and re-print (managed via "Reset" or "Delete" in some versions).
 
 ---
 
 ### 10. VALIDATION RULES
-*   **Sequence Validation:** A board cannot be "Printed" if it wasn't first "Registered".
+*   **Sequence Validation:** A board cannot be "Printed" if its serial number was not first generated.
 *   **Duplicate Prevention:** A board cannot be "Printed" twice in the same batch (Prevents double-scanning errors).
 *   **Mandatory Tools:** Setup cannot start if Stencil or Paste fields are empty.
 
@@ -119,7 +119,7 @@
 ---
 
 ### 12. ERROR SCENARIOS
-*   **"Serial not ready":** The board skipped the registration step. *Fix: Go back and register the label.*
+*   **"Serial not ready":** The serial number has not been generated. *Fix: Generate serial numbers for the Work Order.*
 *   **"Wrong Side":** Operator is scanning a "BOTTOM" side board while the system is set to "TOP". *Fix: Change Side Selection in Setup.*
 *   **"Database Timeout":** API fails to respond. *Fix: Handled by toaster notification "Failed to save record".*
 

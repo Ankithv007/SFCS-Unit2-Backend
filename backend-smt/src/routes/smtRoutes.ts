@@ -76,7 +76,9 @@ import {
     exportMaterialManagementExcel,
     scanMaterialBarcode,
     scanReturnBarcode,
-    globalScanBarcode
+    globalScanBarcode,
+    completeMaterialIssue,
+    completeMaterialReturn
 } from '../controllers/materialManagementController';
 
 import {
@@ -165,6 +167,8 @@ router.get('/material-management/records/:id/export/excel', authenticateToken, e
 router.post('/material-management/records/:id/scan', authenticateToken, scanMaterialBarcode);
 router.post('/material-management/records/:id/return-scan', authenticateToken, scanReturnBarcode);
 router.post('/material-management/global-scan', authenticateToken, globalScanBarcode);
+router.post('/material-management/records/:id/complete-issue', authenticateToken, completeMaterialIssue);
+router.post('/material-management/records/:id/complete-return', authenticateToken, completeMaterialReturn);
 
 
 

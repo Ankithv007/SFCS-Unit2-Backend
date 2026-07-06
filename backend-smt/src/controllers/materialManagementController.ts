@@ -450,6 +450,7 @@ export const getMaterialManagementBom = async (req: Request, res: Response) => {
                     imd.remaining_qty,
                     imd.scanned_by,
                     imd.scanned_at,
+                    imd.material_issue_transaction_id,
                     COALESCE(ret.returned_qty, 0) AS returned_qty
                 FROM issued_material_details imd
                 LEFT JOIN (
@@ -474,7 +475,8 @@ export const getMaterialManagementBom = async (req: Request, res: Response) => {
                     remaining_qty: parseFloat(row.remaining_qty),
                     returned_qty: parseFloat(row.returned_qty),
                     scanned_by: row.scanned_by,
-                    scanned_at: row.scanned_at
+                    scanned_at: row.scanned_at,
+                    material_issue_transaction_id: row.material_issue_transaction_id
                 });
                 uidsMap.set(row.material_request_item_id, list);
             });
@@ -487,7 +489,8 @@ export const getMaterialManagementBom = async (req: Request, res: Response) => {
                     rmd.returned_qty,
                     rmd.remaining_qty_after,
                     rmd.returned_by,
-                    rmd.returned_at
+                    rmd.returned_at,
+                    rmd.material_return_transaction_id
                 FROM returned_material_details rmd
                 JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
                 WHERE imd.material_request_item_id IN (
@@ -504,7 +507,8 @@ export const getMaterialManagementBom = async (req: Request, res: Response) => {
                     returned_qty: parseFloat(row.returned_qty),
                     remaining_qty_after: parseFloat(row.remaining_qty_after),
                     returned_by: row.returned_by,
-                    returned_at: row.returned_at
+                    returned_at: row.returned_at,
+                    material_return_transaction_id: row.material_return_transaction_id
                 });
                 returnedUidsMap.set(row.material_request_item_id, list);
             });
@@ -1458,6 +1462,7 @@ export const scanMaterialBarcode = async (req: Request, res: Response) => {
                 imd.remaining_qty, 
                 imd.scanned_by, 
                 imd.scanned_at,
+                imd.material_issue_transaction_id,
                 COALESCE(ret.returned_qty, 0) AS returned_qty
             FROM issued_material_details imd
             LEFT JOIN (
@@ -1477,7 +1482,8 @@ export const scanMaterialBarcode = async (req: Request, res: Response) => {
             remaining_qty: parseFloat(r.remaining_qty),
             returned_qty: parseFloat(r.returned_qty),
             scanned_by: r.scanned_by,
-            scanned_at: r.scanned_at
+            scanned_at: r.scanned_at,
+            material_issue_transaction_id: r.material_issue_transaction_id
         }));
 
         const returnedRes = await client.query(`
@@ -1486,7 +1492,8 @@ export const scanMaterialBarcode = async (req: Request, res: Response) => {
                 rmd.returned_qty, 
                 rmd.remaining_qty_after, 
                 rmd.returned_by, 
-                rmd.returned_at
+                rmd.returned_at,
+                rmd.material_return_transaction_id
             FROM returned_material_details rmd
             JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
             WHERE imd.material_request_item_id = $1
@@ -1498,7 +1505,8 @@ export const scanMaterialBarcode = async (req: Request, res: Response) => {
             returned_qty: parseFloat(r.returned_qty),
             remaining_qty_after: parseFloat(r.remaining_qty_after),
             returned_by: r.returned_by,
-            returned_at: r.returned_at
+            returned_at: r.returned_at,
+            material_return_transaction_id: r.material_return_transaction_id
         }));
 
         const new_issued_qty = issued_uids.reduce((sum, r) => sum + r.issued_qty, 0);
@@ -1659,6 +1667,7 @@ export const scanReturnBarcode = async (req: Request, res: Response) => {
                 imd.remaining_qty, 
                 imd.scanned_by, 
                 imd.scanned_at,
+                imd.material_issue_transaction_id,
                 COALESCE(ret.returned_qty, 0) AS returned_qty
             FROM issued_material_details imd
             LEFT JOIN (
@@ -1678,7 +1687,8 @@ export const scanReturnBarcode = async (req: Request, res: Response) => {
             remaining_qty: parseFloat(r.remaining_qty),
             returned_qty: parseFloat(r.returned_qty),
             scanned_by: r.scanned_by,
-            scanned_at: r.scanned_at
+            scanned_at: r.scanned_at,
+            material_issue_transaction_id: r.material_issue_transaction_id
         }));
 
         const returnedRes = await client.query(`
@@ -1687,7 +1697,8 @@ export const scanReturnBarcode = async (req: Request, res: Response) => {
                 rmd.returned_qty, 
                 rmd.remaining_qty_after, 
                 rmd.returned_by, 
-                rmd.returned_at
+                rmd.returned_at,
+                rmd.material_return_transaction_id
             FROM returned_material_details rmd
             JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
             WHERE imd.material_request_item_id = $1
@@ -1699,7 +1710,8 @@ export const scanReturnBarcode = async (req: Request, res: Response) => {
             returned_qty: parseFloat(r.returned_qty),
             remaining_qty_after: parseFloat(r.remaining_qty_after),
             returned_by: r.returned_by,
-            returned_at: r.returned_at
+            returned_at: r.returned_at,
+            material_return_transaction_id: r.material_return_transaction_id
         }));
 
         const new_issued_qty = issued_uids.reduce((sum, r) => sum + r.issued_qty, 0);
@@ -1912,6 +1924,7 @@ export const globalScanBarcode = async (req: Request, res: Response) => {
                 imd.remaining_qty, 
                 imd.scanned_by, 
                 imd.scanned_at,
+                imd.material_issue_transaction_id,
                 COALESCE(ret.returned_qty, 0) AS returned_qty
             FROM issued_material_details imd
             LEFT JOIN (
@@ -1931,7 +1944,8 @@ export const globalScanBarcode = async (req: Request, res: Response) => {
             remaining_qty: parseFloat(r.remaining_qty),
             returned_qty: parseFloat(r.returned_qty),
             scanned_by: r.scanned_by,
-            scanned_at: r.scanned_at
+            scanned_at: r.scanned_at,
+            material_issue_transaction_id: r.material_issue_transaction_id
         }));
 
         const returnedRes = await client.query(`
@@ -1940,7 +1954,8 @@ export const globalScanBarcode = async (req: Request, res: Response) => {
                 rmd.returned_qty, 
                 rmd.remaining_qty_after, 
                 rmd.returned_by, 
-                rmd.returned_at
+                rmd.returned_at,
+                rmd.material_return_transaction_id
             FROM returned_material_details rmd
             JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
             WHERE imd.material_request_item_id = $1
@@ -1952,7 +1967,8 @@ export const globalScanBarcode = async (req: Request, res: Response) => {
             returned_qty: parseFloat(r.returned_qty),
             remaining_qty_after: parseFloat(r.remaining_qty_after),
             returned_by: r.returned_by,
-            returned_at: r.returned_at
+            returned_at: r.returned_at,
+            material_return_transaction_id: r.material_return_transaction_id
         }));
 
         const new_issued_qty = issued_uids.reduce((sum, r) => sum + r.issued_qty, 0);
@@ -2037,3 +2053,295 @@ export const globalScanBarcode = async (req: Request, res: Response) => {
         client.release();
     }
 };
+
+/**
+ * POST /api/material-management/records/:id/complete-issue
+ * Commit all pending material issues as a transaction, updates MSD Tracker
+ */
+export const completeMaterialIssue = async (req: Request, res: Response) => {
+    const { id } = req.params; // material_management ID
+    const operator = getOperator(req);
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Lock master record FOR UPDATE to prevent concurrency issues
+        const masterRes = await client.query(`
+            SELECT id, work_order_id, work_order_number, status, production_quantity
+            FROM material_management
+            WHERE id = $1 FOR UPDATE
+        `, [id]);
+
+        if (masterRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Material Management record not found.' });
+        }
+
+        const master = masterRes.rows[0];
+
+        // 2. Fetch pending issued_material_details (where transaction_id IS NULL)
+        const pendingRes = await client.query(`
+            SELECT imd.id, imd.issued_qty, mmi.vepl_part_no
+            FROM issued_material_details imd
+            JOIN material_management_items mmi ON imd.material_request_item_id = mmi.id
+            WHERE mmi.material_management_id = $1
+              AND imd.material_issue_transaction_id IS NULL
+        `, [id]);
+
+        if (pendingRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'No pending issued scans found to complete.' });
+        }
+
+        const pendingItems = pendingRes.rows;
+
+        // 3. Count unique parts and calculate total issued quantity
+        const uniqueParts = new Set(pendingItems.map(item => item.vepl_part_no));
+        const totalParts = uniqueParts.size;
+        const totalIssuedQty = pendingItems.reduce((sum, item) => sum + parseFloat(item.issued_qty), 0);
+
+        // 4. Generate unique transaction number
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
+        const rand = Math.floor(1000 + Math.random() * 9000);
+        const transaction_number = `MIT-${master.work_order_number}-${timestamp}-${rand}`;
+
+        // 5. Create transaction record
+        const txRes = await client.query(`
+            INSERT INTO material_issue_transactions (
+                material_management_id, transaction_number, completed_by, total_parts, total_issued_qty
+            ) VALUES ($1, $2, $3, $4, $5) RETURNING id, completed_at
+        `, [id, transaction_number, operator, totalParts, totalIssuedQty]);
+
+        const txId = txRes.rows[0].id;
+        const completionTime = txRes.rows[0].completed_at;
+
+        // 6. Link pending details
+        await client.query(`
+            UPDATE issued_material_details imd
+            SET material_issue_transaction_id = $1
+            FROM material_management_items mmi
+            WHERE imd.material_request_item_id = mmi.id
+              AND mmi.material_management_id = $2
+              AND imd.material_issue_transaction_id IS NULL
+        `, [txId, id]);
+
+        // 7. Update material_management_items summaries (issued_qty and delta_qty)
+        await client.query(`
+            UPDATE material_management_items mmi
+            SET issued_qty = COALESCE((
+                SELECT SUM(imd.issued_qty)
+                FROM issued_material_details imd
+                WHERE imd.material_request_item_id = mmi.id
+                  AND imd.material_issue_transaction_id IS NOT NULL
+            ), 0)
+            WHERE mmi.material_management_id = $1
+        `, [id]);
+
+        await client.query(`
+            UPDATE material_management_items mmi
+            SET delta_qty = mmi.issued_qty - mmi.required_qty
+            WHERE mmi.material_management_id = $1
+        `, [id]);
+
+        // 8. Auto-promote master record to ACTIVE if it was DRAFT
+        if (master.status === 'DRAFT') {
+            await client.query(`
+                UPDATE material_management
+                SET status = 'ACTIVE', updated_by = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = $2
+            `, [operator, id]);
+        }
+
+        // 9. Synchronize MSD Tracker if record exists
+        const msdMasterRes = await client.query(`
+            SELECT id FROM msd_master WHERE work_order_id = $1
+        `, [master.work_order_id]);
+
+        if (msdMasterRes.rows.length > 0) {
+            const msdId = msdMasterRes.rows[0].id;
+            await client.query(`
+                UPDATE msd_bom_items mbi
+                SET issued_qty = COALESCE(completed_issued.total_issued, 0) - COALESCE(completed_returned.total_returned, 0)
+                FROM material_management_items mmi
+                LEFT JOIN (
+                    SELECT material_request_item_id, SUM(issued_qty) AS total_issued
+                    FROM issued_material_details
+                    WHERE material_issue_transaction_id IS NOT NULL
+                    GROUP BY material_request_item_id
+                ) completed_issued ON mmi.id = completed_issued.material_request_item_id
+                LEFT JOIN (
+                    SELECT imd.material_request_item_id, SUM(rmd.returned_qty) AS total_returned
+                    FROM returned_material_details rmd
+                    JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
+                    WHERE rmd.material_return_transaction_id IS NOT NULL
+                    GROUP BY imd.material_request_item_id
+                ) completed_returned ON mmi.id = completed_returned.material_request_item_id
+                WHERE mbi.msd_id = $1
+                  AND mbi.material_management_item_id = mmi.id
+                  AND mmi.material_management_id = $2
+            `, [msdId, id]);
+        }
+
+        // 10. Write Audit Log
+        await client.query(`
+            INSERT INTO material_management_audit_logs (
+                material_request_number, vepl_part_no, uid, quantity, operator, action
+            ) VALUES ($1, 'TRANSACTION', $2, $3, $4, 'Material Issue Transaction Completed')
+        `, [master.work_order_number, transaction_number, totalIssuedQty, operator]);
+
+        await client.query('COMMIT');
+
+        return res.status(200).json({
+            success: true,
+            transactionId: txId,
+            transactionNumber: transaction_number,
+            totalParts,
+            totalQuantity: totalIssuedQty,
+            completionTime,
+            message: 'Material Issue transaction completed successfully.'
+        });
+
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        logger.error(`Error completing material issue for record ${id}:`, err);
+        return res.status(500).json({ error: 'Failed to complete material issue transaction.' });
+    } finally {
+        client.release();
+    }
+};
+
+/**
+ * POST /api/material-management/records/:id/complete-return
+ * Commit all pending material returns as a transaction, updates MSD Tracker
+ */
+export const completeMaterialReturn = async (req: Request, res: Response) => {
+    const { id } = req.params; // material_management ID
+    const operator = getOperator(req);
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Lock master record FOR UPDATE to prevent concurrency issues
+        const masterRes = await client.query(`
+            SELECT id, work_order_id, work_order_number, status, production_quantity
+            FROM material_management
+            WHERE id = $1 FOR UPDATE
+        `, [id]);
+
+        if (masterRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Material Management record not found.' });
+        }
+
+        const master = masterRes.rows[0];
+
+        // 2. Fetch pending returned_material_details (where transaction_id IS NULL)
+        const pendingRes = await client.query(`
+            SELECT rmd.id, rmd.returned_qty, imd.vepl_part_no
+            FROM returned_material_details rmd
+            JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
+            JOIN material_management_items mmi ON imd.material_request_item_id = mmi.id
+            WHERE mmi.material_management_id = $1
+              AND rmd.material_return_transaction_id IS NULL
+        `, [id]);
+
+        if (pendingRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'No pending return scans found to complete.' });
+        }
+
+        const pendingItems = pendingRes.rows;
+
+        // 3. Count unique parts and calculate total returned quantity
+        const uniqueParts = new Set(pendingItems.map(item => item.vepl_part_no));
+        const totalParts = uniqueParts.size;
+        const totalReturnedQty = pendingItems.reduce((sum, item) => sum + parseFloat(item.returned_qty), 0);
+
+        // 4. Generate unique transaction number
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
+        const rand = Math.floor(1000 + Math.random() * 9000);
+        const transaction_number = `MRT-${master.work_order_number}-${timestamp}-${rand}`;
+
+        // 5. Create transaction record
+        const txRes = await client.query(`
+            INSERT INTO material_return_transactions (
+                material_management_id, transaction_number, completed_by, total_parts, total_returned_qty
+            ) VALUES ($1, $2, $3, $4, $5) RETURNING id, completed_at
+        `, [id, transaction_number, operator, totalParts, totalReturnedQty]);
+
+        const txId = txRes.rows[0].id;
+        const completionTime = txRes.rows[0].completed_at;
+
+        // 6. Link pending returns
+        await client.query(`
+            UPDATE returned_material_details rmd
+            SET material_return_transaction_id = $1
+            FROM issued_material_details imd
+            JOIN material_management_items mmi ON imd.material_request_item_id = mmi.id
+            WHERE rmd.issued_material_detail_id = imd.id
+              AND mmi.material_management_id = $2
+              AND rmd.material_return_transaction_id IS NULL
+        `, [txId, id]);
+
+        // 7. Synchronize MSD Tracker if record exists
+        const msdMasterRes = await client.query(`
+            SELECT id FROM msd_master WHERE work_order_id = $1
+        `, [master.work_order_id]);
+
+        if (msdMasterRes.rows.length > 0) {
+            const msdId = msdMasterRes.rows[0].id;
+            await client.query(`
+                UPDATE msd_bom_items mbi
+                SET issued_qty = COALESCE(completed_issued.total_issued, 0) - COALESCE(completed_returned.total_returned, 0)
+                FROM material_management_items mmi
+                LEFT JOIN (
+                    SELECT material_request_item_id, SUM(issued_qty) AS total_issued
+                    FROM issued_material_details
+                    WHERE material_issue_transaction_id IS NOT NULL
+                    GROUP BY material_request_item_id
+                ) completed_issued ON mmi.id = completed_issued.material_request_item_id
+                LEFT JOIN (
+                    SELECT imd.material_request_item_id, SUM(rmd.returned_qty) AS total_returned
+                    FROM returned_material_details rmd
+                    JOIN issued_material_details imd ON rmd.issued_material_detail_id = imd.id
+                    WHERE rmd.material_return_transaction_id IS NOT NULL
+                    GROUP BY imd.material_request_item_id
+                ) completed_returned ON mmi.id = completed_returned.material_request_item_id
+                WHERE mbi.msd_id = $1
+                  AND mbi.material_management_item_id = mmi.id
+                  AND mmi.material_management_id = $2
+            `, [msdId, id]);
+        }
+
+        // 8. Write Audit Log
+        await client.query(`
+            INSERT INTO material_management_audit_logs (
+                material_request_number, vepl_part_no, uid, quantity, operator, action
+            ) VALUES ($1, 'TRANSACTION', $2, $3, $4, 'Material Return Transaction Completed')
+        `, [master.work_order_number, transaction_number, totalReturnedQty, operator]);
+
+        await client.query('COMMIT');
+
+        return res.status(200).json({
+            success: true,
+            transactionId: txId,
+            transactionNumber: transaction_number,
+            totalParts,
+            totalQuantity: totalReturnedQty,
+            completionTime,
+            message: 'Material Return transaction completed successfully.'
+        });
+
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        logger.error(`Error completing material return for record ${id}:`, err);
+        return res.status(500).json({ error: 'Failed to complete material return transaction.' });
+    } finally {
+        client.release();
+    }
+};
+

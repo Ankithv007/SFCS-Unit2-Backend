@@ -223,7 +223,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
-            const stepNames = ['Serial Number', 'PCB Registration', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+            const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
             stepNames.forEach(step => {
                 const stepHist = history.filter((h: any) => h.process_step === step);
                 if (stepHist.length > 0) {
@@ -370,11 +370,8 @@ export const getCountDetails = async (req: Request, res: Response) => {
         // Dynamic Previous Stage Calculator for SMT
         const getSMTPreviousStage = (s: any, currentProcessStage: string) => {
             const stg = currentProcessStage.toLowerCase();
-            if (stg === 'pcb registration' || stg === 'pcb_registration') {
-                return 'Serial Number';
-            }
             if (stg === 'printing') {
-                return 'PCB Registration';
+                return 'Serial Number';
             }
             if (stg === 'spi') {
                 return 'Printing';
@@ -451,38 +448,6 @@ export const getCountDetails = async (req: Request, res: Response) => {
                 break;
             }
 
-            case 'pcb registration':
-            case 'pcb_registration': {
-                if (normType === 'passed' || normType === 'scanned') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['PCB Registration']?.status === 'PASS').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'PASS',
-                        scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
-                        scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                } else if (normType === 'pending') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['PCB Registration']?.status !== 'PASS').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'PENDING',
-                        scanned_by: null,
-                        scanned_at: null,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                } else {
-                    filtered = mappedSerials.map(s => ({
-                        serial_number: s.serial_number,
-                        status: s.stepLatest['PCB Registration']?.status || 'PENDING',
-                        scanned_by: s.stepLatest['PCB Registration']?.scanned_by,
-                        scanned_at: s.stepLatest['PCB Registration']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: null
-                    }));
-                }
-                break;
-            }
 
             case 'printing': {
                 if (normType === 'passed' || normType === 'scanned') {
