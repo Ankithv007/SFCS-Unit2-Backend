@@ -1,65 +1,70 @@
 # SMT Manufacturing Execution System (MES)
 
-# Version 2.1 Summary
+## VERSION 2.1: RELEASE SUMMARY
 
-This document provides a high-level summary of everything introduced, updated, or decommissioned in the SMT MES Version 2.1 release.
+### 1. Introduction
+This Release Summary highlights the systematic process improvements, security controls, and navigation enhancements implemented in SMT MES Version 2.1. 
 
-### Newly Added Modules
-- **Fuzzy-Searchable Work Order Selector:** A reusable combobox search utility integrated across all active tracking and preparation pages to replace legacy select dropdowns.
+Version 2.1 transitions the SMT modules from basic data inputs to secure, standardized, and quick-navigation tools. The primary users are operators, supervisors, planners, QA inspectors, and management.
 
-### Updated Pages
-- Stencil Printing
-- Pre AOI
-- Post AOI
-- Rework Stage
-- MSD Component Tracker
-- Material Management (Unified)
-- SMT FG Session Manager
-- Serial Number Generation
-- Solder Paste Management (Refrigerator Removal, Thawing, and Mixing stages)
-- Stencil Life Cycle Management
-- Document Process (QMS)
-- Stencil Master Record
+---
 
-### Removed Pages
-- SPI (Solder Paste Inspection) Scanning Page & Sidebar Link.
+### 2. Business Purpose
+The business purpose of Version 2.1 is to standardise operations, secure data, and increase throughput.
+* **Operation Standardization:** Enforces identical dropdown behaviors and display formats across all 11 core SMT pages.
+* **Data Security:** Restricts destructive deletion operations strictly to Super Admin roles, preventing accidental or unauthorized modifications.
+* **Process Efficiency:** Decommissions redundant scanning stages (SPI) to increase line speed.
 
-### Workflow Improvements
-- **Fuzzy Search for Work Orders:** Operators type any portion of a Work Order ID to immediately retrieve the order details.
-- **Direct Processing:** Removed the manual scanning steps at the SPI stage, allowing boards to flow directly from Printing to Pre AOI.
+---
 
-### Search Improvements
-- Prioritized search match ordering (Exact Match > Prefix Match > Substring Match).
-- Instant results loading without screen freeze or lag.
+### 3. Previous Workflow (Version 2.0)
+In Version 2.0, users faced several operational challenges:
+* **Dropdown Lags:** Native select elements caused delays and selection errors on large data sets.
+* **Unsecured Deletions:** Any user could delete print logs, inspection results, or serial history, risking data loss.
+* **Process Bottlenecks:** Manual barcode scans at the SPI station created line queues.
 
-### Work Order Selection Improvements
-- Standardized `[Work Order ID] - [Product Name] (Qty: [Quantity])` display syntax across all dropdown select interfaces.
-- Dropdown lists expand automatically on input focus, showing all available choices immediately.
+---
 
-### UI/UX Improvements
-- Modern glassmorphic borders and inputs matching the dark/light SMT portal layout.
-- Organized detail inspect modals with distinct core data fields, remarks, and audit stamps.
+### 4. What's New in Version 2.1
+Version 2.1 introduces several enhancements:
+* **Standardized Work Order Selector:** A searchable combobox component integrated across all active tracking and preparation pages.
+* **Fuzzy-Search Capabilities:** Prioritized search match ordering (Exact Match > Prefix Match > Substring Match).
+* **Client-Side Delete Security Hardening:** Restricts deletion of prints, inspections, rework logs, serial histories, and lifecycle logs strictly to the `Super Admin` role.
+* **Decommissioning of SPI:** Bypasses manual SPI scanning, transitioning boards directly from Stencil Printing to Pre AOI.
 
-### Validation Improvements
-- Strict role-based client gates on print log, inspection log, serial history, and stencil lifecycle deletions (only permitted for Super Admins).
-- Polite error notifications (Toasts) advise other user roles of permission limits.
+---
 
-### Performance Improvements
-- Eliminated redundant state hooks and search triggers on dropdown components, reducing UI re-render latency.
-- Cleaner backend route configurations.
+### 5. User Workflow
+1. **Selecting Work Orders:** Operators type any portion of a Work Order ID to immediately retrieve the order details.
+2. **Running the Line:**
+   * Scan panels at **Stencil Printing**.
+   * Skip SPI scan station.
+   * Scan panels at **Pre AOI** directly.
+3. **Handling Deletions:** Standard users are blocked from delete operations, triggering a clear popup message.
 
-### User Experience Improvements
-- Standardized dropdown selection removes confusion when operators move between different staging screens.
-- Auto-focus input fields reduce keyboard tab-through counts.
+---
 
-### Production Benefits
-- Significantly decreases setup times during batch changeovers.
-- Bypassing the SPI scanning station decreases queue wait times.
+### 6. Benefits
+* **Operator Benefits:** Quick type-to-search saves time and reduces selection errors.
+* **Production Benefits:** Decreased queue times and faster line cycles.
+* **Supervisor Benefits:** Restricts destructive actions to admin-level staff, maintaining data security.
+* **QA Benefits:** Ensures chemical and revision compliance for every run.
+* **Traceability Benefits:** Keeps logs mapped directly to the parent Work Order ID.
+* **Productivity Improvements:** Minimizes setup delays when starting new batches.
+* **Error Reduction:** Search filtering prevents selecting the wrong product line.
+* **Time Savings:** Reduces search time from minutes to milliseconds.
+* **Ease of Use:** Sleek glassmorphic inputs make data entry straightforward.
 
-### Quality Improvements
-- Ensures correct product parameters are loaded on-line by eliminating manual dropdown selection errors.
-- Prevents obsolete or unthawed chemical paste jars and stencils from entering active printing lines.
+---
 
-### Traceability Improvements
-- Permanent audit stamps (Created By, Creation Dates) logged for every work order, stencil, and inspection log.
-- Secures database logs from unauthorized record deletions.
+### 7. User Experience Improvements
+* **Easier to use:** Simple filter cards make applying queries straightforward.
+* **Faster:** Reduced data query count loads reports instantly.
+* **More consistent:** Uses identical status styles as other SMT modules.
+* **More reliable:** Deletion blocks protect print count data from accidental clicks.
+* **More user-friendly:** Clean, clutter-free sidebar navigation menu.
+
+---
+
+### 8. Summary
+Version 2.1 marks a major upgrade in operational control and process efficiency for the SMT MES. By introducing the searchable `WorkOrderSelector` and security guards, the system enables operators, supervisors, and planners to run SMT production with maximum speed and audit-ready data security.

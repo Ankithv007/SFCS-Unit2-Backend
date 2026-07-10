@@ -115,6 +115,7 @@ import {
     cleanupTempFile,
     checkSerialNumberExists,
     addScannedBarcode,
+    getActiveCustomerBatch,
 } from '../controllers/serialBatchController';
 import {
     getEligibleWorkOrders as getPrintingEligibleWos,
@@ -333,6 +334,7 @@ router.post('/employees/login', loginEmployee);
 // Redesigned Serial Number Generation Records (API Version 1)
 router.post('/v1/smt/serial-generation-records', authenticateToken, createSerialGenerationRecord);
 router.get('/v1/smt/serial-generation-records', authenticateToken, getSerialGenerationRecords);
+router.get('/v1/smt/serial-generation-records/active-customer/:workOrderId', authenticateToken, getActiveCustomerBatch);
 router.get('/v1/smt/serial-generation-records/check-serial/:serialNumber', authenticateToken, checkSerialNumberExists);
 router.post('/v1/smt/serial-generation-records/laser/validate', authenticateToken, uploadRateLimiter, qmsUpload.single('file'), validateLaserFile);
 router.post('/v1/smt/serial-generation-records/laser/cleanup-temp', authenticateToken, cleanupTempFile);

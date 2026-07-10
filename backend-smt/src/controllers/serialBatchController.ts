@@ -97,6 +97,32 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
         let recordQty = 0;
         let serialsToInsert: string[] = [];
 
+        // Check if there is an existing active CUSTOMER batch for this WO
+        let existingBatch = null;
+        let isExisting = false;
+
+        if (barcode_source === 'CUSTOMER') {
+            const existingBatchRes = await client.query(`
+                SELECT id, generated_quantity, status 
+                FROM smt_serial_batches 
+                WHERE work_order_id = $1 
+                  AND barcode_source = 'CUSTOMER' 
+                  AND is_deleted = false 
+                LIMIT 1
+            `, [work_order_id]);
+
+            if (existingBatchRes.rows.length > 0) {
+                existingBatch = existingBatchRes.rows[0];
+                isExisting = true;
+
+                // Guard: check if already completed
+                if (existingBatch.status === 'Completed' || parseInt(existingBatch.generated_quantity, 10) >= workOrder.quantity) {
+                    await client.query('ROLLBACK');
+                    return sendError(res, 422, 'Work Order customer serial generation is already completed.', 'QUANTITY_LIMIT_EXCEEDED');
+                }
+            }
+        }
+
         // 4. Source Specific Business Rules & Duplicate Checks
         if (barcode_source === 'GENERATE') {
             if (!starting_number || !ending_number || !separator) {
@@ -184,44 +210,72 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
             }
         }
 
-        // 5. Insert Serial Generation Record (smt_serial_batches)
+        // 5. Insert/Update Serial Generation Record (smt_serial_batches)
+        const newTotalQty = isExisting ? (parseInt(existingBatch.generated_quantity, 10) + recordQty) : recordQty;
+        const finalStatus = newTotalQty === workOrder.quantity ? 'Completed' : 'Generated';
         const endTimePlaceholder = new Date();
         const durationPlaceholder = endTimePlaceholder.getTime() - startTime.getTime();
 
-        const batchRes = await client.query(`
-            INSERT INTO smt_serial_batches (
-                work_order_id, po_id, work_order_number, product_name, product_description,
-                work_order_quantity, panel_quantity, sides, line_id, work_order_remarks,
-                barcode_source, generation_source, status, generated_quantity,
-                serial_generation_remarks, additional_notes,
-                generation_start_time, generation_end_time, generation_duration_ms,
-                created_by, created_by_name
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'Generated', $13, $14, $15, $16, $17, $18, $19, $20)
-            RETURNING id, status, generated_quantity
-        `, [
-            work_order_id,
-            workOrder.po_id || '—',
-            workOrder.id, // work_order_number
-            workOrder.product_name,
-            workOrder.product_description || '',
-            workOrder.quantity,
-            workOrder.panel_quantity || 1,
-            workOrder.sides || 'TOP',
-            workOrder.line_id || 'Line 1',
-            workOrder.remark || '',
-            barcode_source,
-            barcode_source,
-            recordQty,
-            remarks || null,
-            additional_notes || null,
-            startTime,
-            endTimePlaceholder,
-            durationPlaceholder,
-            operator.username,
-            operator.name
-        ]);
+        let record;
+        if (isExisting) {
+            const updateBatchRes = await client.query(`
+                UPDATE smt_serial_batches
+                SET generated_quantity = $1,
+                    status = $2,
+                    serial_generation_remarks = CASE WHEN $3::text IS NOT NULL AND $3::text <> '' THEN $3::text ELSE serial_generation_remarks END,
+                    additional_notes = CASE WHEN $4::text IS NOT NULL AND $4::text <> '' THEN $4::text ELSE additional_notes END,
+                    updated_by = $5,
+                    updated_by_name = $6,
+                    updated_at = NOW()
+                WHERE id = $7
+                RETURNING id, status, generated_quantity
+            `, [
+                newTotalQty,
+                finalStatus,
+                remarks || null,
+                additional_notes || null,
+                operator.username,
+                operator.name,
+                existingBatch.id
+            ]);
+            record = updateBatchRes.rows[0];
+        } else {
+            const batchRes = await client.query(`
+                INSERT INTO smt_serial_batches (
+                    work_order_id, po_id, work_order_number, product_name, product_description,
+                    work_order_quantity, panel_quantity, sides, line_id, work_order_remarks,
+                    barcode_source, generation_source, status, generated_quantity,
+                    serial_generation_remarks, additional_notes,
+                    generation_start_time, generation_end_time, generation_duration_ms,
+                    created_by, created_by_name
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                RETURNING id, status, generated_quantity
+            `, [
+                work_order_id,
+                workOrder.po_id || '—',
+                workOrder.id, // work_order_number
+                workOrder.product_name,
+                workOrder.product_description || '',
+                workOrder.quantity,
+                workOrder.panel_quantity || 1,
+                workOrder.sides || 'TOP',
+                workOrder.line_id || 'Line 1',
+                workOrder.remark || '',
+                barcode_source,
+                barcode_source,
+                finalStatus,
+                recordQty,
+                remarks || null,
+                additional_notes || null,
+                startTime,
+                endTimePlaceholder,
+                durationPlaceholder,
+                operator.username,
+                operator.name
+            ]);
 
-        const record = batchRes.rows[0];
+            record = batchRes.rows[0];
+        }
 
         // 6. Bulk Insert Serial Numbers & Inspection step
         if (barcode_source === 'GENERATE' || barcode_source === 'CUSTOMER' || barcode_source === 'LASER') {
@@ -266,16 +320,53 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
                 sampleFormat
             ]);
         } else if (barcode_source === 'CUSTOMER') {
-            await client.query(`
-                INSERT INTO smt_serial_batch_scans (
-                    batch_id, total_scanned, duplicate_scan_count, duplicate_scan_log
-                ) VALUES ($1, $2, $3, $4)
-            `, [
-                record.id,
-                recordQty,
-                duplicate_scan_count || 0,
-                JSON.stringify(duplicate_scan_log || [])
-            ]);
+            if (isExisting) {
+                // Fetch existing scan summary
+                const scanRes = await client.query(
+                    'SELECT duplicate_scan_count, duplicate_scan_log FROM smt_serial_batch_scans WHERE batch_id = $1',
+                    [existingBatch.id]
+                );
+                let existingDupCount = 0;
+                let existingDupLog: any[] = [];
+                if (scanRes.rows.length > 0) {
+                    existingDupCount = parseInt(scanRes.rows[0].duplicate_scan_count || 0, 10);
+                    try {
+                        existingDupLog = typeof scanRes.rows[0].duplicate_scan_log === 'string'
+                            ? JSON.parse(scanRes.rows[0].duplicate_scan_log)
+                            : (scanRes.rows[0].duplicate_scan_log || []);
+                    } catch (e) {
+                        existingDupLog = [];
+                    }
+                }
+
+                const mergedDupCount = existingDupCount + (duplicate_scan_count || 0);
+                const newDupLog = duplicate_scan_log || [];
+                const mergedDupLog = [...existingDupLog, ...newDupLog];
+
+                await client.query(`
+                    UPDATE smt_serial_batch_scans
+                    SET total_scanned = $1,
+                        duplicate_scan_count = $2,
+                        duplicate_scan_log = $3
+                    WHERE batch_id = $4
+                `, [
+                    newTotalQty,
+                    mergedDupCount,
+                    JSON.stringify(mergedDupLog),
+                    existingBatch.id
+                ]);
+            } else {
+                await client.query(`
+                    INSERT INTO smt_serial_batch_scans (
+                        batch_id, total_scanned, duplicate_scan_count, duplicate_scan_log
+                    ) VALUES ($1, $2, $3, $4)
+                `, [
+                    record.id,
+                    recordQty,
+                    duplicate_scan_count || 0,
+                    JSON.stringify(duplicate_scan_log || [])
+                ]);
+            }
         } else if (barcode_source === 'LASER') {
             // Compress and move file
             const fileResult = await compressAndSaveLaserMachineFile(temp_file_path, original_filename, record.id);
@@ -297,13 +388,19 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
         }
 
         // 8. Log Generation Record Activity
+        const logAction = isExisting ? 'Record Updated' : 'Record Created';
+        const logDetails = isExisting
+            ? `Resumed scanning and appended ${recordQty} Customer Barcodes. New total: ${newTotalQty} for Work Order ${workOrder.id}.`
+            : `Serial Generation Record created for Work Order ${workOrder.id} using source ${barcode_source}. Quantity: ${recordQty}.`;
+
         await client.query(`
             INSERT INTO smt_serial_batch_activity_logs (
                 batch_id, action, details, performed_by, performed_by_name
-            ) VALUES ($1, 'Record Created', $2, $3, $4)
+            ) VALUES ($1, $2, $3, $4, $5)
         `, [
             record.id,
-            `Serial Generation Record created for Work Order ${workOrder.id} using source ${barcode_source}. Quantity: ${recordQty}.`,
+            logAction,
+            logDetails,
             operator.username,
             operator.name
         ]);
@@ -315,7 +412,7 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
         await client.query(`
             UPDATE smt_serial_batches
             SET generation_end_time = $1,
-                generation_duration_ms = $2
+                generation_duration_ms = COALESCE(generation_duration_ms, 0) + $2
             WHERE id = $3
         `, [endTime, durationMs, record.id]);
 
@@ -358,10 +455,11 @@ export const getSerialGenerationRecords = async (req: Request, res: Response) =>
 
     try {
         let query = `
-            SELECT id, work_order_number, product_name, work_order_quantity, panel_quantity, barcode_source, created_at, created_by, created_by_name
+            SELECT id, work_order_number, product_name, work_order_quantity, panel_quantity, barcode_source, status, generated_quantity, created_at, created_by, created_by_name
             FROM smt_serial_batches
             WHERE is_deleted = false
         `;
+
         const params: any[] = [];
 
         if (search.trim()) {
@@ -658,6 +756,56 @@ export const checkSerialNumberExists = async (req: Request, res: Response) => {
         return res.status(500).json({ success: false, error: err.message });
     }
 };
+
+/**
+ * GET /api/smt/v1/smt/serial-generation-records/active-customer/:workOrderId
+ * Retrieves the active customer barcode batch for a work order, along with its scanned serials.
+ */
+export const getActiveCustomerBatch = async (req: Request, res: Response) => {
+    const { workOrderId } = req.params;
+    try {
+        const batchRes = await pool.query(
+            `SELECT id, work_order_id, generated_quantity, status, serial_generation_remarks, additional_notes, work_order_quantity
+             FROM smt_serial_batches
+             WHERE work_order_id = $1 
+               AND barcode_source = 'CUSTOMER' 
+               AND is_deleted = false
+             LIMIT 1`,
+            [workOrderId]
+        );
+
+        if (batchRes.rows.length === 0) {
+            return res.json({
+                success: true,
+                hasExisting: false
+            });
+        }
+
+        const batch = batchRes.rows[0];
+
+        // Fetch scanned serials for this batch
+        const serialsRes = await pool.query(
+            `SELECT serial_number 
+             FROM smt_serial_numbers 
+             WHERE batch_id = $1 
+             ORDER BY created_at DESC`,
+            [batch.id]
+        );
+
+        const serials = serialsRes.rows.map(r => r.serial_number);
+
+        return res.json({
+            success: true,
+            hasExisting: true,
+            batch,
+            serials
+        });
+    } catch (err: any) {
+        logger.error('Error fetching active customer batch:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+};
+
 
 /**
  * POST /api/smt/v1/smt/serial-generation-records/:id/scans
