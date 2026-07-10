@@ -400,7 +400,11 @@ export const deleteBakingRecord = async (req: Request, res: Response) => {
 
     // Verify Super Admin permission
     if (sessionUser.role !== 'Super Admin') {
-        return res.status(403).json({ message: 'Access Denied: Only Super Admin is authorized to delete baking records.' });
+        return res.status(403).json({
+            success: false,
+            message: 'Only Super Admin is authorized to delete records.',
+            error: 'Only Super Admin is authorized to delete records.'
+        });
     }
 
     try {
@@ -433,15 +437,24 @@ export const deleteBakingRecord = async (req: Request, res: Response) => {
 
         // Audit Log Entry
         await pool.query(`
-            INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value, new_value)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
         `, [
             'DELETE',
             'BAKING_TRACKING',
             id,
             sessionUser.name,
-            `Baking tracking record for model ${record.model_name} soft deleted by Super Admin ${sessionUser.name}.`,
-            JSON.stringify(record)
+            `Baking tracking record for model ${record.model_name} soft deleted by Super Admin.`,
+            JSON.stringify(record),
+            JSON.stringify({
+                userId: sessionUser.id,
+                userName: sessionUser.name,
+                userRole: sessionUser.role,
+                moduleName: 'Baking Tracking Record',
+                recordId: id,
+                timestamp: new Date().toISOString(),
+                action: 'DELETE'
+            })
         ]);
 
         return res.status(200).json({ message: 'Baking tracking record deleted successfully.' });

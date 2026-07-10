@@ -153,10 +153,20 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
         const query = `
             SELECT 
                 wo.*, 
-                (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id) as generated_count
+                COALESCE((
+                    SELECT GREATEST(
+                        (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status != 'Cancelled'),
+                        (SELECT COALESCE(SUM(sb.generated_quantity), 0) FROM smt_serial_batches sb WHERE sb.work_order_id = wo.id AND sb.is_deleted = false AND sb.status NOT IN ('Cancelled', 'Deleted'))
+                    )
+                ), 0)::int as generated_count
             FROM smt_work_orders wo
-            WHERE wo.is_registered = false
-            AND NOT EXISTS (SELECT 1 FROM smt_serial_numbers sn2 WHERE sn2.work_order_id = wo.id)
+            WHERE wo.status NOT IN ('Cancelled', 'Deleted', 'Completed')
+              AND COALESCE((
+                  SELECT GREATEST(
+                      (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status != 'Cancelled'),
+                      (SELECT COALESCE(SUM(sb.generated_quantity), 0) FROM smt_serial_batches sb WHERE sb.work_order_id = wo.id AND sb.is_deleted = false AND sb.status NOT IN ('Cancelled', 'Deleted'))
+                  )
+              ), 0) < wo.quantity
             ORDER BY wo.created_at DESC
         `;
         const result = await pool.query(query);
@@ -253,7 +263,8 @@ export const deleteWorkOrder = async (req: Request, res: Response) => {
     if (userRole !== 'Super Admin') {
         return res.status(403).json({ 
             success: false, 
-            message: "Only Super Admin can delete work orders" 
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
         });
     }
 
@@ -283,6 +294,34 @@ export const deleteWorkOrder = async (req: Request, res: Response) => {
         // 3. Remove DB record
         const result = await pool.query('DELETE FROM smt_work_orders WHERE id = $1 RETURNING *', [id]);
         logger.info(`Audit: Work order deleted successfully from database: ${id}`);
+
+        const sessionUser = {
+            id: (req as any).user?.id || (req as any).user?.userId || null,
+            name: (req as any).user?.name || (req as any).user?.email || 'Unknown User',
+            role: userRole
+        };
+
+        // Write Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'WORK_ORDER',
+                id.toString(),
+                sessionUser.name,
+                `Work order deleted successfully by Super Admin`,
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Work Order Management',
+                    recordId: id,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
 
         res.status(200).json({ 
             success: true, 
@@ -839,7 +878,11 @@ export const deleteSerials = async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
 
     if (userRole !== 'Super Admin') {
-        return res.status(403).json({ error: "Only Super Admin can delete serials" });
+        return res.status(403).json({
+            success: false,
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
+        });
     }
 
     try {
@@ -848,6 +891,35 @@ export const deleteSerials = async (req: Request, res: Response) => {
         } else {
             await pool.query('DELETE FROM smt_serial_numbers');
         }
+
+        const sessionUser = {
+            id: (req as any).user?.id || (req as any).user?.userId || null,
+            name: (req as any).user?.name || (req as any).user?.email || 'Unknown User',
+            role: userRole
+        };
+
+        // Write Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'SERIAL_NUMBERS',
+                work_order_id ? work_order_id.toString() : 'ALL',
+                sessionUser.name,
+                `Serial numbers deleted by Super Admin`,
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Serial Number Management',
+                    recordId: work_order_id || 'ALL',
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
+
         res.status(200).json({ message: "Serials deleted successfully" });
     } catch (err) {
         logger.error("Error deleting serials:", err);
@@ -901,11 +973,44 @@ export const deleteEmployee = async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
 
     if (userRole !== 'Super Admin') {
-        return res.status(403).json({ error: "Only Super Admin can delete employees" });
+        return res.status(403).json({
+            success: false,
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
+        });
     }
 
     try {
         await pool.query('DELETE FROM smt_printing_employees WHERE id = $1', [id]);
+
+        const sessionUser = {
+            id: (req as any).user?.id || (req as any).user?.userId || null,
+            name: (req as any).user?.name || (req as any).user?.email || 'Unknown User',
+            role: userRole
+        };
+
+        // Write Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'EMPLOYEE',
+                id.toString(),
+                sessionUser.name,
+                `Employee deleted by Super Admin`,
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Employee Management',
+                    recordId: id,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
+
         res.status(200).json({ message: "Employee deleted" });
     } catch (err) {
         logger.error("Error deleting employee:", err);
@@ -972,8 +1077,12 @@ export const deleteInspectionsForBatch = async (req: Request, res: Response) => 
     const { work_order_id, process_step } = req.query;
     const userRole = (req as any).user?.role;
 
-    if (userRole !== 'Super Admin' && userRole !== 'Admin') {
-        return res.status(403).json({ error: "Only Super Admin or Admin can delete scan sessions" });
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({
+            success: false,
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
+        });
     }
 
     if (!work_order_id || !process_step) {
@@ -990,6 +1099,36 @@ export const deleteInspectionsForBatch = async (req: Request, res: Response) => 
             RETURNING *
         `;
         const result = await pool.query(query, [process_step, work_order_id]);
+
+        const sessionUser = {
+            id: (req as any).user?.id || (req as any).user?.userId || null,
+            name: (req as any).user?.name || (req as any).user?.email || 'Unknown User',
+            role: userRole
+        };
+
+        // Write Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'INSPECTIONS_BATCH',
+                work_order_id.toString(),
+                sessionUser.name,
+                `Inspections for process step ${process_step} deleted by Super Admin`,
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Inspections Management',
+                    recordId: work_order_id,
+                    processStep: process_step,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
+
         res.status(200).json({ message: "Scan session reset successfully", deleted_count: result.rowCount });
     } catch (err) {
         logger.error("Error deleting scan session:", err);
@@ -1197,11 +1336,44 @@ export const deleteProcessSetup = async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
 
     if (userRole !== 'Super Admin') {
-        return res.status(403).json({ error: "Only Super Admin can delete process setups" });
+        return res.status(403).json({
+            success: false,
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
+        });
     }
 
     try {
         await pool.query('DELETE FROM smt_process_setups WHERE id = $1', [id]);
+
+        const sessionUser = {
+            id: (req as any).user?.id || (req as any).user?.userId || null,
+            name: (req as any).user?.name || (req as any).user?.email || 'Unknown User',
+            role: userRole
+        };
+
+        // Write Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'PROCESS_SETUP',
+                id.toString(),
+                sessionUser.name,
+                `Process setup deleted by Super Admin`,
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Process Setup Management',
+                    recordId: id,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
+
         res.status(200).json({ message: "Process setup deleted" });
     } catch (err) {
         logger.error("Error deleting process setup:", err);

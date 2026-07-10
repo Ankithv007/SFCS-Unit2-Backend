@@ -1093,6 +1093,15 @@ export const deleteQms = async (req: Request, res: Response) => {
     const { qmsId } = req.params;
     const { userName } = req.body;
     const creator = userName || 'System';
+    const userRole = (req as any).user?.role;
+
+    if (userRole !== 'Super Admin') {
+        return res.status(403).json({
+            success: false,
+            message: "Only Super Admin is authorized to delete records.",
+            error: "Only Super Admin is authorized to delete records."
+        });
+    }
 
     const client = await pool.connect();
     try {
@@ -1127,6 +1136,28 @@ export const deleteQms = async (req: Request, res: Response) => {
             INSERT INTO qms_activity_logs (qms_id, work_order_number, action, details, performed_by, ip_address)
             VALUES ($1, $2, 'DELETE_QMS', 'Soft deleted QMS master record', $3, $4)
         `, [qmsId, work_order_number, creator, ip as string]);
+
+        // Write to central audit_log
+        await client.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'DELETE',
+                'QMS_RECORD',
+                qmsId,
+                creator,
+                `QMS master record for Work Order ${work_order_number} soft deleted by Super Admin.`,
+                JSON.stringify({
+                    userId: (req as any).user?.id || (req as any).user?.userId || null,
+                    userName: creator,
+                    userRole: userRole,
+                    moduleName: 'QMS Management',
+                    recordId: qmsId,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
+            ]
+        );
 
         await client.query('COMMIT');
         res.status(200).json({ message: 'QMS record soft deleted successfully.' });

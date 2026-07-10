@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS smt_stencil_lifecycle (
     deleted_at TIMESTAMP NULL
 );
 
--- Unique Index to prevent duplicate assignments
-CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_stencil_wo ON smt_stencil_lifecycle(stencil_record_id, work_order_id) WHERE is_deleted = false;
+-- Unique Index to prevent duplicate assignments (updated for double-sided support)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lifecycle_wo_sides ON smt_stencil_lifecycle(work_order_id, sides) WHERE is_deleted = false;
 
 

@@ -48,22 +48,8 @@ export const createStencilRecord = async (req: Request, res: Response) => {
             return res.status(400).json({ message: 'Manufacturing Date cannot be a future date.' });
         }
 
-        // 5. Generate consecutive Stencil ID (format STM-000001)
-        // Find max current stencil_id
-        const maxIdRes = await pool.query(
-            `SELECT stencil_id FROM stencil_master WHERE stencil_id LIKE 'STM-%' ORDER BY stencil_id DESC LIMIT 1`
-        );
-        
-        let nextSeqNum = 1;
-        if (maxIdRes.rows.length > 0) {
-            const maxIdStr = maxIdRes.rows[0].stencil_id;
-            const seqPart = maxIdStr.replace('STM-', '');
-            const parsedNum = parseInt(seqPart, 10);
-            if (!isNaN(parsedNum)) {
-                nextSeqNum = parsedNum + 1;
-            }
-        }
-        const generatedStencilId = `STM-${String(nextSeqNum).padStart(6, '0')}`;
+        // 5. Generate random internal Stencil ID for DB constraint compliance only
+        // Stencil ID is no longer sequential or user-facing.
 
         // 6. Save the record
         const insertQuery = `
@@ -71,12 +57,11 @@ export const createStencilRecord = async (req: Request, res: Response) => {
                 stencil_id, stencil_name, job_number,
                 revision, thickness_mills, manufacturing_date, side, storage_location, 
                 remarks, status, created_by, created_by_name, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, $11, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             RETURNING *
         `;
 
         const result = await pool.query(insertQuery, [
-            generatedStencilId,
             stencil_name.trim(),
             job_number.trim(),
             revision.trim(),
@@ -91,22 +76,24 @@ export const createStencilRecord = async (req: Request, res: Response) => {
 
         const savedRecord = result.rows[0];
 
-        // 7. Audit Log Integration using existing framework table
+        // 7. Audit Log Integration using database primary key id as entity_id
         await pool.query(`
             INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
             VALUES ($1, $2, $3, $4, $5, $6)
         `, [
             'CREATE',
             'STENCIL_MASTER',
-            generatedStencilId,
+            savedRecord.id,
             sessionUser.name,
-            `Stencil Master Record ${generatedStencilId} registered successfully by ${sessionUser.name}.`,
+            `Stencil '${savedRecord.stencil_name}' registered successfully by ${sessionUser.name}.`,
             JSON.stringify(savedRecord)
         ]);
 
+        const { stencil_id, ...cleanedRecord } = savedRecord;
+
         return res.status(201).json({
             message: 'Stencil Master Record Created Successfully.',
-            record: savedRecord
+            record: cleanedRecord
         });
     } catch (err: any) {
         logger.error('Error creating stencil record:', err);
@@ -207,16 +194,18 @@ export const updateStencilRecord = async (req: Request, res: Response) => {
         `, [
             'UPDATE',
             'STENCIL_MASTER',
-            oldRecord.stencil_id,
+            oldRecord.id,
             sessionUser.name,
-            `Stencil ${oldRecord.stencil_id} updated by ${sessionUser.name}.`,
+            `Stencil '${oldRecord.stencil_name}' updated by ${sessionUser.name}.`,
             JSON.stringify(oldRecord),
             JSON.stringify(newRecord)
         ]);
 
+        const { stencil_id, ...cleanedRecord } = newRecord;
+
         return res.status(200).json({
             message: 'Stencil Master Record updated successfully.',
-            record: newRecord
+            record: cleanedRecord
         });
     } catch (err: any) {
         logger.error('Error updating stencil record:', err);
@@ -232,9 +221,13 @@ export const deleteStencilRecord = async (req: Request, res: Response) => {
     const { id } = req.params;
     const sessionUser = getSessionUser(req);
 
-    // 1. Role verification
-    if (!['Super Admin', 'Admin'].includes(sessionUser.role)) {
-        return res.status(403).json({ message: 'Access Denied: Only Admin roles are authorized to delete.' });
+    // 1. Role verification - restrict to Super Admin only
+    if (sessionUser.role !== 'Super Admin') {
+        return res.status(403).json({
+            success: false,
+            message: 'Only Super Admin is authorized to delete records.',
+            error: 'Only Super Admin is authorized to delete records.'
+        });
     }
 
     try {
@@ -257,15 +250,24 @@ export const deleteStencilRecord = async (req: Request, res: Response) => {
 
         // 4. Audit Log Entry
         await pool.query(`
-            INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value, new_value)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
         `, [
             'DELETE',
             'STENCIL_MASTER',
-            record.stencil_id,
+            record.id,
             sessionUser.name,
-            `Stencil ${record.stencil_id} soft deleted by ${sessionUser.name}.`,
-            JSON.stringify(record)
+            `Stencil '${record.stencil_name}' soft deleted by Super Admin.`,
+            JSON.stringify(record),
+            JSON.stringify({
+                userId: sessionUser.id,
+                userName: sessionUser.name,
+                userRole: sessionUser.role,
+                moduleName: 'Stencil Master Record',
+                recordId: id,
+                timestamp: new Date().toISOString(),
+                action: 'DELETE'
+            })
         ]);
 
         return res.status(200).json({ message: 'Stencil Master Record deleted successfully.' });
@@ -284,23 +286,21 @@ export const getStencilRecords = async (req: Request, res: Response) => {
         const page = parseInt(req.query.page as string || '1', 10);
         const limit = parseInt(req.query.limit as string || '10', 10);
         const search = (req.query.search as string || '').trim();
-        const sortBy = (req.query.sortBy as string || 'created_at').trim();
+        const sortBy = (req.query.sortBy as string || 'stencil_name').trim();
         const sortOrder = (req.query.sortOrder as string || 'DESC').trim().toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
         const offset = (page - 1) * limit;
 
         // Allowed sort columns
         const allowedSortCols = [
-            'stencil_id',
             'job_number',
             'stencil_name',
             'revision',
-            'manufacturing_date',
-            'created_at'
+            'manufacturing_date'
         ];
-        const actualSortBy = allowedSortCols.includes(sortBy) ? sortBy : 'created_at';
+        const actualSortBy = allowedSortCols.includes(sortBy) ? sortBy : 'stencil_name';
 
-        // Search filter matching: Stencil ID, Unique ID, Customer, Stencil Name, Revision, Barcode, Location, Created By Name
+        // Search filter matching: Stencil Name, Job Number, Revision
         let queryParams: any[] = [];
         let filterSql = `WHERE is_deleted = false`;
 
@@ -329,8 +329,14 @@ export const getStencilRecords = async (req: Request, res: Response) => {
         queryParams.push(limit, offset);
         const recordsRes = await pool.query(selectQuery, queryParams);
 
+        // Sanitize records to omit stencil_id
+        const sanitizedRecords = recordsRes.rows.map(row => {
+            const { stencil_id, ...rest } = row;
+            return rest;
+        });
+
         return res.status(200).json({
-            data: recordsRes.rows,
+            data: sanitizedRecords,
             pagination: {
                 total,
                 page,
@@ -353,7 +359,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
         const query = `
             SELECT * FROM stencil_master 
             WHERE is_deleted = false 
-            ORDER BY stencil_id ASC
+            ORDER BY stencil_name ASC
         `;
         const result = await pool.query(query);
         const records = result.rows;
@@ -366,7 +372,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
         const themeColor = '1F4E79'; // Dark Blue
 
         // Add title row
-        worksheet.mergeCells('A1:L1');
+        worksheet.mergeCells('A1:I1');
         const titleCell = worksheet.getCell('A1');
         titleCell.value = 'SMT STENCIL MASTER RECORD REPORT';
         titleCell.font = { name: 'Arial', size: 16, bold: true, color: { argb: 'FFFFFF' } };
@@ -378,9 +384,8 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
         };
         worksheet.getRow(1).height = 40;
 
-        // Define column headers
+        // Define column headers (Stencil ID, Created By, Created Date & Time removed)
         const columns = [
-            { header: 'Stencil ID', key: 'stencil_id', width: 15 },
             { header: 'Stencil / Model Name', key: 'stencil_name', width: 25 },
             { header: 'Job Number', key: 'job_number', width: 20 },
             { header: 'Revision', key: 'revision', width: 10 },
@@ -389,9 +394,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
             { header: 'Side', key: 'side', width: 12 },
             { header: 'Storage Location', key: 'storage_location', width: 18 },
             { header: 'Remarks', key: 'remarks', width: 30 },
-            { header: 'Status', key: 'status', width: 12 },
-            { header: 'Created By', key: 'created_by_name', width: 20 },
-            { header: 'Created Date & Time', key: 'created_at', width: 22 }
+            { header: 'Status', key: 'status', width: 12 }
         ];
 
         worksheet.columns = columns.map(c => ({ header: c.header, key: c.key, width: c.width }));
@@ -420,13 +423,8 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
             const mfgDate = rec.manufacturing_date 
                 ? new Date(rec.manufacturing_date).toISOString().split('T')[0] 
                 : '';
-                
-            const createdAtStr = rec.created_at
-                ? new Date(rec.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true })
-                : '';
 
             const row = worksheet.addRow({
-                stencil_id: rec.stencil_id,
                 stencil_name: rec.stencil_name,
                 job_number: rec.job_number,
                 revision: rec.revision,
@@ -435,9 +433,7 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
                 side: rec.side,
                 storage_location: rec.storage_location || '-',
                 remarks: rec.remarks || '-',
-                status: rec.status,
-                created_by_name: rec.created_by_name,
-                created_at: createdAtStr
+                status: rec.status
             });
 
             // Alignment and borders for cells
@@ -452,7 +448,8 @@ export const exportStencilExcel = async (req: Request, res: Response) => {
                 };
 
                 // Center specific columns for neatness
-                if ([1, 3, 4, 5, 6, 7, 10, 12].includes(colNumber)) {
+                // Indices: 2 (Job Number), 3 (Revision), 4 (Thickness), 5 (Manufacturing Date), 6 (Side), 9 (Status)
+                if ([2, 3, 4, 5, 6, 9].includes(colNumber)) {
                     cell.alignment = { vertical: 'middle', horizontal: 'center' };
                 }
 

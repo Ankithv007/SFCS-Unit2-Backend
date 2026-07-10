@@ -23,7 +23,6 @@ export const getActiveStencils = async (req: Request, res: Response) => {
         const query = `
             SELECT
                 s.id,
-                s.stencil_id,
                 s.stencil_name,
                 s.job_number,
                 s.revision,
@@ -42,7 +41,6 @@ export const getActiveStencils = async (req: Request, res: Response) => {
                 AND s.status = 'ACTIVE'
             GROUP BY
                 s.id,
-                s.stencil_id,
                 s.stencil_name,
                 s.job_number,
                 s.revision,
@@ -69,10 +67,24 @@ export const getActiveStencils = async (req: Request, res: Response) => {
 export const getLifecycleWorkOrders = async (req: Request, res: Response) => {
     try {
         const query = `
-            SELECT id, area_id, line_id, priority, product_name, product_description, 
-                   quantity, panel_quantity, sides, status, created_by, created_at, remark
-            FROM smt_work_orders
-            ORDER BY created_at DESC
+            SELECT wo.id, wo.area_id, wo.line_id, wo.priority, wo.product_name, wo.product_description, 
+                   wo.quantity, wo.panel_quantity, wo.sides, wo.status, wo.created_by, wo.created_at, wo.remark
+            FROM smt_work_orders wo
+            LEFT JOIN (
+                SELECT work_order_id, COUNT(*) as lifecycle_count
+                FROM smt_stencil_lifecycle
+                WHERE is_deleted = false
+                GROUP BY work_order_id
+            ) l ON wo.id = l.work_order_id
+            WHERE 
+                l.lifecycle_count IS NULL
+                OR (
+                    (LOWER(wo.sides) = 'top' OR LOWER(wo.sides) = 'bottom') AND l.lifecycle_count < 1
+                )
+                OR (
+                    (LOWER(wo.sides) = 'top / bottom' OR wo.sides LIKE '%/%') AND l.lifecycle_count < 2
+                )
+            ORDER BY wo.created_at DESC
         `;
         const result = await pool.query(query);
         return res.status(200).json(result.rows);
@@ -125,15 +137,64 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         }
         const workOrder = woRes.rows[0];
 
-        // 3. Check for duplicates (One Work Order assigned only once to this stencil)
-        const duplicateRes = await client.query(
-            `SELECT id FROM smt_stencil_lifecycle 
-             WHERE stencil_record_id = $1 AND work_order_id = $2 AND is_deleted = false`,
-            [stencil_record_id, work_order_id]
+        // 3. Determine the Side being registered and perform uniqueness checks
+        const existingRes = await client.query(
+            `SELECT id, sides FROM smt_stencil_lifecycle 
+             WHERE work_order_id = $1 AND is_deleted = false`,
+            [work_order_id]
         );
-        if (duplicateRes.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ message: 'This Work Order has already been assigned to this stencil.' });
+        const existingRecords = existingRes.rows;
+
+        const woSides = (workOrder.sides || '').trim().toLowerCase();
+        let registrationSide = '';
+
+        if (woSides === 'top') {
+            if (existingRecords.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for the TOP side of this Work Order.' });
+            }
+            registrationSide = 'Top';
+        } else if (woSides === 'bottom') {
+            if (existingRecords.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for the BOTTOM side of this Work Order.' });
+            }
+            registrationSide = 'Bottom';
+        } else if (woSides === 'top / bottom' || woSides.includes('/')) {
+            // Double-sided PCB: determine registration side from selected stencil's side
+            const stencilSide = (stencil.side || '').trim().toLowerCase();
+            if (stencilSide === 'top') {
+                registrationSide = 'Top';
+            } else if (stencilSide === 'bottom') {
+                registrationSide = 'Bottom';
+            } else {
+                // If stencil side is 'TOP / BOTTOM' or unspecified, look at what side is not registered yet
+                const hasTop = existingRecords.some(r => r.sides.trim().toLowerCase() === 'top');
+                const hasBottom = existingRecords.some(r => r.sides.trim().toLowerCase() === 'bottom');
+                if (!hasTop) {
+                    registrationSide = 'Top';
+                } else if (!hasBottom) {
+                    registrationSide = 'Bottom';
+                } else {
+                    registrationSide = 'Top'; // will trigger duplicate check below
+                }
+            }
+
+            // Check if there is already a record for this specific side
+            const duplicateForSide = existingRecords.some(r => r.sides.trim().toLowerCase() === registrationSide.toLowerCase());
+            if (duplicateForSide) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ 
+                    message: `A Stencil Life Cycle record already exists for the ${registrationSide.toUpperCase()} side of this Work Order.` 
+                });
+            }
+        } else {
+            // Fallback for single-sided or unrecognized work order sides
+            if (existingRecords.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this Work Order.' });
+            }
+            registrationSide = 'Top';
         }
 
         // 4. Calculate Life Cycle Consumption dynamically from lifecycle database records
@@ -185,7 +246,7 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             workOrder.id, // work_order_number is the same as ID
             workOrder.product_name,
             workOrder.product_description,
-            workOrder.sides,
+            registrationSide, // Saved specific registered side instead of workOrder.sides
             workOrder.quantity,
             targetLifeCycle,
             workOrderQty,
@@ -217,15 +278,18 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
                 'STENCIL_LIFECYCLE',
                 savedRecord.id,
                 sessionUser.name,
-                `Work Order ${workOrder.id} (${workOrderQty} prints) assigned to Stencil ${stencil.stencil_id}. Used life cycle updated to ${newUsedLifeCycle}/${targetLifeCycle}.`,
+                `Work Order ${workOrder.id} (${workOrderQty} prints) assigned to Stencil '${stencil.stencil_name}'. Used life cycle updated to ${newUsedLifeCycle}/${targetLifeCycle}.`,
                 JSON.stringify(savedRecord)
             ]
         );
 
         await client.query('COMMIT');
+
+        const { stencil_id, ...cleanedRecord } = savedRecord;
+
         return res.status(201).json({
             message: 'Stencil Lifecycle Record Created Successfully.',
-            record: savedRecord
+            record: cleanedRecord
         });
     } catch (err: any) {
         await client.query('ROLLBACK');
@@ -292,8 +356,14 @@ export const getLifecycleRecords = async (req: Request, res: Response) => {
         queryParams.push(limit, offset);
         const recordsRes = await pool.query(selectQuery, queryParams);
 
+        // Sanitize records to omit stencil_id
+        const sanitizedRecords = recordsRes.rows.map(row => {
+            const { stencil_id, ...rest } = row;
+            return rest;
+        });
+
         return res.status(200).json({
-            data: recordsRes.rows,
+            data: sanitizedRecords,
             pagination: {
                 total,
                 page,
@@ -338,9 +408,16 @@ export const getLifecycleRecordById = async (req: Request, res: Response) => {
         );
         const workOrderDetails = woRes.rows[0] || null;
 
+        const { stencil_id: r_sid, ...cleanedRecord } = record || {};
+        let cleanedStencil = null;
+        if (stencilDetails) {
+            const { stencil_id: s_sid, ...rest } = stencilDetails;
+            cleanedStencil = rest;
+        }
+
         return res.status(200).json({
-            record,
-            stencil: stencilDetails,
+            record: cleanedRecord,
+            stencil: cleanedStencil,
             workOrder: workOrderDetails
         });
     } catch (err: any) {
@@ -359,7 +436,11 @@ export const deleteLifecycleRecord = async (req: Request, res: Response) => {
 
     // Verify Super Admin permission
     if (sessionUser.role !== 'Super Admin') {
-        return res.status(403).json({ message: 'Access Denied: Only Super Admin is authorized to delete life cycle records.' });
+        return res.status(403).json({
+            success: false,
+            message: 'Only Super Admin is authorized to delete records.',
+            error: 'Only Super Admin is authorized to delete records.'
+        });
     }
 
     const client = await pool.connect();
@@ -418,15 +499,24 @@ export const deleteLifecycleRecord = async (req: Request, res: Response) => {
 
         // 6. Write Audit Log
         await client.query(
-            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
             [
                 'DELETE',
                 'STENCIL_LIFECYCLE',
                 id,
                 sessionUser.name,
-                `Stencil Lifecycle Record ${id} soft deleted by Super Admin ${sessionUser.name}. Subtracted ${record.qty_life_cycle} prints from Stencil ${stencil.stencil_id}.`,
-                JSON.stringify(record)
+                `Stencil Lifecycle Record ${id} soft deleted by Super Admin. Subtracted ${record.qty_life_cycle} prints from Stencil '${stencil.stencil_name}'.`,
+                JSON.stringify(record),
+                JSON.stringify({
+                    userId: sessionUser.id,
+                    userName: sessionUser.name,
+                    userRole: sessionUser.role,
+                    moduleName: 'Stencil Lifecycle Management',
+                    recordId: id,
+                    timestamp: new Date().toISOString(),
+                    action: 'DELETE'
+                })
             ]
         );
 
