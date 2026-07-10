@@ -146,7 +146,6 @@ EXECUTE FUNCTION update_smt_serial_batches_updated_at();
 
 -- 10. Performance Indexes
 CREATE INDEX IF NOT EXISTS idx_smt_serial_batches_wo ON smt_serial_batches(work_order_id);
-CREATE INDEX IF NOT EXISTS idx_smt_serial_batches_batch_num ON smt_serial_batches(batch_number);
 CREATE INDEX IF NOT EXISTS idx_smt_serial_batches_deleted ON smt_serial_batches(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_smt_serial_numbers_batch ON smt_serial_numbers(batch_id);
 CREATE INDEX IF NOT EXISTS idx_smt_serial_batch_activity_batch ON smt_serial_batch_activity_logs(batch_id);
