@@ -1,4 +1,7 @@
 import pool from '../config/db';
+import { createLogger } from './logger';
+
+const logger = createLogger('SMT_HELPER');
 
 /**
  * Resolves the active side for a Work Order.
@@ -15,9 +18,14 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
         return 'Bottom';
     }
     if (woSides === 'top / bottom' || woSides.includes('/')) {
-        // Get all serial IDs generated for this Work Order
+        // Get all serial IDs generated for this Work Order (excluding those belonging to deleted batches)
         const serialsRes = await pool.query(
-            `SELECT id FROM smt_serial_numbers WHERE work_order_id = $1`,
+            `SELECT sn.id FROM smt_serial_numbers sn
+             WHERE sn.work_order_id = $1
+               AND (sn.batch_id IS NULL OR EXISTS (
+                   SELECT 1 FROM smt_serial_batches sb
+                   WHERE sb.id = sn.batch_id AND sb.is_deleted = false
+               ))`,
             [woId]
         );
         const serialIds = serialsRes.rows.map(r => r.id);
@@ -150,13 +158,11 @@ export const getAutoPopulateDetailsHelper = async (
     };
 };
 
-/**
- * Checks if a Work Order is eligible for starting a new session in a given stage.
- * Excludes it if there is already an active or completed session for that side.
- */
 export const getEligibleWorkOrdersHelper = async (
     stage: 'Printing' | 'Pre AOI' | 'Post AOI' | 'Rework' | 'SMT FG'
 ): Promise<any[]> => {
+    logger.info(`[Eligibility Debug] Starting eligibility check for stage: ${stage}`);
+    
     const query = `
         SELECT 
             wo.id AS work_order_id,
@@ -174,37 +180,40 @@ export const getEligibleWorkOrdersHelper = async (
             EXISTS (
                 SELECT 1 FROM smt_serial_numbers sn
                 WHERE sn.work_order_id = wo.id
-            )
-            AND (
-                -- Single-sided check (Top or Bottom): Must have at least 1 active stencil lifecycle record
-                ((LOWER(wo.sides) = 'top' OR LOWER(wo.sides) = 'bottom') AND (
-                    SELECT COUNT(*) FROM smt_stencil_lifecycle lc
-                    WHERE lc.work_order_id = wo.id AND lc.is_deleted = false
-                ) >= 1)
-                OR
-                -- Double-sided check (Top / Bottom): Must have both TOP and BOTTOM sides registered
-                ((LOWER(wo.sides) = 'top / bottom' OR wo.sides LIKE '%/%') AND (
-                    SELECT COUNT(DISTINCT LOWER(lc.sides)) FROM smt_stencil_lifecycle lc
-                    WHERE lc.work_order_id = wo.id AND lc.is_deleted = false
-                ) >= 2)
-                OR
-                -- Fallback for unspecified/other sides
-                (LOWER(wo.sides) NOT IN ('top', 'bottom', 'top / bottom') AND NOT wo.sides LIKE '%/%' AND (
-                    SELECT COUNT(*) FROM smt_stencil_lifecycle lc
-                    WHERE lc.work_order_id = wo.id AND lc.is_deleted = false
-                ) >= 1)
+                  AND (sn.batch_id IS NULL OR EXISTS (
+                      SELECT 1 FROM smt_serial_batches sb
+                      WHERE sb.id = sn.batch_id AND sb.is_deleted = false
+                  ))
             )
         ORDER BY wo.created_at DESC
     `;
     const result = await pool.query(query);
     const candidates = result.rows;
+    logger.info(`[Eligibility Debug] Found ${candidates.length} candidate Work Orders with generated serial numbers.`);
+    
     const eligibleList: any[] = [];
 
     for (const wo of candidates) {
         const side = await resolveWorkOrderSide(wo.work_order_id, wo.sides);
         const lowerSide = side.toLowerCase();
+        
+        logger.info(`[Eligibility Debug] Processing WO: ${wo.work_order_id} | Sides in DB: ${wo.sides} | Resolved Active Side: ${side}`);
 
+        // For Printing stage, we must check if there is an active stencil lifecycle record for this resolved side
         if (stage === 'Printing') {
+            const lcRes = await pool.query(
+                `SELECT 1 FROM smt_stencil_lifecycle 
+                 WHERE work_order_id = $1 
+                   AND LOWER(sides) = $2 
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (lcRes.rows.length === 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no active stencil lifecycle record exists for side ${side}`);
+                continue;
+            }
+
             // Exclude if a session in printing exists for this side (active or completed)
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_printing_sessions 
@@ -215,7 +224,10 @@ export const getEligibleWorkOrdersHelper = async (
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
-            if (sessionRes.rows.length === 0) {
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Printing session already exists for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
                 eligibleList.push(wo);
             }
         } 
@@ -232,20 +244,26 @@ export const getEligibleWorkOrdersHelper = async (
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
-            if (printPassRes.rows.length > 0) {
-                // Exclude if a session in Pre AOI exists for this side (active or completed)
-                const sessionRes = await pool.query(
-                    `SELECT 1 FROM smt_pre_aoi_sessions 
-                     WHERE work_order_id = $1 
-                       AND LOWER(side) = $2 
-                       AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
-                       AND is_deleted = false
-                     LIMIT 1`,
-                    [wo.work_order_id, lowerSide]
-                );
-                if (sessionRes.rows.length === 0) {
-                    eligibleList.push(wo);
-                }
+            if (printPassRes.rows.length === 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no PASS barcodes exist in Printing for side ${side}`);
+                continue;
+            }
+
+            // Exclude if a session in Pre AOI exists for this side (active or completed)
+            const sessionRes = await pool.query(
+                `SELECT 1 FROM smt_pre_aoi_sessions 
+                 WHERE work_order_id = $1 
+                   AND LOWER(side) = $2 
+                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Pre AOI session already exists for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
+                eligibleList.push(wo);
             }
         } 
         else if (stage === 'Post AOI') {
@@ -261,20 +279,26 @@ export const getEligibleWorkOrdersHelper = async (
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
-            if (preAoiPassRes.rows.length > 0) {
-                // Exclude if a session in Post AOI exists for this side (active or completed)
-                const sessionRes = await pool.query(
-                    `SELECT 1 FROM smt_post_aoi_sessions 
-                     WHERE work_order_id = $1 
-                       AND LOWER(side) = $2 
-                       AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
-                       AND is_deleted = false
-                     LIMIT 1`,
-                    [wo.work_order_id, lowerSide]
-                );
-                if (sessionRes.rows.length === 0) {
-                    eligibleList.push(wo);
-                }
+            if (preAoiPassRes.rows.length === 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no PASS barcodes exist in Pre AOI for side ${side}`);
+                continue;
+            }
+
+            // Exclude if a session in Post AOI exists for this side (active or completed)
+            const sessionRes = await pool.query(
+                `SELECT 1 FROM smt_post_aoi_sessions 
+                 WHERE work_order_id = $1 
+                   AND LOWER(side) = $2 
+                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Post AOI session already exists for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
+                eligibleList.push(wo);
             }
         } 
         else if (stage === 'Rework') {
@@ -288,54 +312,62 @@ export const getEligibleWorkOrdersHelper = async (
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
-            if (sessionRes.rows.length === 0) {
-                // Check if there are failed barcodes from Post AOI that have not been repaired yet
-                const failCheck = await pool.query(
-                    `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
-                     JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-                     WHERE i.work_order_id = $1
-                       AND LOWER(ps.side) = $2
-                       AND i.process_step = 'Post AOI'
-                       AND i.status = 'FAIL'
-                       AND ps.is_deleted = false`,
-                    [wo.work_order_id, lowerSide]
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because an active Rework session already exists for side ${side}`);
+                continue;
+            }
+
+            // Check if there are failed barcodes from Post AOI that have not been repaired yet
+            const failCheck = await pool.query(
+                `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
+                 JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+                 WHERE i.work_order_id = $1
+                   AND LOWER(ps.side) = $2
+                   AND i.process_step = 'Post AOI'
+                   AND i.status = 'FAIL'
+                   AND ps.is_deleted = false`,
+                [wo.work_order_id, lowerSide]
+            );
+
+            let hasEligibleFail = false;
+            for (const row of failCheck.rows) {
+                const reworkCheck = await pool.query(
+                    `SELECT ri.id FROM smt_inspections ri
+                     JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                     WHERE ri.work_order_id = $1
+                       AND LOWER(rs.side) = $2
+                       AND (
+                         (ri.serial_id IS NOT NULL AND ri.serial_id = $3)
+                         OR (ri.scanned_barcode = $4)
+                       )
+                       AND ri.process_step = 'Rework'
+                       AND ri.status = 'PASS'
+                       AND ri.scanned_at > $5
+                       AND rs.is_deleted = false
+                     LIMIT 1`,
+                    [wo.work_order_id, lowerSide, row.serial_id, row.scanned_barcode, row.scanned_at]
                 );
-
-                let hasEligibleFail = false;
-                for (const row of failCheck.rows) {
-                    const reworkCheck = await pool.query(
-                        `SELECT ri.id FROM smt_inspections ri
-                         JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
-                         WHERE ri.work_order_id = $1
-                           AND LOWER(rs.side) = $2
-                           AND (
-                             (ri.serial_id IS NOT NULL AND ri.serial_id = $3)
-                             OR (ri.scanned_barcode = $4)
-                           )
-                           AND ri.process_step = 'Rework'
-                           AND ri.status = 'PASS'
-                           AND ri.scanned_at > $5
-                           AND rs.is_deleted = false
-                         LIMIT 1`,
-                        [wo.work_order_id, lowerSide, row.serial_id, row.scanned_barcode, row.scanned_at]
-                    );
-                    if (reworkCheck.rows.length === 0) {
-                        hasEligibleFail = true;
-                        break;
-                    }
+                if (reworkCheck.rows.length === 0) {
+                    hasEligibleFail = true;
+                    break;
                 }
+            }
 
-                if (hasEligibleFail) {
-                    eligibleList.push(wo);
-                }
+            if (!hasEligibleFail) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no failed barcodes require rework for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
+                eligibleList.push(wo);
             }
         } 
         else if (stage === 'SMT FG') {
             // Exclude double-sided Bottom side
             const isDoubleSided = wo.sides.trim().toLowerCase() === 'top / bottom' || wo.sides.includes('/');
             if (isDoubleSided && lowerSide === 'bottom') {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because it is double-sided and side resolved to Bottom`);
                 continue;
             }
+
             // Include only if there is at least one PASS barcode in Post AOI for this resolved side
             const postAoiPassRes = await pool.query(
                 `SELECT 1 FROM smt_inspections i
@@ -348,24 +380,31 @@ export const getEligibleWorkOrdersHelper = async (
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
-            if (postAoiPassRes.rows.length > 0) {
-                // Exclude if a session in SMT FG exists for this side (active or completed)
-                const sessionRes = await pool.query(
-                    `SELECT 1 FROM smt_fg_sessions 
-                     WHERE work_order_id = $1 
-                       AND LOWER(side) = $2 
-                       AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
-                       AND is_deleted = false
-                     LIMIT 1`,
-                    [wo.work_order_id, lowerSide]
-                );
-                if (sessionRes.rows.length === 0) {
-                    eligibleList.push(wo);
-                }
+            if (postAoiPassRes.rows.length === 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no PASS barcodes exist in Post AOI for side ${side}`);
+                continue;
+            }
+
+            // Exclude if a session in SMT FG exists for this side (active or completed)
+            const sessionRes = await pool.query(
+                `SELECT 1 FROM smt_fg_sessions 
+                 WHERE work_order_id = $1 
+                   AND LOWER(side) = $2 
+                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a SMT FG session already exists for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
+                eligibleList.push(wo);
             }
         }
     }
 
+    logger.info(`[Eligibility Debug] Returning ${eligibleList.length} eligible Work Orders for stage ${stage}`);
     return eligibleList;
-};
+};;
 
