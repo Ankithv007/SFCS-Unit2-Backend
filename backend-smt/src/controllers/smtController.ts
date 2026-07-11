@@ -5,8 +5,10 @@ import { createLogger } from '../utils/logger';
 import {
     savePoDocument,
     deletePoDocument,
-    parseExcelPreview
+    parseExcelPreview,
+    normalizePoPath
 } from '../services/poDocumentService';
+import { getUploadsDir } from '../utils/uploads';
 
 const logger = createLogger('SMT_CONTROLLER');
 
@@ -484,12 +486,19 @@ export const viewPoDocumentFile = async (req: Request, res: Response) => {
             return res.status(404).json({ success: false, message: "No PO document uploaded for this Work Order" });
         }
         
-        const uploadsDir = require('../services/poDocumentService').getUploadsDir();
+        const uploadsDir = getUploadsDir();
         const path = require('path');
         const fs = require('fs');
-        const absolutePath = path.join(uploadsDir, po_document_path);
+        const normalizedPath = normalizePoPath(po_document_path);
+        const absolutePath = path.join(uploadsDir, normalizedPath);
         
-        if (!fs.existsSync(absolutePath)) {
+        logger.info(`[PO View] Database filename: ${po_document_name}`);
+        logger.info(`[PO View] Resolved upload directory: ${uploadsDir}`);
+        logger.info(`[PO View] Resolved physical file path: ${absolutePath}`);
+        const exists = fs.existsSync(absolutePath);
+        logger.info(`[PO View] File exists: ${exists}`);
+        
+        if (!exists) {
             return res.status(404).json({ success: false, message: "File not found on server" });
         }
         
@@ -520,12 +529,19 @@ export const downloadPoDocument = async (req: Request, res: Response) => {
             return res.status(404).json({ success: false, message: "No PO document uploaded for this Work Order" });
         }
         
-        const uploadsDir = require('../services/poDocumentService').getUploadsDir();
+        const uploadsDir = getUploadsDir();
         const path = require('path');
         const fs = require('fs');
-        const absolutePath = path.join(uploadsDir, po_document_path);
+        const normalizedPath = normalizePoPath(po_document_path);
+        const absolutePath = path.join(uploadsDir, normalizedPath);
         
-        if (!fs.existsSync(absolutePath)) {
+        logger.info(`[PO Download] Database filename: ${po_document_name}`);
+        logger.info(`[PO Download] Resolved upload directory: ${uploadsDir}`);
+        logger.info(`[PO Download] Resolved physical file path: ${absolutePath}`);
+        const exists = fs.existsSync(absolutePath);
+        logger.info(`[PO Download] File exists: ${exists}`);
+        
+        if (!exists) {
             return res.status(404).json({ success: false, message: "File not found on server" });
         }
         

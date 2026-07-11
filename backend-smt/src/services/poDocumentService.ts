@@ -38,6 +38,18 @@ export const sanitizeFilename = (filename: string): string => {
     return `${sanitizedBase}${ext}`;
 };
 
+/**
+ * Normalizes a legacy or absolute path to a relative SMT-PO-Documents path.
+ */
+export const normalizePoPath = (dbPath: string): string => {
+    if (!dbPath) return '';
+    const match = dbPath.match(/SMT-PO-Documents[\/\\](.*)/);
+    if (match) {
+        return 'SMT-PO-Documents/' + match[1];
+    }
+    return 'SMT-PO-Documents/' + path.basename(dbPath);
+};
+
 interface UploadedFilePayload {
     name: string;
     type: string;
@@ -127,9 +139,8 @@ export const deletePoDocument = async (relativePath: string): Promise<boolean> =
         if (!relativePath) return false;
         
         const uploadsDir = getUploadsDir();
-        // Prevent path traversal outside the uploads directory
-        const normalizedPath = path.normalize(relativePath).replace(/^(\.\.(\/|\\))+/, '');
-        const absolutePath = path.join(uploadsDir, normalizedPath);
+        const normalizedPoPath = normalizePoPath(relativePath);
+        const absolutePath = path.join(uploadsDir, normalizedPoPath);
 
         // Ensure the path is within the uploads/SMT-PO-Documents directory
         const poDocsDir = path.join(uploadsDir, 'SMT-PO-Documents');
@@ -170,7 +181,8 @@ export const parseExcelPreview = async (
     workOrderId: string
 ): Promise<ExcelPreviewData> => {
     const uploadsDir = getUploadsDir();
-    const absolutePath = path.join(uploadsDir, relativePath);
+    const normalizedPoPath = normalizePoPath(relativePath);
+    const absolutePath = path.join(uploadsDir, normalizedPoPath);
 
     if (!fs.existsSync(absolutePath)) {
         throw new Error('Excel file not found on disk.');
