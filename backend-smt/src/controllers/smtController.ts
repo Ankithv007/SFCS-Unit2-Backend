@@ -558,10 +558,16 @@ export const previewPoDocument = async (req: Request, res: Response) => {
         
         if (po_document_type === 'application/pdf') {
             logger.info(`Audit: PO document preview (PDF metadata) accessed for WO ${id}`);
+            const authHeader = req.headers['authorization'];
+            const token = (authHeader && authHeader.split(' ')[1]) || (req.query.token as string);
+            const url = token 
+                ? `/api/smt/work-orders/${id}/view-po-file?token=${token}`
+                : `/api/smt/work-orders/${id}/view-po-file`;
+
             return res.status(200).json({
                 success: true,
                 type: 'pdf',
-                url: `/api/smt/work-orders/${id}/view-po-file`,
+                url: url,
                 name: po_document_name
             });
         }
