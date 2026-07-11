@@ -7,6 +7,7 @@ import smtTrackRoutes from './routes/smtTrackRoutes';
 import pool from './config/db';
 import { createLogger } from './utils/logger';
 import { runMigrations } from './db/runMigrations';
+import { ensureUploadDirectoriesExist } from './utils/uploads';
 
 const logger = createLogger('SMT');
 const app = express();
@@ -83,8 +84,10 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     });
 });
 
+
 const startServer = async () => {
     try {
+        ensureUploadDirectoriesExist();
         await initDB();
         app.listen(PORT, () => {
             logger.info(`SMT Backend Server running on port ${PORT}`);

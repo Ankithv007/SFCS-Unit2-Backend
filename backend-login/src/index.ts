@@ -18,8 +18,9 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, '../../../uploads')));
+import { getUploadsDir, ensureUploadDirectoriesExist } from './utils/uploads';
+
+app.use('/uploads', express.static(getUploadsDir()));
 
 // Request logging
 app.use((req, res, next) => {
@@ -140,6 +141,7 @@ const seedDatabase = async () => {
 
 const startServer = async () => {
     try {
+        ensureUploadDirectoriesExist();
         await setupDatabase();
         await seedDatabase();
         app.listen(PORT, () => {

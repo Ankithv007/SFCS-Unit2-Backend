@@ -178,6 +178,7 @@ export const login = async (req: Request, res: Response) => {
 
 import fs from 'fs';
 import path from 'path';
+import { getUploadsDir } from '../utils/uploads';
 
 // 9. Update Avatar
 export const updateAvatar = async (req: Request, res: Response) => {
@@ -206,7 +207,7 @@ export const updateAvatar = async (req: Request, res: Response) => {
 
             const userId = userResult.rows[0].id;
             const filename = `avatar_${userId}_${Date.now()}.jpg`;
-            const uploadDir = path.join(__dirname, '../../../../uploads/avatars');
+            const uploadDir = path.join(getUploadsDir(), 'avatars');
             const filepath = path.join(uploadDir, filename);
 
             if (!fs.existsSync(uploadDir)) {

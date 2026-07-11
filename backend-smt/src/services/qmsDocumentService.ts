@@ -5,16 +5,7 @@ import zlib from 'zlib';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 
-export const getUploadsDir = (): string => {
-    if (process.env.UPLOADS_DIR) {
-        return path.resolve(process.env.UPLOADS_DIR);
-    }
-    const dockerUploadsPath = path.join(process.cwd(), 'uploads');
-    if (fs.existsSync(dockerUploadsPath)) {
-        return dockerUploadsPath;
-    }
-    return path.join(__dirname, '../../../../uploads');
-};
+import { getUploadsDir } from '../utils/uploads';
 
 const uploadsDir = getUploadsDir();
 

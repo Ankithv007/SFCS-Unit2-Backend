@@ -20,23 +20,7 @@ const BLOCKED_EXTENSIONS = [
     '.cmd', '.msi', '.vbs', '.scr', '.com', '.htm', '.html'
 ];
 
-/**
- * Resolves the uploads directory path.
- * Supports running inside Docker (where volume is mapped to /app/uploads)
- * and running in local development (falling back to parent directories).
- */
-export const getUploadsDir = (): string => {
-    if (process.env.UPLOADS_DIR) {
-        return path.resolve(process.env.UPLOADS_DIR);
-    }
-    const dockerUploadsPath = path.join(process.cwd(), 'uploads');
-    if (fs.existsSync(dockerUploadsPath)) {
-        return dockerUploadsPath;
-    }
-    // Local fallback: c:\New-sfcs-unit2\SFCS-Unit2-Backend\backend-smt\src\services
-    // up 4 directories: src -> backend-smt -> SFCS-Unit2-Backend -> c:\New-sfcs-unit2
-    return path.join(__dirname, '../../../../uploads');
-};
+import { getUploadsDir } from '../utils/uploads';
 
 /**
  * Sanitizes the filename by removing spaces, path traversal markers, and special characters.

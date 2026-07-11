@@ -10,9 +10,9 @@ import {
     TEMP_UPLOADS_DIR, 
     QMS_UPLOADS_DIR, 
     generateFileName, 
-    processUpload,
-    getUploadsDir
+    processUpload
 } from '../services/qmsDocumentService';
+import { getUploadsDir } from '../utils/uploads';
 
 const logger = createLogger('QMSController');
 

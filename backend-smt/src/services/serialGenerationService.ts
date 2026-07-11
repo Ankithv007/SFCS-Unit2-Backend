@@ -5,7 +5,7 @@ import zlib from 'zlib';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 import QRCode from 'qrcode';
-import { getUploadsDir } from './qmsDocumentService';
+import { getUploadsDir } from '../utils/uploads';
 import XLSX from 'xlsx';
 import JSZip from 'jszip';
 

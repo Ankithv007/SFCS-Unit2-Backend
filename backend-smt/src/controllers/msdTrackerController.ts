@@ -6,7 +6,8 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import * as XLSX from 'xlsx';
 import * as ExcelJS from 'exceljs';
-import { getUploadsDir, QMS_UPLOADS_DIR } from '../services/qmsDocumentService';
+import { QMS_UPLOADS_DIR } from '../services/qmsDocumentService';
+import { getUploadsDir } from '../utils/uploads';
 
 const logger = createLogger('msdTrackerController');
 
