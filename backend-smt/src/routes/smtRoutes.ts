@@ -103,7 +103,7 @@ import {
     stopBakingRecord,
     deleteBakingRecord
 } from '../controllers/bakingTrackingController';
-import { authenticateToken } from '../middleware/authMiddleware';
+import { authenticateToken, requireRole } from '../middleware/authMiddleware';
 import {
     createSerialGenerationRecord,
     getSerialGenerationRecords,
@@ -208,17 +208,19 @@ const router = express.Router();
 
 
 // Work Orders
-router.post('/work-orders', createWorkOrder);
-router.put('/work-orders/:id', updateWorkOrder);
-router.get('/work-orders', getWorkOrders);
-router.get('/workorders/pending', getPendingWorkOrders);
-router.post('/work-orders/:id/register', registerWorkOrder);
-router.get('/work-orders/registered', getRegisteredWorkOrders);
-router.get('/workorder-history', getWorkOrderHistory);
-router.delete('/work-orders/:id', authenticateToken, deleteWorkOrder);
-router.get('/work-orders/:id/preview-po', previewPoDocument);
-router.get('/work-orders/:id/view-po-file', viewPoDocumentFile);
-router.get('/work-orders/:id/download-po', downloadPoDocument);
+const workOrderAdminManagerOnly = [authenticateToken, requireRole(['Super Admin', 'Admin', 'Manager'])];
+
+router.post('/work-orders', workOrderAdminManagerOnly, createWorkOrder);
+router.put('/work-orders/:id', workOrderAdminManagerOnly, updateWorkOrder);
+router.get('/work-orders', workOrderAdminManagerOnly, getWorkOrders);
+router.get('/workorders/pending', workOrderAdminManagerOnly, getPendingWorkOrders);
+router.post('/work-orders/:id/register', workOrderAdminManagerOnly, registerWorkOrder);
+router.get('/work-orders/registered', workOrderAdminManagerOnly, getRegisteredWorkOrders);
+router.get('/workorder-history', workOrderAdminManagerOnly, getWorkOrderHistory);
+router.delete('/work-orders/:id', workOrderAdminManagerOnly, deleteWorkOrder);
+router.get('/work-orders/:id/preview-po', workOrderAdminManagerOnly, previewPoDocument);
+router.get('/work-orders/:id/view-po-file', workOrderAdminManagerOnly, viewPoDocumentFile);
+router.get('/work-orders/:id/download-po', workOrderAdminManagerOnly, downloadPoDocument);
 
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
