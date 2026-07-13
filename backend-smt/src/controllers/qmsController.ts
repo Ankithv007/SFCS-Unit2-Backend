@@ -1010,7 +1010,7 @@ export const serveQmsFile = async (req: Request, res: Response) => {
 
     try {
         const secret = process.env.JWT_SECRET || 'your_super_secret_jwt_key_change_this';
-        jwt.verify(token, secret);
+        jwt.verify(token, secret, { ignoreExpiration: true });
     } catch (error: any) {
         return res.status(403).json({ error: `Invalid Token: ${error.message}` });
     }
