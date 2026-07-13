@@ -18,26 +18,46 @@ interface ParsedBarcode {
 }
 
 export const parseSMTBarcode = (rawBarcode: string): ParsedBarcode => {
-    const sanitized = rawBarcode.trim().replace(/[\r\n]+/g, '');
-    const regex = /^ue1(?:UUID|UID)\d+-[a-zA-Z0-9]+1D<Facts>Q\d+$/;
-    if (!regex.test(sanitized)) {
-        throw new Error('Invalid barcode format.');
+    try {
+        const sanitized = rawBarcode.trim().replace(/[\r\n]+/g, '');
+        
+        let uidStart = sanitized.indexOf('UUID');
+        if (uidStart === -1) {
+            uidStart = sanitized.indexOf('UID');
+        }
+        if (uidStart === -1) {
+            throw new Error('Invalid barcode format.');
+        }
+
+        const firstDash = sanitized.indexOf('-', uidStart);
+        if (firstDash === -1) {
+            throw new Error('Invalid barcode format.');
+        }
+
+        const uid = sanitized.slice(uidStart, firstDash);
+
+        const oneDIndex = sanitized.indexOf('1D', firstDash + 1);
+        if (oneDIndex === -1) {
+            throw new Error('Invalid barcode format.');
+        }
+
+        const veplPartNo = sanitized.slice(firstDash + 1, oneDIndex);
+
+        const qIndex = sanitized.indexOf('Q', oneDIndex);
+        if (qIndex === -1) {
+            throw new Error('Invalid barcode format.');
+        }
+
+        const qtyStr = sanitized.slice(qIndex + 1);
+        const quantity = parseInt(qtyStr, 10);
+        if (isNaN(quantity)) {
+            throw new Error('Invalid barcode format.');
+        }
+
+        return { uid, veplPartNo, quantity };
+    } catch (err: any) {
+        throw new Error(err.message || 'Invalid barcode format.');
     }
-    const uidIndex = sanitized.indexOf('UID');
-    const dashIndex = sanitized.indexOf('-');
-    const uid = sanitized.slice(uidIndex, dashIndex);
-    const factsIndex = sanitized.indexOf('<Facts>');
-    let veplPartNo = sanitized.slice(dashIndex + 1, factsIndex);
-    if (veplPartNo.endsWith('1D')) {
-        veplPartNo = veplPartNo.slice(0, -2);
-    }
-    const qtyPart = sanitized.slice(factsIndex + 7);
-    let qtyStr = qtyPart;
-    if (qtyStr.startsWith('Q')) {
-        qtyStr = qtyStr.slice(1);
-    }
-    const quantity = parseInt(qtyStr, 10);
-    return { uid, veplPartNo, quantity };
 };
 
 /**
