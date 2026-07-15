@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import smtRoutes from './routes/smtRoutes';
 import smtTrackRoutes from './routes/smtTrackRoutes';
+import smtDowntimeRoutes from './routes/smtDowntimeRoutes';
 import pool from './config/db';
 import { createLogger } from './utils/logger';
 import { runMigrations } from './db/runMigrations';
@@ -51,6 +52,7 @@ const initDB = async () => {
 // Mount routes (API Gateway strips /api/smt/ and forwards as /api/)
 app.use('/api', smtRoutes);
 app.use('/api/track', smtTrackRoutes);
+app.use('/api/downtime-records', smtDowntimeRoutes);
 
 // Health Check
 app.get('/health', (req: Request, res: Response) => {
