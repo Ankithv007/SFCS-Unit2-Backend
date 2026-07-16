@@ -6,7 +6,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        
+
         // 1. Create Work Order
         const result = await client.query(
             `INSERT INTO work_orders (wo_number, quantity, customer_name, model, created_by) 
@@ -19,7 +19,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         // A single batch tracks through stages. We initialize it at Stage 1.
         const stagesRes = await client.query(`SELECT id FROM production_stages ORDER BY stage_order ASC`);
         const stageIds = stagesRes.rows.map(row => row.id);
-        
+
         let newBatchId = null;
         if (stageIds.length > 0) {
             const firstStageId = stageIds[0];
@@ -29,7 +29,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                  ON CONFLICT (batch_number) DO NOTHING RETURNING id`,
                 [newWO.id, wo_number, firstStageId, created_by || 'system']
             );
-            
+
             if (batchResult.rowCount && batchResult.rowCount > 0) {
                 newBatchId = batchResult.rows[0].id;
             } else {
@@ -77,7 +77,7 @@ export const getAllWorkOrders = async (req: Request, res: Response) => {
 
 export const deleteWorkOrder = async (req: any, res: Response) => {
     const { id } = req.params;
-    
+
     // Server-side role check
     const userRole = req.user?.role;
     const allowed = (userRole || '').toString().toLowerCase().replace(/\s/g, '');
@@ -88,11 +88,11 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        
+
         // Find all batch IDs for this work order
         const batchRes = await client.query('SELECT id FROM batches WHERE work_order_id = $1', [id]);
         const batchIds = batchRes.rows.map(r => r.id);
-        
+
         if (batchIds.length > 0) {
             // Find all barcodes for these batches
             const unitsRes = await client.query('SELECT barcode FROM units WHERE batch_id = ANY($1::int[])', [batchIds]);
@@ -107,19 +107,19 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
 
             // Delete all scans referencing these batches
             await client.query('DELETE FROM scans WHERE batch_id = ANY($1::int[])', [batchIds]);
-            
+
             // Now safe to delete units
             await client.query('DELETE FROM units WHERE batch_id = ANY($1::int[])', [batchIds]);
 
             // Delete batch stage progress
             await client.query('DELETE FROM batch_stage_progress WHERE batch_id = ANY($1::int[])', [batchIds]);
-            
+
             // Delete batches
             await client.query('DELETE FROM batches WHERE id = ANY($1::int[])', [batchIds]);
         }
-        
+
         const result = await client.query('DELETE FROM work_orders WHERE id = $1 RETURNING *', [id]);
-        
+
         await client.query('COMMIT');
 
         if (result.rowCount === 0) {
