@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
+import * as ExcelJS from 'exceljs';
 import {
     formatSerialNumber,
     checkFileIntegrity,
@@ -1149,6 +1150,232 @@ export const updateCustomerBarcode = async (req: Request, res: Response) => {
         client.release();
         logger.error('Error updating customer barcode:', err);
         return sendError(res, 500, `Unexpected server error: ${err.message}`, 'INTERNAL_SERVER_ERROR');
+    }
+};
+
+/**
+ * GET /v1/smt/serial-generation-records/:id/export/excel
+ * Exports a serial generation batch to a professionally formatted Excel spreadsheet.
+ */
+export const exportSerialGenerationExcel = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const operator = getOperator(req);
+
+    // Validate UUID format before querying to avoid postgres errors
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+        return sendError(res, 404, 'Serial Generation Record not found.', 'RESOURCE_NOT_FOUND');
+    }
+
+    try {
+        // 1. Fetch batch details
+        const batchRes = await pool.query(`
+            SELECT * FROM smt_serial_batches
+            WHERE id = $1 AND is_deleted = false
+        `, [id]);
+
+        if (batchRes.rows.length === 0) {
+            return sendError(res, 404, 'Serial Generation Record not found.', 'RESOURCE_NOT_FOUND');
+        }
+        const batch = batchRes.rows[0];
+
+        // 2. Fetch all generated serial numbers
+        const serialsRes = await pool.query(`
+            SELECT serial_number, status, created_at, created_by
+            FROM smt_serial_numbers
+            WHERE batch_id = $1
+            ORDER BY created_at ASC
+        `, [id]);
+        const serials = serialsRes.rows;
+
+        // Check for empty serial generation record business rule
+        if (serials.length === 0) {
+            return sendError(res, 400, 'Serial generation record has no generated serial numbers.', 'EMPTY_RECORD');
+        }
+
+        // Create workbook and stream it
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'SFCS SMT System';
+        workbook.created = new Date();
+        const ws = workbook.addWorksheet('Serial Numbers Report', {
+            pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true }
+        });
+
+        // Formatting definitions
+        const NAVY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+        const BLUE: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+        const LIGHT_GRAY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+        const WHITE_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+
+        const WHITE_FONT = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
+        const DARK_FONT = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
+        const BOLD_DARK = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
+
+        const thinBorder: Partial<ExcelJS.Borders> = {
+            top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            left: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            bottom: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+            right: { style: 'thin', color: { argb: 'FFD1D5DB' } }
+        };
+
+        const formatExcelDate = (dateVal: Date | string | null | undefined): string => {
+            if (!dateVal) return '';
+            const date = new Date(dateVal);
+            if (isNaN(date.getTime())) return '';
+            
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const day = String(date.getDate()).padStart(2, '0');
+            const month = months[date.getMonth()];
+            const year = date.getFullYear();
+            
+            let hours = date.getHours();
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const ampm = hours >= 12 ? 'PM' : 'AM';
+            hours = hours % 12;
+            hours = hours ? hours : 12;
+            const strTime = `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
+            
+            return `${day}-${month}-${year} ${strTime}`;
+        };
+
+        let r = 1;
+
+        // Title Banner
+        ws.getRow(r).height = 35;
+        const titleCell = ws.getCell(`A${r}`);
+        titleCell.value = '🔢 SMT SERIAL NUMBER GENERATION REPORT';
+        titleCell.font = { name: 'Calibri', size: 16, bold: true, color: { argb: 'FFFFFFFF' } };
+        titleCell.fill = NAVY;
+        titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+        ws.mergeCells(`A${r}:F${r}`); // merged up to F since there are 6 columns in the table
+        r++;
+
+        // Spacer
+        r++;
+
+        // Metadata KV Helper
+        const addKVRow = (label: string, value: any) => {
+            const row = ws.getRow(r);
+            row.height = 20;
+            const lCell = ws.getCell(`A${r}`);
+            lCell.value = label;
+            lCell.font = BOLD_DARK;
+            lCell.fill = LIGHT_GRAY;
+            lCell.border = thinBorder;
+            lCell.alignment = { vertical: 'middle', indent: 1 };
+            ws.mergeCells(`A${r}:B${r}`);
+
+            const vCell = ws.getCell(`C${r}`);
+            vCell.value = value !== null && value !== undefined ? value : '';
+            vCell.font = DARK_FONT;
+            vCell.fill = WHITE_FILL;
+            vCell.border = thinBorder;
+            vCell.alignment = { vertical: 'middle', indent: 1, wrapText: true };
+            ws.mergeCells(`C${r}:F${r}`);
+            r++;
+        };
+
+        addKVRow('Serial Number Generated Date', formatExcelDate(batch.created_at));
+        addKVRow('Work Order Number', batch.work_order_number);
+        addKVRow('PO ID', batch.po_id);
+        addKVRow('Product Name', batch.product_name);
+        addKVRow('Product Description', batch.product_description);
+        addKVRow('Work Order Qty', batch.work_order_quantity);
+        addKVRow('Panel Qty', batch.panel_quantity);
+        addKVRow('Number of Sides', batch.sides);
+        addKVRow('Line ID', batch.line_id);
+        addKVRow('Work Order Remarks', batch.work_order_remarks);
+
+        // Spacer
+        r++;
+
+        // Table Header
+        const headerRowIndex = r;
+        ws.getRow(headerRowIndex).height = 24;
+
+        const tableHeaders = [
+            'Sl. No.',
+            'Serial Number',
+            'Customer Barcode (if available)',
+            'Barcode Source',
+            'Generated Date & Time',
+            'Generated By'
+        ];
+
+        tableHeaders.forEach((h, i) => {
+            const colLetter = String.fromCharCode(65 + i);
+            const cell = ws.getCell(`${colLetter}${headerRowIndex}`);
+            cell.value = h;
+            cell.font = WHITE_FONT;
+            cell.fill = BLUE;
+            cell.border = thinBorder;
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        });
+        r++;
+
+        // Data Rows
+        serials.forEach((s, idx) => {
+            const row = ws.getRow(r);
+            row.height = 18;
+            const rowFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: idx % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFC' } };
+
+            const setCell = (colLetter: string, val: any, align: Partial<ExcelJS.Alignment> = {}) => {
+                const cell = ws.getCell(`${colLetter}${r}`);
+                cell.value = val !== null && val !== undefined ? val : '';
+                cell.font = DARK_FONT;
+                cell.fill = rowFill;
+                cell.border = thinBorder;
+                cell.alignment = { vertical: 'middle', wrapText: true, ...align };
+            };
+
+            const isCust = batch.barcode_source === 'CUSTOMER';
+            const barcodeSrcLabel = 
+                batch.barcode_source === 'GENERATE' ? 'Generate Barcode' :
+                batch.barcode_source === 'CUSTOMER' ? 'Customer Barcode' :
+                batch.barcode_source === 'LASER' ? 'Laser Machine' : batch.barcode_source;
+
+            setCell('A', idx + 1, { horizontal: 'center' }); // Sl. No. (numeric) - centered
+            setCell('B', s.serial_number, { horizontal: 'left', indent: 1 });
+            setCell('C', isCust ? s.serial_number : '', { horizontal: 'left', indent: 1 });
+            setCell('D', barcodeSrcLabel, { horizontal: 'center' });
+            setCell('E', formatExcelDate(s.created_at), { horizontal: 'center' });
+            setCell('F', s.created_by || batch.created_by_name || '', { horizontal: 'left', indent: 1 });
+
+            r++;
+        });
+
+        // Set freeze view below header row
+        ws.views = [{ state: 'frozen', xSplit: 0, ySplit: headerRowIndex, activeCell: `A${headerRowIndex + 1}` }];
+
+        // Auto-adjust column widths based on data rows
+        const colLetters = ['A', 'B', 'C', 'D', 'E', 'F'];
+        const defaultWidths = [10, 25, 35, 20, 25, 20];
+        colLetters.forEach((colLetter, i) => {
+            let maxLen = tableHeaders[i].length;
+            for (let rowIdx = headerRowIndex + 1; rowIdx < r; rowIdx++) {
+                const val = ws.getCell(`${colLetter}${rowIdx}`).value;
+                if (val !== null && val !== undefined) {
+                    maxLen = Math.max(maxLen, String(val).length);
+                }
+            }
+            ws.getColumn(colLetter).width = Math.min(50, Math.max(defaultWidths[i], maxLen + 4));
+        });
+
+        // Audit Log
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description) VALUES ($1, $2, $3, $4, $5)`,
+            ['EXPORT', 'SERIAL_GENERATION_RECORD', id, operator.name, `Exported serial generation record (Work Order ${batch.work_order_number}) to Excel.`]
+        );
+
+        // Stream direct to client response
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename=${batch.work_order_number}_Serial_Generation.xlsx`);
+        await workbook.xlsx.write(res);
+        res.end();
+
+    } catch (err: any) {
+        logger.error('Error exporting serial generation record to Excel:', err);
+        return res.status(500).json({ success: false, error: 'Internal server error while exporting Excel.' });
     }
 };
 

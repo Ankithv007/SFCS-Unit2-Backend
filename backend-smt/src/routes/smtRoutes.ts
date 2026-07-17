@@ -120,6 +120,7 @@ import {
     addScannedBarcode,
     getActiveCustomerBatch,
     updateCustomerBarcode,
+    exportSerialGenerationExcel,
 } from '../controllers/serialBatchController';
 import {
     getEligibleWorkOrders as getPrintingEligibleWos,
@@ -353,6 +354,7 @@ router.get('/v1/smt/serial-generation-records/:id/serials', authenticateToken, g
 router.delete('/v1/smt/serial-generation-records/:id', authenticateToken, deleteSerialGenerationRecord);
 router.get('/v1/smt/serial-generation-records/:id/document/download', authenticateToken, downloadLaserDocument);
 router.put('/v1/smt/serial-generation-records/:id/customer-barcode', authenticateToken, updateCustomerBarcode);
+router.get('/v1/smt/serial-generation-records/:id/export/excel', authenticateToken, exportSerialGenerationExcel);
 
 // SMT Printing Workflow
 router.get('/printing/eligible-wos', authenticateToken, getPrintingEligibleWos);
