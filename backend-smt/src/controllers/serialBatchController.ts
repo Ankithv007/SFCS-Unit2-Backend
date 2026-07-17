@@ -997,3 +997,158 @@ export const cleanupTempFile = async (req: Request, res: Response) => {
     }
     return res.json({ success: true });
 };
+
+/**
+ * PUT /v1/smt/serial-generation-records/:id/customer-barcode
+ * Updates a single customer barcode / serial number within a transaction.
+ */
+export const updateCustomerBarcode = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    let { customerBarcode } = req.body;
+    const operator = getOperator(req);
+
+    // 1. Validate: Barcode is not empty after trimming
+    if (customerBarcode === undefined || customerBarcode === null) {
+        return sendError(res, 400, 'Customer barcode cannot be empty.', 'VALIDATION_ERROR');
+    }
+    if (typeof customerBarcode !== 'string') {
+        return sendError(res, 400, 'Customer barcode must be a string.', 'VALIDATION_ERROR');
+    }
+    customerBarcode = customerBarcode.trim();
+    if (!customerBarcode) {
+        return sendError(res, 400, 'Customer barcode cannot be empty.', 'VALIDATION_ERROR');
+    }
+
+    const client = await pool.connect();
+    try {
+        // Fetch the serial number and its associated batch/record details
+        const querySerial = `
+            SELECT sn.id, sn.serial_number, sn.batch_id, sb.barcode_source, sb.work_order_number
+            FROM smt_serial_numbers sn
+            JOIN smt_serial_batches sb ON sn.batch_id = sb.id
+            WHERE sn.id = $1 AND sb.is_deleted = false
+        `;
+        const serialRes = await client.query(querySerial, [id]);
+        if (serialRes.rows.length === 0) {
+            client.release();
+            return sendError(res, 404, 'Serial number record not found.', 'NOT_FOUND');
+        }
+
+        const serialRecord = serialRes.rows[0];
+        const oldBarcode = serialRecord.serial_number;
+        const batchId = serialRecord.batch_id;
+        const barcodeSource = serialRecord.barcode_source;
+        const workOrderNumber = serialRecord.work_order_number;
+
+        // 2. Validate: Barcode Source is CUSTOMER
+        if (barcodeSource !== 'CUSTOMER') {
+            client.release();
+            return sendError(res, 422, 'Editing is only allowed for Customer Barcode records.', 'UNPROCESSABLE_ENTITY');
+        }
+
+        // 3. Validate: Barcode is different from the current value
+        if (oldBarcode === customerBarcode) {
+            client.release();
+            return sendError(res, 400, 'No changes detected.', 'NO_CHANGES');
+        }
+
+        // 4. Validate: Barcode is unique across all records
+        const queryUnique = `SELECT id FROM smt_serial_numbers WHERE serial_number = $1 AND id <> $2`;
+        const uniqueRes = await client.query(queryUnique, [customerBarcode, id]);
+        if (uniqueRes.rows.length > 0) {
+            client.release();
+            return sendError(res, 409, 'Barcode already exists.', 'DUPLICATE_ERROR');
+        }
+
+        // 5. Start transaction
+        await client.query('BEGIN');
+
+        // Update the serial number
+        const updateSerialQuery = `
+            UPDATE smt_serial_numbers
+            SET serial_number = $1
+            WHERE id = $2
+            RETURNING *
+        `;
+        const updateRes = await client.query(updateSerialQuery, [customerBarcode, id]);
+
+        // Update batch audit metadata
+        const updateBatchQuery = `
+            UPDATE smt_serial_batches
+            SET updated_by = $1, updated_by_name = $2, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3
+        `;
+        await client.query(updateBatchQuery, [operator.username, operator.name, batchId]);
+
+        // Insert batch activity log
+        const activityQuery = `
+            INSERT INTO smt_serial_batch_activity_logs (
+                batch_id, action, details, changed_fields, performed_by, performed_by_name
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+        `;
+        const activityDetails = `Customer Barcode updated from '${oldBarcode}' to '${customerBarcode}' for Work Order ${workOrderNumber}.`;
+        const changedFields = JSON.stringify({
+            serial_number: {
+                old: oldBarcode,
+                new: customerBarcode
+            }
+        });
+        await client.query(activityQuery, [
+            batchId,
+            'Barcode Updated',
+            activityDetails,
+            changedFields,
+            operator.username,
+            operator.name
+        ]);
+
+        // Insert audit log
+        const auditQuery = `
+            INSERT INTO audit_log (
+                event_type, entity_type, entity_id, actor, description, old_value, new_value
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `;
+        const auditDescription = `Customer Barcode updated from '${oldBarcode}' to '${customerBarcode}' for Work Order ${workOrderNumber} by ${operator.name}.`;
+        const oldValJson = JSON.stringify({
+            serial_number_id: id,
+            batch_id: batchId,
+            work_order_number: workOrderNumber,
+            serial_number: oldBarcode,
+            updated_by: operator.username,
+            updated_at: new Date().toISOString()
+        });
+        const newValJson = JSON.stringify({
+            serial_number_id: id,
+            batch_id: batchId,
+            work_order_number: workOrderNumber,
+            serial_number: customerBarcode,
+            updated_by: operator.username,
+            updated_at: new Date().toISOString()
+        });
+        await client.query(auditQuery, [
+            'UPDATE',
+            'CUSTOMER_BARCODE',
+            id.toString(),
+            operator.name,
+            auditDescription,
+            oldValJson,
+            newValJson
+        ]);
+
+        await client.query('COMMIT');
+        client.release();
+
+        return res.status(200).json({
+            success: true,
+            message: 'Barcode updated successfully.',
+            record: updateRes.rows[0]
+        });
+
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        client.release();
+        logger.error('Error updating customer barcode:', err);
+        return sendError(res, 500, `Unexpected server error: ${err.message}`, 'INTERNAL_SERVER_ERROR');
+    }
+};
+

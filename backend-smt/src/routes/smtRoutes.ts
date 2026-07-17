@@ -119,6 +119,7 @@ import {
     checkSerialNumberExists,
     addScannedBarcode,
     getActiveCustomerBatch,
+    updateCustomerBarcode,
 } from '../controllers/serialBatchController';
 import {
     getEligibleWorkOrders as getPrintingEligibleWos,
@@ -351,6 +352,7 @@ router.get('/v1/smt/serial-generation-records/:id', authenticateToken, getSerial
 router.get('/v1/smt/serial-generation-records/:id/serials', authenticateToken, getGeneratedSerialNumbers);
 router.delete('/v1/smt/serial-generation-records/:id', authenticateToken, deleteSerialGenerationRecord);
 router.get('/v1/smt/serial-generation-records/:id/document/download', authenticateToken, downloadLaserDocument);
+router.put('/v1/smt/serial-generation-records/:id/customer-barcode', authenticateToken, updateCustomerBarcode);
 
 // SMT Printing Workflow
 router.get('/printing/eligible-wos', authenticateToken, getPrintingEligibleWos);
