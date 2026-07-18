@@ -30,15 +30,18 @@ import {
     downloadPoDocument
 } from '../controllers/smtController';
 import {
-    getSolderPasteStatus,
-    getEligibleWorkOrders,
-    getDashboardCounts,
-    completeStage1,
-    startStage2Thawing,
-    startStage3Mixing,
-    completeStage3Mixing,
-    getCompletedBatches
-} from '../controllers/solderPasteController';
+    getCans,
+    createCan,
+    updateCan,
+    deleteCan,
+    getModels,
+    getFifoCan,
+    startSession,
+    getLatestSession,
+    recordConsumption,
+    getConsumptionHistory,
+    updateModel
+} from '../controllers/spMasterController';
 import {
     getEligibleWorkOrders as getMsdEligibleWorkOrders,
     createMsdRecord,
@@ -116,6 +119,8 @@ import {
     checkSerialNumberExists,
     addScannedBarcode,
     getActiveCustomerBatch,
+    updateCustomerBarcode,
+    exportSerialGenerationExcel,
 } from '../controllers/serialBatchController';
 import {
     getEligibleWorkOrders as getPrintingEligibleWos,
@@ -239,15 +244,18 @@ router.post('/process-setups', createProcessSetup);
 router.get('/process-setups', getProcessSetups);
 router.delete('/process-setups/:id', authenticateToken, deleteProcessSetup);
 
-// Solder Paste Management
-router.get('/solder-paste/status/:woId', getSolderPasteStatus);
-router.get('/solder-paste/eligible-wos', getEligibleWorkOrders);
-router.get('/solder-paste/dashboard-counts', getDashboardCounts);
-router.get('/solder-paste/completed-batches', getCompletedBatches);
-router.post('/solder-paste/stage1', completeStage1);
-router.post('/solder-paste/stage2/start', startStage2Thawing);
-router.post('/solder-paste/stage3/start', startStage3Mixing);
-router.post('/solder-paste/stage3/complete', completeStage3Mixing);
+// ─── Solder Paste Master (New Centralized Module) ────────────────────────────
+router.get('/sp-master/cans',                authenticateToken, getCans);
+router.post('/sp-master/cans',               authenticateToken, createCan);
+router.put('/sp-master/cans/:id',            authenticateToken, updateCan);
+router.delete('/sp-master/cans/:id',         authenticateToken, deleteCan);
+router.get('/sp-master/models',              authenticateToken, getModels);
+router.put('/sp-master/models/:id',         authenticateToken, updateModel);
+router.get('/sp-master/fifo',                authenticateToken, getFifoCan);
+router.post('/sp-master/sessions',           authenticateToken, startSession);
+router.get('/sp-master/sessions/latest',     authenticateToken, getLatestSession);
+router.post('/sp-master/consume',            authenticateToken, recordConsumption);
+router.get('/sp-master/consumption',         authenticateToken, getConsumptionHistory);
 
 // QMS endpoints
 router.get('/qms/work-orders', authenticateToken, getQmsWorkOrders);
@@ -345,6 +353,8 @@ router.get('/v1/smt/serial-generation-records/:id', authenticateToken, getSerial
 router.get('/v1/smt/serial-generation-records/:id/serials', authenticateToken, getGeneratedSerialNumbers);
 router.delete('/v1/smt/serial-generation-records/:id', authenticateToken, deleteSerialGenerationRecord);
 router.get('/v1/smt/serial-generation-records/:id/document/download', authenticateToken, downloadLaserDocument);
+router.put('/v1/smt/serial-generation-records/:id/customer-barcode', authenticateToken, updateCustomerBarcode);
+router.get('/v1/smt/serial-generation-records/:id/export/excel', authenticateToken, exportSerialGenerationExcel);
 
 // SMT Printing Workflow
 router.get('/printing/eligible-wos', authenticateToken, getPrintingEligibleWos);

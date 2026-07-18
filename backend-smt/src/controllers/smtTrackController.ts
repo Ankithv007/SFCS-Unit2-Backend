@@ -16,7 +16,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
     try {
         // 1. Find the serial number record
         const serialResult = await pool.query(
-            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.created_by as wo_created_by, wo.created_at as wo_created_at
+            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.created_by as wo_created_by, wo.created_at as wo_created_at
              FROM smt_serial_numbers sn
              LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
              WHERE sn.serial_number = $1`,
@@ -32,16 +32,26 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         // 2. Fetch all inspection history for this serial across all process steps
         const historyResult = await pool.query(
             `SELECT 
-                id,
-                serial_id,
-                process_step,
-                scanned_by,
-                scanned_at,
-                status,
-                rework_reason
-            FROM smt_inspections
-            WHERE serial_id = $1
-            ORDER BY scanned_at ASC`,
+                i.id,
+                i.serial_id,
+                i.process_step,
+                i.scanned_by,
+                i.scanned_at,
+                i.status,
+                i.rework_reason,
+                COALESCE(
+                    ps.side,
+                    pas.side,
+                    poas.side,
+                    rs.side
+                ) AS side
+            FROM smt_inspections i
+            LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+            LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
+            LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
+            LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+            WHERE i.serial_id = $1
+            ORDER BY i.scanned_at ASC`,
             [serial.id]
         );
 
@@ -52,6 +62,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             scanned_by: row.scanned_by || '-',
             scanned_at: row.scanned_at,
             rework_reason: row.rework_reason || null,
+            side: row.side || null,
         }));
 
         // 3. Determine current stage (last stage in history)
@@ -123,6 +134,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             product_name: serial.product_name || '-',
             quantity: serial.quantity || '-',
             line_id: serial.line_id || '-',
+            sides: serial.sides || '-',
             current_stage: currentStage,
             current_status: currentStatus,
             final_status_label: finalStatusLabel,
@@ -272,6 +284,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             product_name: wo.product_name,
             quantity: wo.quantity,
             line_id: wo.line_id,
+            sides: wo.sides || '-',
             total_serials: serials.length,
             serials: mappedSerials,
             solder_paste: {
