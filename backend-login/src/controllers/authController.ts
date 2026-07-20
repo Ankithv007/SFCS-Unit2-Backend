@@ -147,7 +147,11 @@ export const createPassword = async (req: Request, res: Response) => {
 export const login = async (req: Request, res: Response) => {
     try {
         const { email, password } = req.body;
-        const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        const identifier = (email || '').trim();
+        const userResult = await pool.query(
+            'SELECT * FROM users WHERE email = $1 OR employee_code = $2',
+            [identifier.toLowerCase(), identifier]
+        );
         const user = userResult.rows[0];
 
         if (!user) return res.status(404).json({ message: 'Account not found' });

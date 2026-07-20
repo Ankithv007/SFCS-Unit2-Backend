@@ -148,8 +148,8 @@ export const createUser = async (req: AuthRequest, res: Response) => {
 
     const { name, email, password, role = 'User', employee_code, status = 'active', departmentIds = [] } = req.body;
 
-    if (!name || !email || !password) {
-        return res.status(400).json({ success: false, message: 'Name, Email, and Password are required' });
+    if (!name || !password || !employee_code || !employee_code.trim()) {
+        return res.status(400).json({ success: false, message: 'Name, Employee Code, and Password are required' });
     }
 
     // Role Hierarchy Check
@@ -161,11 +161,13 @@ export const createUser = async (req: AuthRequest, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check Email uniqueness
-        const emailCheck = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
-        if (emailCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ success: false, message: 'A user with this email already exists' });
+        // Check Email uniqueness if provided
+        if (email && email.trim()) {
+            const emailCheck = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+            if (emailCheck.rows.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ success: false, message: 'A user with this email already exists' });
+            }
         }
 
         // Check Employee Code uniqueness if provided
@@ -187,11 +189,11 @@ export const createUser = async (req: AuthRequest, res: Response) => {
 
         const newReq = await client.query(insertQuery, [
             name.trim(),
-            email.toLowerCase().trim(),
+            email && email.trim() ? email.toLowerCase().trim() : null,
             hashedPassword,
             role,
             status,
-            employee_code ? employee_code.trim() : null,
+            employee_code.trim(),
             requesterId
         ]);
 
@@ -276,13 +278,19 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
             }
         }
 
-        // Uniqueness check for email
-        if (email && email.toLowerCase().trim() !== currentUser.email) {
+        // Uniqueness check for email if provided
+        if (email && email.trim() && email.toLowerCase().trim() !== (currentUser.email || '')) {
             const emailCheck = await client.query('SELECT id FROM users WHERE email = $1 AND id != $2', [email.toLowerCase().trim(), userId]);
             if (emailCheck.rows.length > 0) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ success: false, message: 'Email is already in use by another user' });
             }
+        }
+
+        // Validate employee_code if provided
+        if (employee_code !== undefined && (!employee_code || !employee_code.trim())) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, message: 'Employee Code is required' });
         }
 
         // Uniqueness check for employee_code
@@ -295,8 +303,8 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
         }
 
         const newName = name !== undefined ? name.trim() : currentUser.name;
-        const newEmail = email !== undefined ? email.toLowerCase().trim() : currentUser.email;
-        const newEmpCode = employee_code !== undefined ? (employee_code ? employee_code.trim() : null) : currentUser.employee_code;
+        const newEmail = email !== undefined ? (email && email.trim() ? email.toLowerCase().trim() : null) : currentUser.email;
+        const newEmpCode = employee_code !== undefined ? employee_code.trim() : currentUser.employee_code;
         const newRole = role !== undefined ? role : currentUser.role;
         const newStatus = status !== undefined ? status : currentUser.status;
 
