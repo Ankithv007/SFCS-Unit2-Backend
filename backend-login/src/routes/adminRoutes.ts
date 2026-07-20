@@ -12,8 +12,7 @@ import {
     createDepartment,
     updateDepartment,
     deleteDepartment,
-    getAuditLogs,
-    migrateLegacyData
+    getAuditLogs
 } from '../controllers/adminController';
 import { authenticateToken, requireRole } from '../middleware/authMiddleware';
 
@@ -43,9 +42,9 @@ router.put('/departments/:deptId', adminAuth, updateDepartment);
 router.delete('/departments/:deptId', adminAuth, deleteDepartment);
 
 // ----------------------------
-// Audit Trail & Migration Routes
+// Audit Trail Routes
 // ----------------------------
 router.get('/audit-logs', adminAuth, getAuditLogs);
-router.post('/migrate-legacy', adminAuth, migrateLegacyData);
 
 export default router;
+
