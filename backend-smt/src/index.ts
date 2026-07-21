@@ -15,8 +15,8 @@ const app = express();
 const PORT = process.env.PORT || 5005;
 
 app.use(cors());
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ limit: '15mb', extended: true }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ limit: '150mb', extended: true }));
 
 // Log all requests
 app.use((req: Request, res: Response, next: NextFunction) => {

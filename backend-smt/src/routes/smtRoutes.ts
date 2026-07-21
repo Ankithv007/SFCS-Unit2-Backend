@@ -320,7 +320,10 @@ router.post('/qms/create', authenticateToken, uploadRateLimiter, qmsUpload.field
     { name: 'pfc', maxCount: 1 },
     { name: 'xy', maxCount: 1 },
     { name: 'ecn', maxCount: 1 },
-    { name: 'drawing', maxCount: 1 }
+    { name: 'drawing', maxCount: 3 },
+    { name: 'drawing1', maxCount: 1 },
+    { name: 'drawing2', maxCount: 1 },
+    { name: 'drawing3', maxCount: 1 }
 ]), createQms);
 
 router.post('/qms/bom-revision/:qmsId', authenticateToken, uploadRateLimiter, qmsUpload.single('file'), uploadBomRevision);

@@ -310,6 +310,7 @@ function getMimeType(fileName: string): string {
         case '.xls': return 'application/vnd.ms-excel';
         case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         case '.csv': return 'text/csv';
+        case '.txt': return 'text/plain';
         case '.zip': return 'application/zip';
         default: return 'application/octet-stream';
     }
@@ -329,11 +330,11 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req: any, file: any, cb: any) => {
-    const allowedExtensions = ['.pdf', '.xls', '.xlsx', '.csv', '.zip'];
+    const allowedExtensions = ['.pdf', '.xls', '.xlsx', '.csv', '.zip', '.txt'];
     const ext = path.extname(file.originalname).toLowerCase();
     
     if (!allowedExtensions.includes(ext)) {
-        return cb(new Error(`File type ${ext} is not allowed. Only PDF, Excel, CSV, and ZIP files are permitted.`), false);
+        return cb(new Error(`File type ${ext} is not allowed. Only PDF, Excel, CSV, TXT, and ZIP files are permitted.`), false);
     }
     
     cb(null, true);
@@ -341,7 +342,7 @@ const fileFilter = (req: any, file: any, cb: any) => {
 
 export const qmsUpload = multer({
     storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+    limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
     fileFilter: fileFilter
 });
 
@@ -553,20 +554,26 @@ export const createQms = async (req: Request, res: Response) => {
         let ecnFilePath = '';
         let drawingFilePath = '';
 
-        // Process and compress each file streamingly
-        const keys = ['bom', 'pfc', 'xy', 'ecn', 'drawing'];
+        // Collect drawing files (up to 3)
+        const drawingFilesList: Express.Multer.File[] = [];
+        ['drawing', 'drawing1', 'drawing2', 'drawing3'].forEach(k => {
+            if (files[k] && Array.isArray(files[k])) {
+                drawingFilesList.push(...files[k]);
+            }
+        });
+
+        // Process single-file keys first
+        const keys = ['bom', 'pfc', 'xy', 'ecn'];
         for (const key of keys) {
             const fileArray = files[key];
             if (fileArray && fileArray.length > 0) {
                 const file = fileArray[0];
                 const isZip = path.extname(file.originalname).toLowerCase() === '.zip';
                 
-                // Naming convention
-                const docTypeTag = key === 'drawing' ? 'DRAWING' : key.toUpperCase();
+                const docTypeTag = key.toUpperCase();
                 const initRev = key === 'bom' ? bomRevision : '1';
                 const destName = generateFileName(work_order_number, docTypeTag, initRev, creator, false, file.originalname);
                 
-                // Pipeline process
                 const result = await processUpload(file.path, destName, isZip);
                 savedCompressedPaths.push(result.savedPath);
 
@@ -624,8 +631,51 @@ export const createQms = async (req: Request, res: Response) => {
                 else if (key === 'pfc') pfcFilePath = relativePath;
                 else if (key === 'xy') xyFilePath = relativePath;
                 else if (key === 'ecn') ecnFilePath = relativePath;
-                else if (key === 'drawing') drawingFilePath = relativePath;
             }
+        }
+
+        // Process Assembly Drawing files (up to 3)
+        if (drawingFilesList.length > 0) {
+            const drawingPaths: string[] = [];
+            const drawingMetaList: any[] = [];
+            const slicedDrawings = drawingFilesList.slice(0, 3);
+            for (let idx = 0; idx < slicedDrawings.length; idx++) {
+                const file = slicedDrawings[idx];
+                const isZip = path.extname(file.originalname).toLowerCase() === '.zip';
+                const docTypeTag = `DRAWING_${idx + 1}`;
+                const destName = generateFileName(work_order_number, docTypeTag, '1', creator, false, file.originalname);
+
+                const result = await processUpload(file.path, destName, isZip);
+                savedCompressedPaths.push(result.savedPath);
+
+                const compRatio = result.originalSize > 0 
+                    ? parseFloat(((result.originalSize - result.compressedSize) / result.originalSize * 100).toFixed(2)) 
+                    : 0;
+
+                const meta = {
+                    originalName: file.originalname,
+                    originalSize: result.originalSize,
+                    compressedSize: result.compressedSize,
+                    compressionRatio: compRatio,
+                    fileHash: result.fileHash,
+                    compressedHash: result.compressedHash,
+                    uploadedBy: creator,
+                    uploadedAt: new Date().toISOString(),
+                    revision: '1'
+                };
+                drawingMetaList.push(meta);
+
+                const relativePath = `QMS-Data/${destName}`;
+                drawingPaths.push(relativePath);
+
+                await client.query(`
+                    INSERT INTO qms_file_revisions (
+                        qms_id, file_type, previous_revision, new_revision, uploaded_by, remarks
+                    ) VALUES ($1, $2, NULL, '1', $3, $4)
+                `, [qmsId, idx === 0 ? 'drawing' : `drawing_${idx}`, creator, qms_remarks || 'Initial upload']);
+            }
+            drawingFilePath = drawingPaths.join(';');
+            filesMetadata['drawing'] = drawingMetaList;
         }
 
         // Update master table with document paths, current_bom_revision and metadata JSONB
@@ -726,21 +776,35 @@ async function handleFileUpdate(
         return res.status(400).json({ error: 'Remarks/comments are mandatory for every update.' });
     }
 
-    const validFileTypes = ['bom', 'pfc', 'xy', 'ecn', 'drawing'];
-    if (!validFileTypes.includes(fileType)) {
+    const isDrawingType = fileType.startsWith('drawing');
+    let drawingIndex = 0;
+    if (isDrawingType) {
+        const match = fileType.match(/drawing_?(\d+)/i);
+        if (match) {
+            const rawIdx = parseInt(match[1], 10);
+            if (!fileType.includes('_') && rawIdx >= 1) {
+                drawingIndex = rawIdx - 1;
+            } else {
+                drawingIndex = rawIdx;
+            }
+        }
+    }
+
+    const validFileTypes = ['bom', 'pfc', 'xy', 'ecn', 'drawing', 'drawing_0', 'drawing_1', 'drawing_2', 'drawing1', 'drawing2', 'drawing3'];
+    if (!validFileTypes.includes(fileType) && !isDrawingType) {
         if (file && fs.existsSync(file.path)) {
             try { fs.unlinkSync(file.path); } catch (e) {}
         }
         return res.status(400).json({ error: `Invalid file type: ${fileType}.` });
     }
 
-    const allowedExtensions = ['.pdf', '.xls', '.xlsx', '.csv', '.zip'];
+    const allowedExtensions = ['.pdf', '.xls', '.xlsx', '.csv', '.zip', '.txt'];
     const ext = path.extname(file.originalname).toLowerCase();
     if (!allowedExtensions.includes(ext)) {
         if (file && fs.existsSync(file.path)) {
             try { fs.unlinkSync(file.path); } catch (e) {}
         }
-        return res.status(400).json({ error: `File type ${ext} is not allowed. Only PDF, Excel, CSV, and ZIP files are permitted.` });
+        return res.status(400).json({ error: `File type ${ext} is not allowed. Only PDF, Excel, CSV, TXT, and ZIP files are permitted.` });
     }
 
     const MAX_SIZE = 50 * 1024 * 1024; // 50MB
@@ -814,11 +878,14 @@ async function handleFileUpdate(
         else if (fileType === 'pfc') oldFileToDelete = master.pfc_file_path;
         else if (fileType === 'xy') oldFileToDelete = master.xy_data_file_path;
         else if (fileType === 'ecn') oldFileToDelete = master.ecn_file_path;
-        else if (fileType === 'drawing') oldFileToDelete = master.assembly_drawing_file_path;
+        else if (isDrawingType) {
+            const paths = master.assembly_drawing_file_path ? master.assembly_drawing_file_path.split(';').filter(Boolean) : [];
+            oldFileToDelete = paths[drawingIndex] || paths[0] || '';
+        }
 
         // 1. Process and compress the uploaded file first
         const isZip = ext === '.zip';
-        const docTypeTag = fileType === 'drawing' ? 'DRAWING' : fileType.toUpperCase();
+        const docTypeTag = isDrawingType ? `DRAWING_${drawingIndex + 1}` : fileType.toUpperCase();
         const destName = generateFileName(master.work_order_number, docTypeTag, nextRev, creator, true, file.originalname);
 
         const result = await processUpload(file.path, destName, isZip);
@@ -834,57 +901,97 @@ async function handleFileUpdate(
 
         // Update files_metadata JSONB
         const metadata = master.files_metadata || {};
-        metadata[fileType] = {
-            originalName: file.originalname,
-            originalSize: result.originalSize,
-            compressedSize: result.compressedSize,
-            compressionRatio: compRatio,
-            fileHash: result.fileHash,
-            compressedHash: result.compressedHash,
-            uploadedBy: creator,
-            uploadedAt: new Date().toISOString(),
-            revision: nextRev
-        };
 
-        // Determine column name
-        let colName = '';
-        if (fileType === 'bom') colName = 'bom_file_path';
-        else if (fileType === 'pfc') colName = 'pfc_file_path';
-        else if (fileType === 'xy') colName = 'xy_data_file_path';
-        else if (fileType === 'ecn') colName = 'ecn_file_path';
-        else if (fileType === 'drawing') colName = 'assembly_drawing_file_path';
+        if (isDrawingType) {
+            const paths = master.assembly_drawing_file_path ? master.assembly_drawing_file_path.split(';').filter(Boolean) : [];
+            while (paths.length <= drawingIndex) {
+                paths.push('');
+            }
+            paths[drawingIndex] = relativePath;
+            const updatedDrawingPathStr = paths.join(';');
 
-        // Update master table
-        let updateQuery = '';
-        let updateParams: any[] = [];
-        if (fileType === 'bom') {
-            updateQuery = `
+            let drawingMetaArray = Array.isArray(metadata.drawing) ? [...metadata.drawing] : (metadata.drawing ? [metadata.drawing] : []);
+            const oldMeta = drawingMetaArray[drawingIndex] || null;
+            const prevRevDrawing = oldMeta?.revision || '1';
+            const nextRevDrawing = incrementRevision(prevRevDrawing);
+
+            const newMetaObj = {
+                originalName: file.originalname,
+                originalSize: result.originalSize,
+                compressedSize: result.compressedSize,
+                compressionRatio: compRatio,
+                fileHash: result.fileHash,
+                compressedHash: result.compressedHash,
+                uploadedBy: creator,
+                uploadedAt: new Date().toISOString(),
+                revision: nextRevDrawing
+            };
+            drawingMetaArray[drawingIndex] = newMetaObj;
+            metadata.drawing = drawingMetaArray;
+
+            const updateQuery = `
                 UPDATE qms_master
-                SET bom_file_path = $1,
-                    current_bom_revision = $2,
-                    files_metadata = $3,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = $4
-            `;
-            updateParams = [relativePath, nextRev, JSON.stringify(metadata), qmsId];
-        } else {
-            updateQuery = `
-                UPDATE qms_master
-                SET ${colName} = $1,
+                SET assembly_drawing_file_path = $1,
                     files_metadata = $2,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $3
             `;
-            updateParams = [relativePath, JSON.stringify(metadata), qmsId];
-        }
-        await poolClient.query(updateQuery, updateParams);
+            await poolClient.query(updateQuery, [updatedDrawingPathStr, JSON.stringify(metadata), qmsId]);
 
-        // Insert log in qms_file_revisions
-        await poolClient.query(`
-            INSERT INTO qms_file_revisions (
-                qms_id, file_type, previous_revision, new_revision, uploaded_by, remarks
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-        `, [qmsId, fileType, previousRevision, nextRev, creator, remarks]);
+            await poolClient.query(`
+                INSERT INTO qms_file_revisions (
+                    qms_id, file_type, previous_revision, new_revision, uploaded_by, remarks
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+            `, [qmsId, drawingIndex === 0 ? 'drawing' : `drawing_${drawingIndex}`, prevRevDrawing, nextRevDrawing, creator, remarks]);
+        } else {
+            metadata[fileType] = {
+                originalName: file.originalname,
+                originalSize: result.originalSize,
+                compressedSize: result.compressedSize,
+                compressionRatio: compRatio,
+                fileHash: result.fileHash,
+                compressedHash: result.compressedHash,
+                uploadedBy: creator,
+                uploadedAt: new Date().toISOString(),
+                revision: nextRev
+            };
+
+            let colName = '';
+            if (fileType === 'bom') colName = 'bom_file_path';
+            else if (fileType === 'pfc') colName = 'pfc_file_path';
+            else if (fileType === 'xy') colName = 'xy_data_file_path';
+            else if (fileType === 'ecn') colName = 'ecn_file_path';
+
+            let updateQuery = '';
+            let updateParams: any[] = [];
+            if (fileType === 'bom') {
+                updateQuery = `
+                    UPDATE qms_master
+                    SET bom_file_path = $1,
+                        current_bom_revision = $2,
+                        files_metadata = $3,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $4
+                `;
+                updateParams = [relativePath, nextRev, JSON.stringify(metadata), qmsId];
+            } else {
+                updateQuery = `
+                    UPDATE qms_master
+                    SET ${colName} = $1,
+                        files_metadata = $2,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $3
+                `;
+                updateParams = [relativePath, JSON.stringify(metadata), qmsId];
+            }
+            await poolClient.query(updateQuery, updateParams);
+
+            await poolClient.query(`
+                INSERT INTO qms_file_revisions (
+                    qms_id, file_type, previous_revision, new_revision, uploaded_by, remarks
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+            `, [qmsId, fileType, previousRevision, nextRev, creator, remarks]);
+        }
 
         // Insert legacy log for BOM
         if (fileType === 'bom') {
@@ -1026,12 +1133,40 @@ export const serveQmsFile = async (req: Request, res: Response) => {
 
         const master = masterRes.rows[0];
         let fileRelativePath = '';
+        let originalName = '';
 
-        if (fileType === 'bom') fileRelativePath = master.bom_file_path;
-        else if (fileType === 'pfc') fileRelativePath = master.pfc_file_path;
-        else if (fileType === 'xy') fileRelativePath = master.xy_data_file_path;
-        else if (fileType === 'ecn') fileRelativePath = master.ecn_file_path;
-        else if (fileType === 'drawing') fileRelativePath = master.assembly_drawing_file_path;
+        if (fileType.startsWith('drawing')) {
+            let drawingIndex = 0;
+            const match = fileType.match(/drawing_?(\d+)/i);
+            if (match) {
+                const rawIdx = parseInt(match[1], 10);
+                if (!fileType.includes('_') && rawIdx >= 1) {
+                    drawingIndex = rawIdx - 1;
+                } else {
+                    drawingIndex = rawIdx;
+                }
+            }
+            const paths = master.assembly_drawing_file_path ? master.assembly_drawing_file_path.split(';').filter(Boolean) : [];
+            fileRelativePath = paths[drawingIndex] || paths[0] || '';
+
+            if (Array.isArray(master.files_metadata?.drawing)) {
+                originalName = master.files_metadata.drawing[drawingIndex]?.originalName;
+            } else if (master.files_metadata?.drawing?.originalName) {
+                originalName = master.files_metadata.drawing.originalName;
+            }
+        } else if (fileType === 'bom') {
+            fileRelativePath = master.bom_file_path;
+            originalName = master.files_metadata?.bom?.originalName;
+        } else if (fileType === 'pfc') {
+            fileRelativePath = master.pfc_file_path;
+            originalName = master.files_metadata?.pfc?.originalName;
+        } else if (fileType === 'xy') {
+            fileRelativePath = master.xy_data_file_path;
+            originalName = master.files_metadata?.xy?.originalName;
+        } else if (fileType === 'ecn') {
+            fileRelativePath = master.ecn_file_path;
+            originalName = master.files_metadata?.ecn?.originalName;
+        }
 
         if (!fileRelativePath) {
             return res.status(404).json({ error: `No file uploaded for ${fileType.toUpperCase()}.` });
@@ -1058,7 +1193,9 @@ export const serveQmsFile = async (req: Request, res: Response) => {
 
         // Set Headers
         const mimeType = getMimeType(fileRelativePath);
-        const originalName = master.files_metadata?.[fileType]?.originalName || path.basename(fileRelativePath);
+        if (!originalName) {
+            originalName = path.basename(fileRelativePath);
+        }
 
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Content-Type', mimeType);
@@ -1095,11 +1232,13 @@ export const deleteQms = async (req: Request, res: Response) => {
     const creator = userName || 'System';
     const userRole = (req as any).user?.role;
 
-    if (userRole !== 'Super Admin') {
+    const isSuperAdmin = userRole && userRole.toString().trim().toLowerCase() === 'super admin';
+
+    if (!isSuperAdmin) {
         return res.status(403).json({
             success: false,
-            message: "Only Super Admin is authorized to delete records.",
-            error: "Only Super Admin is authorized to delete records."
+            message: "Only Super Admin can delete Document Process records.",
+            error: "Only Super Admin can delete Document Process records."
         });
     }
 
