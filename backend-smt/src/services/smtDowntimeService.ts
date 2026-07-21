@@ -10,7 +10,7 @@ export interface DowntimeInputData {
     downtime_description: string;
     action_taken: string;
     responsible_person: string;
-    status: string;
+    status?: string;
     remarks?: string;
 }
 
@@ -67,7 +67,7 @@ export class SmtDowntimeService {
             data.downtime_description,
             data.action_taken,
             data.responsible_person,
-            data.status,
+            data.status || 'Open',
             data.remarks || null,
             sessionUser.email,
             sessionUser.name
@@ -165,7 +165,7 @@ export class SmtDowntimeService {
                 downtime_description = $8,
                 action_taken = $9,
                 responsible_person = $10,
-                status = $11,
+                status = COALESCE($11, status, 'Open'),
                 remarks = $12,
                 updated_by = $13,
                 updated_by_name = $14,
@@ -185,7 +185,7 @@ export class SmtDowntimeService {
             data.downtime_description,
             data.action_taken,
             data.responsible_person,
-            data.status,
+            data.status || null,
             data.remarks || null,
             sessionUser.email,
             sessionUser.name,

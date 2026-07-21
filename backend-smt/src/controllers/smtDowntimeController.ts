@@ -28,11 +28,10 @@ export const createDowntimeRecord = async (req: Request, res: Response) => {
         downtime_description,
         action_taken,
         responsible_person,
-        status,
         remarks
     } = req.body;
 
-    if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person || !status) {
+    if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person) {
         return res.status(400).json({ success: false, message: 'All marked fields are required.' });
     }
 
@@ -47,7 +46,6 @@ export const createDowntimeRecord = async (req: Request, res: Response) => {
             downtime_description,
             action_taken,
             responsible_person,
-            status,
             remarks
         }, sessionUser);
 
@@ -94,11 +92,10 @@ export const updateDowntimeRecord = async (req: Request, res: Response) => {
         downtime_description,
         action_taken,
         responsible_person,
-        status,
         remarks
     } = req.body;
 
-    if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person || !status) {
+    if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person) {
         return res.status(400).json({ success: false, message: 'All marked fields are required.' });
     }
 
@@ -113,7 +110,6 @@ export const updateDowntimeRecord = async (req: Request, res: Response) => {
             downtime_description,
             action_taken,
             responsible_person,
-            status,
             remarks
         }, sessionUser);
 
