@@ -14,7 +14,7 @@ import {
     getFormData,
     submitInspection
 } from '../controllers/qcInspectionController';
-import { authenticateToken, requireRole } from '../middleware/authMiddleware';
+import { authenticateToken, requireRole, requirePermission } from '../middleware/authMiddleware';
 import { ROLES } from '../constants/roles';
 
 const router = express.Router();
@@ -31,7 +31,7 @@ router.post('/submit', submitInspection as any);
 router.get('/shifts', requireRole([ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.MANAGER]), getShifts as any);
 router.post('/shifts', requireRole([ROLES.SUPER_ADMIN]), createShift as any);
 router.put('/shifts/:id', requireRole([ROLES.SUPER_ADMIN]), updateShift as any);
-router.delete('/shifts/:id', requireRole([ROLES.SUPER_ADMIN]), deleteShift as any);
+router.delete('/shifts/:id', requirePermission('qc_shifts', 'can_delete') as any, deleteShift as any);
 
 // TPN/PN Management Routes
 router.post('/tpn', addTpn as any);

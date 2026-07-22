@@ -315,9 +315,9 @@ export const updateUser = async (req: AuthRequest, res: Response) => {
 
         const updateQuery = `
             UPDATE users 
-            SET name = $1, email = $2, employee_code = $3, role = $4, status = $5, password = $6, updated_by = $7, updated_at = NOW()
+            SET name = $1, email = $2, employee_code = $3, role = $4, status = $5, password = $6, updated_by = $7, permission_version = COALESCE(permission_version, 1) + 1, updated_at = NOW()
             WHERE id = $8
-            RETURNING id, name, email, role, status, employee_code, created_at, updated_at
+            RETURNING id, name, email, role, status, employee_code, permission_version, created_at, updated_at
         `;
 
         const updateRes = await client.query(updateQuery, [
@@ -870,13 +870,31 @@ export const deleteDepartment = async (req: AuthRequest, res: Response) => {
     const { deptId } = req.params;
     const requesterId = req.user?.id;
 
+    const client = await pool.connect();
     try {
-        const deptCheck = await pool.query('SELECT * FROM departments WHERE id = $1', [deptId]);
-        if (deptCheck.rows.length === 0) return res.status(404).json({ success: false, message: 'Department not found' });
+        await client.query('BEGIN');
+
+        const deptCheck = await client.query('SELECT * FROM departments WHERE id = $1', [deptId]);
+        if (deptCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'Department not found' });
+        }
 
         const targetDept = deptCheck.rows[0];
 
-        await pool.query('DELETE FROM departments WHERE id = $1', [deptId]);
+        // Fetch users in the department before deletion
+        const userRes = await client.query('SELECT user_id FROM department_users WHERE department_id = $1', [deptId]);
+        const userIds = userRes.rows.map(r => r.user_id);
+
+        await client.query('DELETE FROM departments WHERE id = $1', [deptId]);
+
+        // Increment version for affected users so their tokens refresh
+        if (userIds.length > 0) {
+            await client.query(
+                `UPDATE users SET permission_version = COALESCE(permission_version, 1) + 1 WHERE id = ANY($1)`,
+                [userIds]
+            );
+        }
 
         await logAudit({
             performedBy: requesterId,
@@ -885,12 +903,16 @@ export const deleteDepartment = async (req: AuthRequest, res: Response) => {
             targetId: deptId,
             oldValues: { name: targetDept.name },
             ipAddress: req.ip
-        });
+        }, client);
 
+        await client.query('COMMIT');
         return res.json({ success: true, message: 'Department deleted successfully' });
     } catch (error: any) {
+        await client.query('ROLLBACK');
         logger.error(`Error in deleteDepartment: ${error.message}`, error);
         return res.status(500).json({ success: false, message: 'Failed to delete department' });
+    } finally {
+        client.release();
     }
 };
 

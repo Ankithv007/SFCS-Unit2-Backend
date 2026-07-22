@@ -234,25 +234,25 @@ router.get('/work-orders/:id/download-po', workOrderExport, downloadPoDocument);
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
 router.get('/serial-numbers', getSerials);
-router.delete('/serial-numbers', authenticateToken, deleteSerials);
+router.delete('/serial-numbers', [authenticateToken, requirePermission('smt_serial_number', 'can_delete')], deleteSerials);
 router.patch('/serial-numbers/:id/status', updateSerialNumberStatus);
 
 // Inspections
 router.post('/inspections', createInspection);
 router.get('/inspections', getInspections);
-router.delete('/inspections/batch', authenticateToken, deleteInspectionsForBatch);
+router.delete('/inspections/batch', [authenticateToken, requirePermission('smt_printing', 'can_delete')], deleteInspectionsForBatch);
 router.get('/export/excel', downloadSmtReport);
 
 // Process Setups (AOI, etc.)
 router.post('/process-setups', createProcessSetup);
 router.get('/process-setups', getProcessSetups);
-router.delete('/process-setups/:id', authenticateToken, deleteProcessSetup);
+router.delete('/process-setups/:id', [authenticateToken, requirePermission('smt_printing', 'can_delete')], deleteProcessSetup);
 
 // ─── Solder Paste Master (New Centralized Module) ────────────────────────────
 router.get('/sp-master/cans',                authenticateToken, getCans);
 router.post('/sp-master/cans',               authenticateToken, createCan);
 router.put('/sp-master/cans/:id',            authenticateToken, updateCan);
-router.delete('/sp-master/cans/:id',         authenticateToken, deleteCan);
+router.delete('/sp-master/cans/:id',         [authenticateToken, requirePermission('smt_solder_paste', 'can_delete')], deleteCan);
 router.get('/sp-master/models',              authenticateToken, getModels);
 router.put('/sp-master/models/:id',         authenticateToken, updateModel);
 router.get('/sp-master/fifo',                authenticateToken, getFifoCan);
@@ -289,7 +289,7 @@ router.post('/material-management/records/:id/complete-return', authenticateToke
 // Stencil Management
 router.post('/stencil-management/create', authenticateToken, createStencilRecord);
 router.put('/stencil-management/:id', authenticateToken, updateStencilRecord);
-router.delete('/stencil-management/:id', authenticateToken, deleteStencilRecord);
+router.delete('/stencil-management/:id', [authenticateToken, requirePermission('smt_stencil_master', 'can_delete')], deleteStencilRecord);
 router.get('/stencil-management/records', authenticateToken, getStencilRecords);
 router.get('/stencil-management/export', authenticateToken, exportStencilExcel);
 
@@ -299,14 +299,14 @@ router.get('/stencil-lifecycle/work-orders', authenticateToken, getLifecycleWork
 router.post('/stencil-lifecycle/create', authenticateToken, createLifecycleRecord);
 router.get('/stencil-lifecycle/records', authenticateToken, getLifecycleRecords);
 router.get('/stencil-lifecycle/records/:id', authenticateToken, getLifecycleRecordById);
-router.delete('/stencil-lifecycle/records/:id', authenticateToken, deleteLifecycleRecord);
+router.delete('/stencil-lifecycle/records/:id', [authenticateToken, requirePermission('smt_stencil_lifecycle', 'can_delete')], deleteLifecycleRecord);
 
 // Baking Tracking Record
 router.post('/baking-tracking/create', authenticateToken, createBakingRecord);
 router.get('/baking-tracking/records', authenticateToken, getBakingRecords);
 router.get('/baking-tracking/records/:id', authenticateToken, getBakingRecordById);
 router.post('/baking-tracking/stop/:id', authenticateToken, stopBakingRecord);
-router.delete('/baking-tracking/records/:id', authenticateToken, deleteBakingRecord);
+router.delete('/baking-tracking/records/:id', [authenticateToken, requirePermission('smt_baking_tracking', 'can_delete')], deleteBakingRecord);
 
 // MSD Tracker Endpoints
 router.get('/msd-tracker/eligible-work-orders', authenticateToken, getMsdEligibleWorkOrders);
@@ -334,7 +334,7 @@ router.post('/qms/bom-revision/:qmsId', authenticateToken, uploadRateLimiter, qm
 router.post('/qms/update-file/:qmsId', authenticateToken, uploadRateLimiter, qmsUpload.single('file'), updateQmsFile);
 
 router.get('/qms/files/:action/:qmsId/:fileType', serveQmsFile);
-router.post('/qms/delete/:qmsId', authenticateToken, deleteQms);
+router.post('/qms/delete/:qmsId', [authenticateToken, requirePermission('smt_qms', 'can_delete')], deleteQms);
 
 // Aliases for Requirement 5
 router.get('/serials', getSerials);
@@ -344,7 +344,7 @@ router.post('/serials', generateSerials);
 router.post('/employees', createEmployee);
 router.get('/employees', getEmployees);
 router.put('/employees/:id', updateEmployee);
-router.delete('/employees/:id', authenticateToken, deleteEmployee);
+router.delete('/employees/:id', [authenticateToken, requirePermission('smt_dashboard', 'can_delete')], deleteEmployee);
 router.patch('/employees/:id/status', toggleEmployeeStatus);
 router.post('/employees/login', loginEmployee);
 
@@ -358,7 +358,7 @@ router.post('/v1/smt/serial-generation-records/laser/cleanup-temp', authenticate
 router.post('/v1/smt/serial-generation-records/:id/scans', authenticateToken, addScannedBarcode);
 router.get('/v1/smt/serial-generation-records/:id', authenticateToken, getSerialGenerationRecordDetails);
 router.get('/v1/smt/serial-generation-records/:id/serials', authenticateToken, getGeneratedSerialNumbers);
-router.delete('/v1/smt/serial-generation-records/:id', authenticateToken, deleteSerialGenerationRecord);
+router.delete('/v1/smt/serial-generation-records/:id', [authenticateToken, requirePermission('smt_serial_number', 'can_delete')], deleteSerialGenerationRecord);
 router.get('/v1/smt/serial-generation-records/:id/document/download', authenticateToken, downloadLaserDocument);
 router.put('/v1/smt/serial-generation-records/:id/customer-barcode', authenticateToken, updateCustomerBarcode);
 router.get('/v1/smt/serial-generation-records/:id/export/excel', authenticateToken, exportSerialGenerationExcel);
@@ -370,7 +370,7 @@ router.post('/printing/sessions', authenticateToken, createPrintingSession);
 router.get('/printing/sessions', authenticateToken, getPrintingSessions);
 router.get('/printing/sessions/:id', authenticateToken, getPrintingSessionById);
 router.patch('/printing/sessions/:id/status', authenticateToken, updateSessionStatus);
-router.delete('/printing/sessions/:id', authenticateToken, deletePrintingSession);
+router.delete('/printing/sessions/:id', [authenticateToken, requirePermission('smt_printing', 'can_delete')], deletePrintingSession);
 router.post('/printing/sessions/:id/scan', authenticateToken, validateAndRecordScan);
 router.put('/printing/sessions/:id/scan/:scanId', authenticateToken, updateScanBarcode);
 router.post('/printing/sessions/:id/scan/:scanId/fail', authenticateToken, failScanRow);
@@ -386,7 +386,7 @@ router.post('/pre-aoi/sessions', authenticateToken, createPreAoiSession);
 router.get('/pre-aoi/sessions', authenticateToken, getPreAoiSessions);
 router.get('/pre-aoi/sessions/:id', authenticateToken, getPreAoiSessionById);
 router.patch('/pre-aoi/sessions/:id/status', authenticateToken, updatePreAoiSessionStatus);
-router.delete('/pre-aoi/sessions/:id', authenticateToken, deletePreAoiSession);
+router.delete('/pre-aoi/sessions/:id', [authenticateToken, requirePermission('smt_pre_aoi', 'can_delete')], deletePreAoiSession);
 router.post('/pre-aoi/sessions/:id/scan', authenticateToken, validateAndRecordPreAoiScan);
 router.put('/pre-aoi/sessions/:id/scan/:scanId', authenticateToken, updatePreAoiScanBarcode);
 router.post('/pre-aoi/sessions/:id/scan/:scanId/fail', authenticateToken, failPreAoiScanRow);
@@ -404,7 +404,7 @@ router.post('/post-aoi/sessions', authenticateToken, createPostAoiSession);
 router.get('/post-aoi/sessions', authenticateToken, getPostAoiSessions);
 router.get('/post-aoi/sessions/:id', authenticateToken, getPostAoiSessionById);
 router.patch('/post-aoi/sessions/:id/status', authenticateToken, updatePostAoiSessionStatus);
-router.delete('/post-aoi/sessions/:id', authenticateToken, deletePostAoiSession);
+router.delete('/post-aoi/sessions/:id', [authenticateToken, requirePermission('smt_post_aoi', 'can_delete')], deletePostAoiSession);
 router.post('/post-aoi/sessions/:id/scan', authenticateToken, validateAndRecordPostAoiScan);
 router.put('/post-aoi/sessions/:id/scan/:scanId', authenticateToken, updatePostAoiScanBarcode);
 router.post('/post-aoi/sessions/:id/scan/:scanId/fail', authenticateToken, failPostAoiScanRow);
@@ -422,7 +422,7 @@ router.post('/rework/sessions', authenticateToken, createReworkSession);
 router.get('/rework/sessions', authenticateToken, getReworkSessions);
 router.get('/rework/sessions/:id', authenticateToken, getReworkSessionById);
 router.patch('/rework/sessions/:id/status', authenticateToken, updateReworkSessionStatus);
-router.delete('/rework/sessions/:id', authenticateToken, deleteReworkSession);
+router.delete('/rework/sessions/:id', [authenticateToken, requirePermission('smt_rework', 'can_delete')], deleteReworkSession);
 router.post('/rework/sessions/:id/scan', authenticateToken, validateAndRecordReworkScan);
 router.put('/rework/sessions/:id/scan/:scanId', authenticateToken, updateReworkScanBarcode);
 router.post('/rework/sessions/:id/scan/:scanId/fail', authenticateToken, failReworkScanRow);
@@ -440,7 +440,7 @@ router.post('/smt-fg/sessions', authenticateToken, createFgSession);
 router.get('/smt-fg/sessions', authenticateToken, getFgSessions);
 router.get('/smt-fg/sessions/:id', authenticateToken, getFgSessionById);
 router.patch('/smt-fg/sessions/:id/status', authenticateToken, updateFgSessionStatus);
-router.delete('/smt-fg/sessions/:id', authenticateToken, deleteFgSession);
+router.delete('/smt-fg/sessions/:id', [authenticateToken, requirePermission('smt_fg', 'can_delete')], deleteFgSession);
 router.post('/smt-fg/sessions/:id/scan', authenticateToken, validateAndRecordFgScan);
 router.get('/smt-fg/sessions/:id/stats', authenticateToken, getFgSessionStatistics);
 router.get('/smt-fg/sessions/:id/export/excel', authenticateToken, exportFgSessionExcel);

@@ -60,6 +60,11 @@ export const requirePermission = (permissionKey: string, action: 'can_view' | 'c
             return next();
         }
 
+        // Restrict 'can_delete' action exclusively to Super Admin users
+        if (action === 'can_delete') {
+            return res.status(403).json({ message: 'Access Denied: Only Super Admin users are allowed to perform delete operations.' });
+        }
+
         const userId = user.id;
         const version = user.permission_version || 1;
         const cacheKey = `${userId}:${version}`;
