@@ -106,7 +106,7 @@ import {
     stopBakingRecord,
     deleteBakingRecord
 } from '../controllers/bakingTrackingController';
-import { authenticateToken, requireRole } from '../middleware/authMiddleware';
+import { authenticateToken, requireRole, requirePermission } from '../middleware/authMiddleware';
 import {
     createSerialGenerationRecord,
     getSerialGenerationRecords,
@@ -213,19 +213,23 @@ const router = express.Router();
 
 
 // Work Orders
-const workOrderAdminManagerOnly = [authenticateToken, requireRole(['Super Admin', 'Admin', 'Manager'])];
+const workOrderView = [authenticateToken, requirePermission('smt_work_order', 'can_view')];
+const workOrderCreate = [authenticateToken, requirePermission('smt_work_order', 'can_create')];
+const workOrderEdit = [authenticateToken, requirePermission('smt_work_order', 'can_edit')];
+const workOrderDelete = [authenticateToken, requirePermission('smt_work_order', 'can_delete')];
+const workOrderExport = [authenticateToken, requirePermission('smt_work_order', 'can_export')];
 
-router.post('/work-orders', workOrderAdminManagerOnly, createWorkOrder);
-router.put('/work-orders/:id', workOrderAdminManagerOnly, updateWorkOrder);
-router.get('/work-orders', workOrderAdminManagerOnly, getWorkOrders);
-router.get('/workorders/pending', workOrderAdminManagerOnly, getPendingWorkOrders);
-router.post('/work-orders/:id/register', workOrderAdminManagerOnly, registerWorkOrder);
-router.get('/work-orders/registered', workOrderAdminManagerOnly, getRegisteredWorkOrders);
-router.get('/workorder-history', workOrderAdminManagerOnly, getWorkOrderHistory);
-router.delete('/work-orders/:id', workOrderAdminManagerOnly, deleteWorkOrder);
-router.get('/work-orders/:id/preview-po', workOrderAdminManagerOnly, previewPoDocument);
-router.get('/work-orders/:id/view-po-file', workOrderAdminManagerOnly, viewPoDocumentFile);
-router.get('/work-orders/:id/download-po', workOrderAdminManagerOnly, downloadPoDocument);
+router.post('/work-orders', workOrderCreate, createWorkOrder);
+router.put('/work-orders/:id', workOrderEdit, updateWorkOrder);
+router.get('/work-orders', workOrderView, getWorkOrders);
+router.get('/workorders/pending', workOrderView, getPendingWorkOrders);
+router.post('/work-orders/:id/register', workOrderCreate, registerWorkOrder);
+router.get('/work-orders/registered', workOrderView, getRegisteredWorkOrders);
+router.get('/workorder-history', workOrderView, getWorkOrderHistory);
+router.delete('/work-orders/:id', workOrderDelete, deleteWorkOrder);
+router.get('/work-orders/:id/preview-po', workOrderView, previewPoDocument);
+router.get('/work-orders/:id/view-po-file', workOrderView, viewPoDocumentFile);
+router.get('/work-orders/:id/download-po', workOrderExport, downloadPoDocument);
 
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
