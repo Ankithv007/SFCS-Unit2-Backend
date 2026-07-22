@@ -1277,21 +1277,21 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
         const addKVRow = (rowNum: number, label: string, value: any) => {
             const row = ws.getRow(rowNum);
             row.height = 18;
+            ws.mergeCells(`A${rowNum}:B${rowNum}`);
             const lCell = ws.getCell(`A${rowNum}`);
             lCell.value = label;
             lCell.font = BOLD_DARK;
             lCell.fill = LIGHT_GRAY;
             lCell.border = thinBorder;
             lCell.alignment = { vertical: 'middle', indent: 1 };
-            ws.mergeCells(`A${rowNum}:B${rowNum}`);
 
+            ws.mergeCells(`C${rowNum}:G${rowNum}`);
             const vCell = ws.getCell(`C${rowNum}`);
-            vCell.value = value ?? '-';
+            vCell.value = (value !== null && value !== undefined && value !== '') ? String(value) : '-';
             vCell.font = DARK_FONT;
             vCell.fill = WHITE_FILL;
             vCell.border = thinBorder;
             vCell.alignment = { vertical: 'middle', indent: 1 };
-            ws.mergeCells(`C${rowNum}:G${rowNum}`);
         };
 
         const fmtDate = (d: any) => d ? new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) : '-';
@@ -1361,9 +1361,14 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
         r++; // spacer
 
         // ── SECTION 4: Production Summary ───────────────────────────────────────
+        const yieldPercent = (session.work_order_quantity && session.work_order_quantity > 0)
+            ? ((passed / session.work_order_quantity) * 100).toFixed(2) + '%'
+            : '0.00%';
+
         addSectionHeader('  4.  PRODUCTION SUMMARY', PLUM, r); r++;
         addKVRow(r, 'Work Order Quantity', session.work_order_quantity); r++;
         addKVRow(r, 'Passed Quantity', passed); r++;
+        addKVRow(r, 'Yield (%)', yieldPercent); r++;
         addKVRow(r, 'Failed Quantity', failed); r++;
         addKVRow(r, 'Pending Quantity', pending); r++;
         addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
