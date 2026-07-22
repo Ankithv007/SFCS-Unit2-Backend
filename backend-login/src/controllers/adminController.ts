@@ -1018,7 +1018,7 @@ export const getAuditLogs = async (req: AuthRequest, res: Response) => {
  */
 export const getSystemPages = async (req: AuthRequest, res: Response) => {
     try {
-        const result = await pool.query('SELECT * FROM system_pages ORDER BY module_name ASC, display_order ASC, page_name ASC');
+        const result = await pool.query('SELECT * FROM system_pages WHERE is_active = TRUE ORDER BY module_name ASC, display_order ASC, page_name ASC');
         return res.json({ success: true, data: result.rows });
     } catch (error: any) {
         logger.error(`Error in getSystemPages: ${error.message}`, error);
