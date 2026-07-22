@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { pool } from '../config/db';
 
 import { hashPassword, comparePassword, hashOtp, compareOtp } from '../utils/hashService';
-import { generateToken } from '../utils/tokenService';
+import { generateToken, verifyToken } from '../utils/tokenService';
 import { sendEmail } from '../utils/emailService';
 import { getOtpEmailTemplate } from '../utils/emailTemplates';
 
@@ -163,7 +163,12 @@ export const login = async (req: Request, res: Response) => {
         const isMatch = await comparePassword(password, user.password);
         if (!isMatch) return res.status(401).json({ message: 'Incorrect credentials' });
 
-        const token = generateToken({ id: user.id, email: user.email, role: user.role });
+        const token = generateToken({ 
+            id: user.id, 
+            email: user.email, 
+            role: user.role, 
+            permission_version: user.permission_version || 1 
+        });
         res.json({
             token,
             user: {
@@ -331,5 +336,178 @@ export const confirmForgotOtp = async (req: Request, res: Response) => {
     } catch (error: any) {
         console.error(error);
         res.status(500).json({ message: 'Server error' });
+    }
+};
+
+// 9. Get Me (Get current profile, permissions resolved via Union logical OR, and refresh JWT if version mismatch)
+export const getMe = async (req: any, res: Response) => {
+    try {
+        const userId = req.user?.id;
+        const currentTokenVersion = req.user?.permission_version;
+
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const userQuery = await pool.query(
+            'SELECT id, name, email, role, status, employee_code, avatar, permission_version FROM users WHERE id = $1 AND deleted_at IS NULL',
+            [userId]
+        );
+
+        if (userQuery.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        const user = userQuery.rows[0];
+        if (user.status !== 'active') {
+            return res.status(403).json({ success: false, message: 'Account inactive' });
+        }
+
+        // Fetch user's department permissions resolved via Union (logical OR)
+        let permissions: any[] = [];
+        if (user.role === 'Super Admin') {
+            const allPages = await pool.query(
+                `SELECT 
+                    id AS system_page_id,
+                    module_name AS module,
+                    route_path AS page,
+                    permission_key,
+                    TRUE AS can_view,
+                    TRUE AS can_create,
+                    TRUE AS can_edit,
+                    TRUE AS can_delete,
+                    TRUE AS can_export
+                 FROM system_pages 
+                 WHERE is_active = TRUE`
+            );
+            permissions = allPages.rows;
+        } else {
+            const permQuery = `
+                SELECT 
+                    sp.id AS system_page_id,
+                    sp.module_name AS module,
+                    sp.route_path AS page,
+                    sp.permission_key,
+                    bool_or(dp.can_view) AS can_view,
+                    bool_or(dp.can_create) AS can_create,
+                    bool_or(dp.can_edit) AS can_edit,
+                    bool_or(dp.can_delete) AS can_delete,
+                    bool_or(dp.can_export) AS can_export
+                FROM department_users du
+                JOIN department_permissions dp ON dp.department_id = du.department_id
+                JOIN system_pages sp ON sp.id = dp.system_page_id
+                WHERE du.user_id = $1 AND sp.is_active = TRUE
+                GROUP BY sp.id, sp.module_name, sp.route_path, sp.permission_key
+            `;
+            const permResult = await pool.query(permQuery, [userId]);
+            permissions = permResult.rows;
+        }
+
+        // Fetch user's departments
+        const deptQuery = `
+            SELECT d.id, d.name, d.description
+            FROM department_users du
+            JOIN departments d ON d.id = du.department_id
+            WHERE du.user_id = $1
+        `;
+        const deptResult = await pool.query(deptQuery, [userId]);
+
+        const responsePayload: any = {
+            success: true,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                avatar: user.avatar,
+                employee_code: user.employee_code
+            },
+            permissions,
+            departments: deptResult.rows
+        };
+
+        // If permission_version in database is different from the token, refresh JWT token
+        if (currentTokenVersion !== user.permission_version) {
+            console.log(`[AUTH] Permission version mismatch (token: ${currentTokenVersion}, db: ${user.permission_version}). Re-issuing token.`);
+            const refreshedToken = generateToken({
+                id: user.id,
+                email: user.email,
+                role: user.role,
+                permission_version: user.permission_version || 1
+            });
+            responsePayload.token = refreshedToken;
+        }
+
+        return res.json(responsePayload);
+    } catch (error: any) {
+        console.error('getMe error:', error);
+        return res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// 10. Verify Token Permissions (Internal call for microservices validation)
+export const verifyTokenPermissions = async (req: Request, res: Response) => {
+    try {
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ success: false, message: 'No token provided' });
+        }
+
+        const decoded: any = verifyToken(token);
+        if (!decoded || !decoded.id) {
+            return res.status(401).json({ success: false, message: 'Invalid token' });
+        }
+
+        const userQuery = await pool.query('SELECT role, status FROM users WHERE id = $1 AND deleted_at IS NULL', [decoded.id]);
+        if (userQuery.rows.length === 0 || userQuery.rows[0].status !== 'active') {
+            return res.status(401).json({ success: false, message: 'User inactive or deleted' });
+        }
+
+        const role = userQuery.rows[0].role;
+
+        let permissions: any[] = [];
+        if (role === 'Super Admin') {
+            const allPages = await pool.query(
+                `SELECT 
+                    route_path AS page,
+                    permission_key,
+                    TRUE AS can_view,
+                    TRUE AS can_create,
+                    TRUE AS can_edit,
+                    TRUE AS can_delete,
+                    TRUE AS can_export
+                 FROM system_pages 
+                 WHERE is_active = TRUE`
+            );
+            permissions = allPages.rows;
+        } else {
+            const permQuery = `
+                SELECT 
+                    sp.route_path AS page,
+                    sp.permission_key,
+                    bool_or(dp.can_view) AS can_view,
+                    bool_or(dp.can_create) AS can_create,
+                    bool_or(dp.can_edit) AS can_edit,
+                    bool_or(dp.can_delete) AS can_delete,
+                    bool_or(dp.can_export) AS can_export
+                FROM department_users du
+                JOIN department_permissions dp ON dp.department_id = du.department_id
+                JOIN system_pages sp ON sp.id = dp.system_page_id
+                WHERE du.user_id = $1 AND sp.is_active = TRUE
+                GROUP BY sp.id, sp.route_path, sp.permission_key
+            `;
+            const permResult = await pool.query(permQuery, [decoded.id]);
+            permissions = permResult.rows;
+        }
+
+        return res.json({
+            success: true,
+            user: { id: decoded.id, role },
+            permissions
+        });
+    } catch (error: any) {
+        console.error('verifyTokenPermissions error:', error);
+        return res.status(401).json({ success: false, message: 'Unauthorized: ' + error.message });
     }
 };

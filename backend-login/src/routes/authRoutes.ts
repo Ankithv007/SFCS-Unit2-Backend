@@ -8,9 +8,12 @@ import {
     login,
     requestForgotOtp,
     confirmForgotOtp,
-    updateAvatar
+    updateAvatar,
+    getMe,
+    verifyTokenPermissions
 } from '../controllers/authController';
 import { otpLimiter } from '../middleware/rateLimiter';
+import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = Router();
 
@@ -23,5 +26,7 @@ router.post('/login', login);
 router.post('/request-forgot-otp', otpLimiter, requestForgotOtp);
 router.post('/confirm-forgot-otp', confirmForgotOtp);
 router.post('/update-avatar', updateAvatar);
+router.get('/me', authenticateToken, getMe);
+router.get('/verify-token-permissions', verifyTokenPermissions);
 
 export default router;

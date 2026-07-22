@@ -12,7 +12,9 @@ import {
     createDepartment,
     updateDepartment,
     deleteDepartment,
-    getAuditLogs
+    getAuditLogs,
+    getSystemPages,
+    syncSystemPages
 } from '../controllers/adminController';
 import { authenticateToken, requireRole } from '../middleware/authMiddleware';
 
@@ -40,6 +42,12 @@ router.get('/departments', adminAuth, getDepartments);
 router.post('/departments', adminAuth, createDepartment);
 router.put('/departments/:deptId', adminAuth, updateDepartment);
 router.delete('/departments/:deptId', adminAuth, deleteDepartment);
+
+// ----------------------------
+// System Pages Routes
+// ----------------------------
+router.get('/system-pages', adminAuth, getSystemPages);
+router.post('/system-pages/sync', [authenticateToken, requireRole(['Super Admin'])], syncSystemPages);
 
 // ----------------------------
 // Audit Trail Routes

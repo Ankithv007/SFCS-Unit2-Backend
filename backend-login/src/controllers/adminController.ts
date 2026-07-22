@@ -553,7 +553,7 @@ export const updateUserRole = async (req: AuthRequest, res: Response) => {
             return res.status(403).json({ success: false, message: 'You do not have permission to change to or from this role' });
         }
 
-        await pool.query('UPDATE users SET role = $1, updated_by = $2, updated_at = NOW() WHERE id = $3', [
+        await pool.query('UPDATE users SET role = $1, updated_by = $2, permission_version = COALESCE(permission_version, 1) + 1, updated_at = NOW() WHERE id = $3', [
             role,
             requesterId,
             userId
@@ -611,8 +611,10 @@ export const getDepartments = async (req: AuthRequest, res: Response) => {
                     (
                         SELECT json_agg(json_build_object(
                             'id', dp.id,
-                            'module', dp.module,
-                            'page', dp.page,
+                            'system_page_id', dp.system_page_id,
+                            'module', sp.module_name,
+                            'page', sp.route_path,
+                            'permission_key', sp.permission_key,
                             'can_view', dp.can_view,
                             'can_create', dp.can_create,
                             'can_edit', dp.can_edit,
@@ -620,7 +622,8 @@ export const getDepartments = async (req: AuthRequest, res: Response) => {
                             'can_export', dp.can_export
                         ))
                         FROM department_permissions dp
-                        WHERE dp.department_id = d.id
+                        JOIN system_pages sp ON sp.id = dp.system_page_id
+                        WHERE dp.department_id = d.id AND sp.is_active = TRUE
                     ), '[]'::json
                 ) AS permissions
             FROM departments d
@@ -674,20 +677,25 @@ export const createDepartment = async (req: AuthRequest, res: Response) => {
                     [newDept.id, uid]
                 );
             }
+            // Increment version for all added users
+            await client.query(
+                `UPDATE users SET permission_version = COALESCE(permission_version, 1) + 1 WHERE id = ANY($1)`,
+                [userIds]
+            );
         }
 
-        // Insert Permissions
+        // Insert Permissions mapped by system_page_id
         if (Array.isArray(permissions) && permissions.length > 0) {
             for (const perm of permissions) {
+                if (!perm.system_page_id) continue;
                 await client.query(
-                    `INSERT INTO department_permissions (department_id, module, page, can_view, can_create, can_edit, can_delete, can_export)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (department_id, page) DO UPDATE
+                    `INSERT INTO department_permissions (department_id, system_page_id, can_view, can_create, can_edit, can_delete, can_export)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                     ON CONFLICT (department_id, system_page_id) DO UPDATE
                      SET can_view = EXCLUDED.can_view, can_create = EXCLUDED.can_create, can_edit = EXCLUDED.can_edit, can_delete = EXCLUDED.can_delete, can_export = EXCLUDED.can_export`,
                     [
                         newDept.id,
-                        perm.module || 'General',
-                        perm.page,
+                        perm.system_page_id,
                         perm.can_view ?? true,
                         perm.can_create ?? false,
                         perm.can_edit ?? false,
@@ -776,25 +784,48 @@ export const updateDepartment = async (req: AuthRequest, res: Response) => {
 
         const updatedDept = updateRes.rows[0];
 
-        // Replace user links if provided
+        // Replace user links and trigger version increment
         if (Array.isArray(userIds)) {
+            // Get user IDs currently in the department
+            const currentUsersRes = await client.query('SELECT user_id FROM department_users WHERE department_id = $1', [deptId]);
+            const currentUsers = currentUsersRes.rows.map(r => r.user_id);
+
             await client.query('DELETE FROM department_users WHERE department_id = $1', [deptId]);
             for (const uid of userIds) {
                 await client.query('INSERT INTO department_users (department_id, user_id) VALUES ($1, $2)', [deptId, uid]);
             }
+
+            // Union of current and new users for version update
+            const allAffectedUsers = Array.from(new Set([...currentUsers, ...userIds]));
+            if (allAffectedUsers.length > 0) {
+                await client.query(
+                    `UPDATE users SET permission_version = COALESCE(permission_version, 1) + 1 WHERE id = ANY($1)`,
+                    [allAffectedUsers]
+                );
+            }
+        } else {
+            // If userIds not changed but permissions changed, increment for current members
+            const currentUsersRes = await client.query('SELECT user_id FROM department_users WHERE department_id = $1', [deptId]);
+            const currentUsers = currentUsersRes.rows.map(r => r.user_id);
+            if (currentUsers.length > 0) {
+                await client.query(
+                    `UPDATE users SET permission_version = COALESCE(permission_version, 1) + 1 WHERE id = ANY($1)`,
+                    [currentUsers]
+                );
+            }
         }
 
-        // Update Permissions if provided
+        // Update Permissions mapped by system_page_id
         if (Array.isArray(permissions)) {
             await client.query('DELETE FROM department_permissions WHERE department_id = $1', [deptId]);
             for (const perm of permissions) {
+                if (!perm.system_page_id) continue;
                 await client.query(
-                    `INSERT INTO department_permissions (department_id, module, page, can_view, can_create, can_edit, can_delete, can_export)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                    `INSERT INTO department_permissions (department_id, system_page_id, can_view, can_create, can_edit, can_delete, can_export)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
                     [
                         deptId,
-                        perm.module || 'General',
-                        perm.page,
+                        perm.system_page_id,
                         perm.can_view ?? true,
                         perm.can_create ?? false,
                         perm.can_edit ?? false,
@@ -956,6 +987,152 @@ export const getAuditLogs = async (req: AuthRequest, res: Response) => {
     } catch (error: any) {
         logger.error(`Error in getAuditLogs: ${error.message}`, error);
         return res.status(500).json({ success: false, message: 'Failed to fetch audit logs' });
+    }
+};
+
+/**
+ * GET /api/auth/admin/system-pages
+ * Retrieve list of all system pages.
+ */
+export const getSystemPages = async (req: AuthRequest, res: Response) => {
+    try {
+        const result = await pool.query('SELECT * FROM system_pages ORDER BY module_name ASC, display_order ASC, page_name ASC');
+        return res.json({ success: true, data: result.rows });
+    } catch (error: any) {
+        logger.error(`Error in getSystemPages: ${error.message}`, error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch system pages' });
+    }
+};
+
+/**
+ * POST /api/auth/admin/system-pages/sync
+ * Idempotent synchronization of routes from frontend routesConfig.
+ * Strictly restricted to Super Admin role.
+ */
+export const syncSystemPages = async (req: AuthRequest, res: Response) => {
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+    const { routes } = req.body;
+    
+    const startTime = Date.now();
+
+    if (requesterRole !== 'Super Admin') {
+        return res.status(403).json({ success: false, message: 'Only Super Admin can execute system page synchronization' });
+    }
+
+    if (!Array.isArray(routes)) {
+        return res.status(400).json({ success: false, message: 'Routes payload must be an array' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Fetch existing system pages
+        const existingRes = await client.query('SELECT id, permission_key, is_active FROM system_pages');
+        const existingMap = new Map(existingRes.rows.map(r => [r.permission_key, r]));
+
+        let added = 0;
+        let updated = 0;
+        let inactive = 0;
+        let unchanged = 0;
+        const processedKeys = new Set<string>();
+
+        // Validate and Process incoming routes
+        for (const route of routes) {
+            const {
+                permission_key,
+                module_name,
+                page_name,
+                route_path,
+                parent_module,
+                display_order = 0,
+                icon,
+                page_type = 'PAGE'
+            } = route;
+
+            // Validation
+            if (!permission_key || !permission_key.trim() || !module_name || !module_name.trim() || !page_name || !page_name.trim() || !route_path || !route_path.trim()) {
+                console.warn('[SYNC WARNING] Skipping malformed route entry:', route);
+                continue;
+            }
+
+            if (processedKeys.has(permission_key)) {
+                console.warn('[SYNC WARNING] Duplicate permission_key detected in payload:', permission_key);
+                continue;
+            }
+            processedKeys.add(permission_key);
+
+            const existing = existingMap.get(permission_key);
+            if (existing) {
+                // Update
+                const updateRes = await client.query(
+                    `UPDATE system_pages
+                     SET module_name = $1, page_name = $2, route_path = $3, parent_module = $4, display_order = $5, icon = $6, page_type = $7, is_active = TRUE, last_synced_at = NOW(), updated_by = $8, updated_at = NOW()
+                     WHERE permission_key = $9
+                     RETURNING (module_name != $1 OR page_name != $2 OR route_path != $3 OR parent_module IS DISTINCT FROM $4 OR display_order != $5 OR icon IS DISTINCT FROM $6 OR page_type != $7 OR is_active = FALSE) AS changed`,
+                    [module_name.trim(), page_name.trim(), route_path.trim(), parent_module || null, display_order, icon || null, page_type, requesterId, permission_key]
+                );
+                
+                if (updateRes.rows[0]?.changed) {
+                    updated++;
+                } else {
+                    unchanged++;
+                }
+            } else {
+                // Insert
+                await client.query(
+                    `INSERT INTO system_pages (module_name, page_name, permission_key, route_path, parent_module, display_order, icon, page_type, is_active, last_synced_at, updated_by, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW(), $9, NOW(), NOW())`,
+                    [module_name.trim(), page_name.trim(), permission_key.trim(), route_path.trim(), parent_module || null, display_order, icon || null, page_type, requesterId]
+                );
+                added++;
+            }
+        }
+
+        // Soft delete / mark inactive routes not in the payload
+        for (const [key, record] of existingMap.entries()) {
+            if (!processedKeys.has(key) && record.is_active) {
+                await client.query(
+                    `UPDATE system_pages SET is_active = FALSE, last_synced_at = NOW(), updated_by = $1, updated_at = NOW() WHERE permission_key = $2`,
+                    [requesterId, key]
+                );
+                inactive++;
+            }
+        }
+
+        const executionTimeMs = Date.now() - startTime;
+        const summary = {
+            added,
+            updated,
+            inactive,
+            unchanged,
+            executionTimeMs
+        };
+
+        // Log audit trail for sync
+        await logAudit({
+            performedBy: requesterId,
+            action: 'SYSTEM_PAGES_SYNCED',
+            targetType: 'SYSTEM_PAGES',
+            targetId: 'ALL',
+            newValues: { summary },
+            ipAddress: req.ip
+        }, client);
+
+        await client.query('COMMIT');
+        
+        return res.json({
+            success: true,
+            message: 'System pages synchronized successfully',
+            summary
+        });
+    } catch (error: any) {
+        await client.query('ROLLBACK');
+        logger.error(`Error in syncSystemPages: ${error.message}`, error);
+        return res.status(500).json({ success: false, message: 'Failed to synchronize system pages: ' + error.message });
+    } finally {
+        client.release();
     }
 };
 
