@@ -119,6 +119,11 @@ export const requirePermission = (permissionKey: string, action: 'can_view' | 'c
             return res.status(403).json({ message: 'Access Denied: Only Super Admin users are allowed to perform delete operations.' });
         }
 
+        // 2. Admin Role Bypass (Full access except Delete)
+        if (user.role === 'Admin' || (user.role || '').toString().toLowerCase().replace(/\s/g, '') === 'admin') {
+            return next();
+        }
+
         const userId = user.id;
         const version = user.permission_version || 1;
         const cacheKey = `${userId}:${version}`;

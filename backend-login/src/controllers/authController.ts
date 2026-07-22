@@ -381,6 +381,22 @@ export const getMe = async (req: any, res: Response) => {
                  WHERE is_active = TRUE`
             );
             permissions = allPages.rows;
+        } else if (user.role === 'Admin') {
+            const allPages = await pool.query(
+                `SELECT 
+                    id AS system_page_id,
+                    module_name AS module,
+                    route_path AS page,
+                    permission_key,
+                    TRUE AS can_view,
+                    TRUE AS can_create,
+                    TRUE AS can_edit,
+                    FALSE AS can_delete,
+                    TRUE AS can_export
+                 FROM system_pages 
+                 WHERE is_active = TRUE`
+            );
+            permissions = allPages.rows;
         } else {
             const permQuery = `
                 SELECT 
@@ -476,6 +492,20 @@ export const verifyTokenPermissions = async (req: Request, res: Response) => {
                     TRUE AS can_create,
                     TRUE AS can_edit,
                     TRUE AS can_delete,
+                    TRUE AS can_export
+                 FROM system_pages 
+                 WHERE is_active = TRUE`
+            );
+            permissions = allPages.rows;
+        } else if (role === 'Admin') {
+            const allPages = await pool.query(
+                `SELECT 
+                    route_path AS page,
+                    permission_key,
+                    TRUE AS can_view,
+                    TRUE AS can_create,
+                    TRUE AS can_edit,
+                    FALSE AS can_delete,
                     TRUE AS can_export
                  FROM system_pages 
                  WHERE is_active = TRUE`
