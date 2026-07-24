@@ -96,10 +96,10 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
  * Start a new Printing Session.
  */
 export const createPrintingSession = async (req: Request, res: Response) => {
-    const { work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side } = req.body;
+    const { work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side } = req.body;
     const operator = getSessionUser(req);
 
-    if (!work_order_id || !stencil_lifecycle_id || !squeegee_number || !solder_paste_barcode || !side) {
+    if (!work_order_id || !stencil_lifecycle_id || !squeegee_front_number || !squeegee_rear_number || !solder_paste_barcode || !side) {
         return res.status(400).json({ message: 'All session fields are mandatory.' });
     }
 
@@ -164,13 +164,13 @@ export const createPrintingSession = async (req: Request, res: Response) => {
 
         const insertQuery = `
             INSERT INTO smt_printing_sessions (
-                work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, status,
+                work_order_id, stencil_lifecycle_id, squeegee_number, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, status,
                 created_by, created_by_name, updated_by, updated_by_name
-            ) VALUES ($1, $2, $3, $4, $5, 'In Progress', $6, $7, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'In Progress', $8, $9, $8, $9)
             RETURNING *
         `;
         const insertRes = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, operator.username, operator.name
+            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.username, operator.name
         ]);
         const session = insertRes.rows[0];
 
@@ -1351,7 +1351,8 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
 
         // ── SECTION 3: Printing Session Details ─────────────────────────────────
         addSectionHeader('  3.  PRINTING SESSION DETAILS', INDIGO, r); r++;
-        addKVRow(r, 'Squeegee Number', session.squeegee_number); r++;
+        addKVRow(r, 'Squeegee Front Number', session.squeegee_front_number); r++;
+        addKVRow(r, 'Squeegee Rear Number', session.squeegee_rear_number); r++;
         addKVRow(r, 'Solder Paste Barcode', session.solder_paste_barcode); r++;
         addKVRow(r, 'PCB Side', session.side); r++;
         addKVRow(r, 'Printing Started By', session.created_by_name); r++;
@@ -1541,7 +1542,8 @@ export const exportPrintingSessionPdfData = async (req: Request, res: Response) 
                 remainingLifeCount: session.balance_life_cycle
             },
             session: {
-                squeegeeNumber: session.squeegee_number,
+                squeegeeFrontNumber: session.squeegee_front_number,
+                squeegeeRearNumber: session.squeegee_rear_number,
                 solderPasteBarcode: session.solder_paste_barcode,
                 pcbSide: session.side,
                 startedBy: session.created_by_name,

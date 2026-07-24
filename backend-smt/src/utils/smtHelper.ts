@@ -152,7 +152,8 @@ export const getAutoPopulateDetailsHelper = async (
         currentLifeCycleCount: parseInt(stencilLc.current_used_life_cycle, 10) || 0,
         remainingLifeCycleCount: parseInt(stencilLc.balance_life_cycle, 10) || 0,
         lifeCycleStatus: stencilMaster.status || '',
-        squeegeeNumber: printingSession.squeegee_number || '',
+        squeegeeFrontNumber: printingSession.squeegee_front_number || '',
+        squeegeeRearNumber: printingSession.squeegee_rear_number || '',
         solderPasteBarcode: printingSession.solder_paste_barcode || '',
         stencilLifecycleId: stencilLc.id
     };

@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS smt_printing_sessions (
     work_order_id VARCHAR(255) NOT NULL REFERENCES smt_work_orders(id) ON DELETE RESTRICT,
     stencil_lifecycle_id UUID NOT NULL REFERENCES smt_stencil_lifecycle(id) ON DELETE RESTRICT,
     squeegee_number VARCHAR(255) NOT NULL,
+    squeegee_front_number VARCHAR(255),
+    squeegee_rear_number VARCHAR(255),
     solder_paste_barcode VARCHAR(255) NOT NULL,
     side VARCHAR(30) NOT NULL,
     status VARCHAR(50) DEFAULT 'Pending' NOT NULL, -- Pending, In Progress, Completed, Paused, Cancelled, Aborted
