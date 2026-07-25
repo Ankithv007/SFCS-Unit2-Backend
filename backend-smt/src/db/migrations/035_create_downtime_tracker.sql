@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS smt_downtime_records (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_by VARCHAR(255),
     updated_by_name VARCHAR(255),
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    work_order_id VARCHAR(255)
 );
 
 CREATE INDEX IF NOT EXISTS idx_smt_downtime_records_line ON smt_downtime_records(line);

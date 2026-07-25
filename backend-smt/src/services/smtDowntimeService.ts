@@ -12,6 +12,7 @@ export interface DowntimeInputData {
     responsible_person: string;
     status?: string;
     remarks?: string;
+    work_order_id?: string | null;
 }
 
 export interface SessionUserInfo {
@@ -47,12 +48,25 @@ export class SmtDowntimeService {
 
         const duration = (end.getTime() - start.getTime()) / (1000 * 60);
 
+        // Validation of Work Order
+        if (data.work_order_id) {
+            const woRes = await pool.query(`SELECT smt_production_status FROM smt_work_orders WHERE id = $1`, [data.work_order_id]);
+            if (woRes.rowCount === 0) {
+                throw new Error(`Invalid Work Order ID: ${data.work_order_id} does not exist.`);
+            }
+            const woStatus = woRes.rows[0].smt_production_status.toLowerCase();
+            if (!['pending', 'in progress'].includes(woStatus)) {
+                throw new Error(`Work Order ID: ${data.work_order_id} is ${woRes.rows[0].smt_production_status}. Only Pending or In Progress Work Orders can be linked.`);
+            }
+        }
+
         const query = `
             INSERT INTO smt_downtime_records (
                 shift, line, machine_name, start_time, end_time, duration,
                 downtime_category, downtime_description, action_taken,
-                responsible_person, status, remarks, created_by, created_by_name
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                responsible_person, status, remarks, created_by, created_by_name,
+                work_order_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING *
         `;
 
@@ -70,7 +84,8 @@ export class SmtDowntimeService {
             data.status || 'Open',
             data.remarks || null,
             sessionUser.email,
-            sessionUser.name
+            sessionUser.name,
+            data.work_order_id || null
         ];
 
         const { rows } = await pool.query(query, values);
@@ -111,7 +126,10 @@ export class SmtDowntimeService {
         const validSortBy = allowedSortColumns.includes(sortBy || '') ? sortBy : 'start_time';
 
         const selectQuery = `
-            SELECT * FROM smt_downtime_records
+            SELECT r.*,
+                   wo.po_id, wo.product_name, wo.sides AS work_order_sides, wo.quantity AS work_order_quantity, wo.panel_quantity, wo.product_description
+            FROM smt_downtime_records r
+            LEFT JOIN smt_work_orders wo ON r.work_order_id = wo.id
             ${whereClause}
             ORDER BY ${validSortBy} ${sortOrder}
             LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
@@ -153,6 +171,18 @@ export class SmtDowntimeService {
 
         const duration = (end.getTime() - start.getTime()) / (1000 * 60);
 
+        // Validation of Work Order
+        if (data.work_order_id) {
+            const woRes = await pool.query(`SELECT smt_production_status FROM smt_work_orders WHERE id = $1`, [data.work_order_id]);
+            if (woRes.rowCount === 0) {
+                throw new Error(`Invalid Work Order ID: ${data.work_order_id} does not exist.`);
+            }
+            const woStatus = woRes.rows[0].smt_production_status.toLowerCase();
+            if (!['pending', 'in progress'].includes(woStatus)) {
+                throw new Error(`Work Order ID: ${data.work_order_id} is ${woRes.rows[0].smt_production_status}. Only Pending or In Progress Work Orders can be linked.`);
+            }
+        }
+
         const query = `
             UPDATE smt_downtime_records
             SET shift = $1,
@@ -169,8 +199,9 @@ export class SmtDowntimeService {
                 remarks = $12,
                 updated_by = $13,
                 updated_by_name = $14,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $15
+                updated_at = CURRENT_TIMESTAMP,
+                work_order_id = $15
+            WHERE id = $16
             RETURNING *
         `;
 
@@ -189,6 +220,7 @@ export class SmtDowntimeService {
             data.remarks || null,
             sessionUser.email,
             sessionUser.name,
+            data.work_order_id || null,
             id
         ];
 
@@ -291,4 +323,18 @@ export class SmtDowntimeService {
             }
         };
     }
+
+    /**
+     * Fetch pending work orders
+     */
+    static async getPendingWorkOrders() {
+        const { rows } = await pool.query(
+            `SELECT id, po_id, product_name, sides, quantity, panel_quantity, product_description, smt_production_status AS status
+             FROM smt_work_orders
+             WHERE LOWER(smt_production_status) IN ('pending', 'in progress')
+             ORDER BY created_at DESC`
+        );
+        return rows;
+    }
 }
+

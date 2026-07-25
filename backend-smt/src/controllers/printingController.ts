@@ -9,10 +9,11 @@ const logger = createLogger('PrintingController');
 // Helper to get session operator details
 const getSessionUser = (req: Request) => {
     const user = (req as any).user;
+    const resolvedName = user?.employee_code || user?.email || user?.name || 'Unknown User';
     return {
         id: user?.id || user?.userId || null,
-        name: user?.name || user?.email || 'Unknown User',
-        username: user?.username || user?.name || user?.email || 'unknown',
+        name: resolvedName,
+        username: resolvedName,
         role: user?.role || 'OPERATOR'
     };
 };
@@ -209,15 +210,21 @@ const fetchPrintingSessionStatsHelper = async (client: any, sessionId: string, w
     const passed = parseInt(passedRes.rows[0].count, 10) || 0;
 
     const failedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+        `SELECT COUNT(id) AS count 
          FROM smt_inspections 
          WHERE printing_session_id = $1 AND status = 'FAIL'`,
         [sessionId]
     );
     const failed = parseInt(failedRes.rows[0].count, 10) || 0;
 
-    const processed = passed + failed;
-    const pending = Math.max(0, workOrderQty - processed);
+    const processedRes = await client.query(
+        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+         FROM smt_inspections 
+         WHERE printing_session_id = $1 AND status IN ('PASS', 'FAIL')`,
+        [sessionId]
+    );
+    const processed = parseInt(processedRes.rows[0].count, 10) || 0;
+    const pending = Math.max(0, workOrderQty - passed);
 
     const invalidRes = await client.query(
         `SELECT COUNT(id) AS count 
@@ -1109,17 +1116,23 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         );
         const passed = parseInt(passedRes.rows[0].count);
 
-        // Failed: unique serials with status FAIL
+        // Failed: total failed occurrences
         const failedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+            `SELECT COUNT(id) AS count 
              FROM smt_inspections 
              WHERE printing_session_id = $1 AND status = 'FAIL'`,
             [id]
         );
         const failed = parseInt(failedRes.rows[0].count);
 
-        const processed = passed + failed;
-        const pending = Math.max(0, workOrderQty - processed);
+        const processedRes = await pool.query(
+            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+             FROM smt_inspections 
+             WHERE printing_session_id = $1 AND status IN ('PASS', 'FAIL')`,
+            [id]
+        );
+        const processed = parseInt(processedRes.rows[0].count);
+        const pending = Math.max(0, workOrderQty - passed);
 
         // Invalid: total invalid scan attempts
         const invalidRes = await pool.query(
@@ -1201,11 +1214,11 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
             `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'PASS'`, [id]
         );
         const failedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'FAIL'`, [id]
+            `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'FAIL'`, [id]
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, (session.work_order_quantity || 0) - passed - failed);
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'INVALID'`, [id]
@@ -1495,11 +1508,11 @@ export const exportPrintingSessionPdfData = async (req: Request, res: Response) 
             `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'PASS'`, [id]
         );
         const failedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'FAIL'`, [id]
+            `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'FAIL'`, [id]
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, (session.work_order_quantity || 0) - passed - failed);
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'INVALID'`, [id]

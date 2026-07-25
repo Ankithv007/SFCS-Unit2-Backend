@@ -167,7 +167,8 @@ export const login = async (req: Request, res: Response) => {
             id: user.id, 
             email: user.email, 
             role: user.role, 
-            permission_version: user.permission_version || 1 
+            permission_version: user.permission_version || 1,
+            employee_code: user.employee_code || null
         });
         res.json({
             token,
@@ -449,7 +450,8 @@ export const getMe = async (req: any, res: Response) => {
                 id: user.id,
                 email: user.email,
                 role: user.role,
-                permission_version: user.permission_version || 1
+                permission_version: user.permission_version || 1,
+                employee_code: user.employee_code || null
             });
             responsePayload.token = refreshedToken;
         }

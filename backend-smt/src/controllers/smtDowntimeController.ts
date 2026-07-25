@@ -28,7 +28,8 @@ export const createDowntimeRecord = async (req: Request, res: Response) => {
         downtime_description,
         action_taken,
         responsible_person,
-        remarks
+        remarks,
+        work_order_id
     } = req.body;
 
     if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person) {
@@ -46,7 +47,8 @@ export const createDowntimeRecord = async (req: Request, res: Response) => {
             downtime_description,
             action_taken,
             responsible_person,
-            remarks
+            remarks,
+            work_order_id
         }, sessionUser);
 
         logger.info(`Downtime record created: ${record.id} by ${sessionUser.name}`);
@@ -92,7 +94,8 @@ export const updateDowntimeRecord = async (req: Request, res: Response) => {
         downtime_description,
         action_taken,
         responsible_person,
-        remarks
+        remarks,
+        work_order_id
     } = req.body;
 
     if (!shift || !line || !machine_name || !start_time || !end_time || !downtime_category || !downtime_description || !action_taken || !responsible_person) {
@@ -110,7 +113,8 @@ export const updateDowntimeRecord = async (req: Request, res: Response) => {
             downtime_description,
             action_taken,
             responsible_person,
-            remarks
+            remarks,
+            work_order_id
         }, sessionUser);
 
         if (!updatedRecord) {
@@ -153,3 +157,17 @@ export const getDowntimeDashboard = async (req: Request, res: Response) => {
         return res.status(500).json({ success: false, message: err.message || 'Internal Server Error' });
     }
 };
+
+export const getPendingWorkOrders = async (req: Request, res: Response) => {
+    try {
+        const wos = await SmtDowntimeService.getPendingWorkOrders();
+        return res.status(200).json({
+            success: true,
+            data: wos
+        });
+    } catch (err: any) {
+        logger.error(`Error getting pending work orders for downtime: ${err.message}`);
+        return res.status(500).json({ success: false, message: err.message || 'Internal Server Error' });
+    }
+};
+

@@ -470,14 +470,17 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'FAIL').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'FAIL',
-                        scanned_by: s.stepLatest['Printing']?.scanned_by,
-                        scanned_at: s.stepLatest['Printing']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['Printing']?.rework_reason
-                    }));
+                    filtered = mappedSerials.filter(s => s.history.some((h: any) => h.process_step === 'Printing' && h.status === 'FAIL')).map(s => {
+                        const failInsp = s.history.find((h: any) => h.process_step === 'Printing' && h.status === 'FAIL');
+                        return {
+                            serial_number: s.serial_number,
+                            status: s.stepLatest['Printing']?.status || 'FAIL',
+                            scanned_by: failInsp?.scanned_by || s.stepLatest['Printing']?.scanned_by,
+                            scanned_at: failInsp?.scanned_at || s.stepLatest['Printing']?.scanned_at,
+                            previous_stage: getSMTPreviousStage(s, stageStr),
+                            rework_reason: failInsp?.rework_reason || s.stepLatest['Printing']?.rework_reason
+                        };
+                    });
                 } else if (normType === 'pending') {
                     filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status !== 'PASS').map(s => ({
                         serial_number: s.serial_number,
@@ -512,14 +515,17 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'FAIL').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'FAIL',
-                        scanned_by: s.stepLatest['Pre AOI']?.scanned_by,
-                        scanned_at: s.stepLatest['Pre AOI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['Pre AOI']?.rework_reason
-                    }));
+                    filtered = mappedSerials.filter(s => s.history.some((h: any) => (h.process_step === 'Pre AOI' || h.process_step === 'Pre_AOI') && h.status === 'FAIL')).map(s => {
+                        const failInsp = s.history.find((h: any) => (h.process_step === 'Pre AOI' || h.process_step === 'Pre_AOI') && h.status === 'FAIL');
+                        return {
+                            serial_number: s.serial_number,
+                            status: s.stepLatest['Pre AOI']?.status || 'FAIL',
+                            scanned_by: failInsp?.scanned_by || s.stepLatest['Pre AOI']?.scanned_by,
+                            scanned_at: failInsp?.scanned_at || s.stepLatest['Pre AOI']?.scanned_at,
+                            previous_stage: getSMTPreviousStage(s, stageStr),
+                            rework_reason: failInsp?.rework_reason || s.stepLatest['Pre AOI']?.rework_reason
+                        };
+                    });
                 } else if (normType === 'spi_passed' || normType === 'printing_passed' || normType === 'previous_passed') {
                     filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
                         serial_number: s.serial_number,
@@ -572,14 +578,17 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'FAIL').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'FAIL',
-                        scanned_by: s.stepLatest['Post AOI']?.scanned_by,
-                        scanned_at: s.stepLatest['Post AOI']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['Post AOI']?.rework_reason
-                    }));
+                    filtered = mappedSerials.filter(s => s.history.some((h: any) => (h.process_step === 'Post AOI' || h.process_step === 'Post_AOI') && h.status === 'FAIL')).map(s => {
+                        const failInsp = s.history.find((h: any) => (h.process_step === 'Post AOI' || h.process_step === 'Post_AOI') && h.status === 'FAIL');
+                        return {
+                            serial_number: s.serial_number,
+                            status: s.stepLatest['Post AOI']?.status || 'FAIL',
+                            scanned_by: failInsp?.scanned_by || s.stepLatest['Post AOI']?.scanned_by,
+                            scanned_at: failInsp?.scanned_at || s.stepLatest['Post AOI']?.scanned_at,
+                            previous_stage: getSMTPreviousStage(s, stageStr),
+                            rework_reason: failInsp?.rework_reason || s.stepLatest['Post AOI']?.rework_reason
+                        };
+                    });
                 } else if (normType === 'pre_aoi_passed' || normType === 'previous_passed') {
                     filtered = mappedSerials.filter(s => s.stepLatest['Pre AOI']?.status === 'PASS').map(s => ({
                         serial_number: s.serial_number,
@@ -713,14 +722,17 @@ export const getCountDetails = async (req: Request, res: Response) => {
                         rework_reason: null
                     }));
                 } else if (normType === 'failed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['SMT FG']?.status === 'FAIL').map(s => ({
-                        serial_number: s.serial_number,
-                        status: 'FAIL',
-                        scanned_by: s.stepLatest['SMT FG']?.scanned_by,
-                        scanned_at: s.stepLatest['SMT FG']?.scanned_at,
-                        previous_stage: getSMTPreviousStage(s, stageStr),
-                        rework_reason: s.stepLatest['SMT FG']?.rework_reason
-                    }));
+                    filtered = mappedSerials.filter(s => s.history.some((h: any) => (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && h.status === 'FAIL')).map(s => {
+                        const failInsp = s.history.find((h: any) => (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && h.status === 'FAIL');
+                        return {
+                            serial_number: s.serial_number,
+                            status: s.stepLatest['SMT FG']?.status || 'FAIL',
+                            scanned_by: failInsp?.scanned_by || s.stepLatest['SMT FG']?.scanned_by,
+                            scanned_at: failInsp?.scanned_at || s.stepLatest['SMT FG']?.scanned_at,
+                            previous_stage: getSMTPreviousStage(s, stageStr),
+                            rework_reason: failInsp?.rework_reason || s.stepLatest['SMT FG']?.rework_reason
+                        };
+                    });
                 } else if (normType === 'post_aoi_passed' || normType === 'previous_passed') {
                     filtered = mappedSerials.filter(s => s.stepLatest['Post AOI']?.status === 'PASS').map(s => ({
                         serial_number: s.serial_number,

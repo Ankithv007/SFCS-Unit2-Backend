@@ -9,10 +9,11 @@ const logger = createLogger('PostAoiController');
 // Helper to get session operator details
 const getSessionUser = (req: Request) => {
     const user = (req as any).user;
+    const resolvedName = user?.employee_code || user?.email || user?.name || 'Unknown User';
     return {
         id: user?.id || user?.userId || null,
-        name: user?.name || user?.email || 'Unknown User',
-        username: user?.username || user?.name || user?.email || 'unknown',
+        name: resolvedName,
+        username: resolvedName,
         role: user?.role || 'OPERATOR'
     };
 };
@@ -96,10 +97,10 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
  * Start a new Post AOI Session.
  */
 export const createPostAoiSession = async (req: Request, res: Response) => {
-    const { work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side } = req.body;
+    const { work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side } = req.body;
     const operator = getSessionUser(req);
 
-    if (!work_order_id || !stencil_lifecycle_id || !squeegee_number || !solder_paste_barcode || !side) {
+    if (!work_order_id || !stencil_lifecycle_id || !squeegee_front_number || !squeegee_rear_number || !solder_paste_barcode || !side) {
         return res.status(400).json({ message: 'All session fields are mandatory.' });
     }
 
@@ -199,13 +200,13 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
 
         const insertQuery = `
             INSERT INTO smt_post_aoi_sessions (
-                work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, status,
+                work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, status,
                 created_by, created_by_name, updated_by, updated_by_name
-            ) VALUES ($1, $2, $3, $4, $5, 'In Progress', $6, $7, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, 'In Progress', $7, $8, $7, $8)
             RETURNING *
         `;
         const result = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, operator.name, operator.name
+            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
         ]);
         const session = result.rows[0];
 
@@ -243,15 +244,21 @@ const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, wo
     const passed = parseInt(passedRes.rows[0].count, 10) || 0;
 
     const failedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+        `SELECT COUNT(id) AS count 
          FROM smt_inspections 
          WHERE post_aoi_session_id = $1 AND status = 'FAIL'`,
         [sessionId]
     );
     const failed = parseInt(failedRes.rows[0].count, 10) || 0;
 
-    const processed = passed + failed;
-    const pending = Math.max(0, workOrderQty - processed);
+    const processedRes = await client.query(
+        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
+         FROM smt_inspections 
+         WHERE post_aoi_session_id = $1 AND status IN ('PASS', 'FAIL')`,
+        [sessionId]
+    );
+    const processed = parseInt(processedRes.rows[0].count, 10) || 0;
+    const pending = Math.max(0, workOrderQty - passed);
 
     const invalidRes = await client.query(
         `SELECT COUNT(id) AS count 
@@ -1300,7 +1307,8 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
 
         // SECTION 3: Session Details
         addSectionHeader('  3.  POST AOI SESSION DETAILS', INDIGO, r); r++;
-        addKVRow(r, 'Squeegee Number', session.squeegee_number); r++;
+        addKVRow(r, 'Squeegee Front Number', session.squeegee_front_number); r++;
+        addKVRow(r, 'Squeegee Rear Number', session.squeegee_rear_number); r++;
         addKVRow(r, 'Solder Paste Barcode', session.solder_paste_barcode); r++;
         addKVRow(r, 'PCB Side', session.side); r++;
         addKVRow(r, 'Post AOI Started By', session.created_by_name); r++;
@@ -1487,7 +1495,8 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
                 remainingLifeCount: session.balance_life_cycle
             },
             session: {
-                squeegeeNumber: session.squeegee_number,
+                squeegeeFrontNumber: session.squeegee_front_number,
+                squeegeeRearNumber: session.squeegee_rear_number,
                 solderPasteBarcode: session.solder_paste_barcode,
                 pcbSide: session.side,
                 startedBy: session.created_by_name,

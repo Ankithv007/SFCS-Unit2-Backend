@@ -9,10 +9,11 @@ const logger = createLogger('FgController');
 // Helper to get session operator details
 const getSessionUser = (req: Request) => {
     const user = (req as any).user;
+    const resolvedName = user?.employee_code || user?.email || user?.name || 'Unknown User';
     return {
         id: user?.id || user?.userId || null,
-        name: user?.name || user?.email || 'Unknown User',
-        username: user?.username || user?.name || user?.email || 'unknown',
+        name: resolvedName,
+        username: resolvedName,
         role: user?.role || 'OPERATOR'
     };
 };
@@ -22,10 +23,10 @@ const getSessionUser = (req: Request) => {
  * Start a new SMT FG Session.
  */
 export const createFgSession = async (req: Request, res: Response) => {
-    const { work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side } = req.body;
+    const { work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side } = req.body;
     const operator = getSessionUser(req);
 
-    if (!work_order_id || !stencil_lifecycle_id || !squeegee_number || !solder_paste_barcode || !side) {
+    if (!work_order_id || !stencil_lifecycle_id || !squeegee_front_number || !squeegee_rear_number || !solder_paste_barcode || !side) {
         return res.status(400).json({ message: 'All session fields are mandatory.' });
     }
 
@@ -44,8 +45,8 @@ export const createFgSession = async (req: Request, res: Response) => {
 
         if (activeCheck.rows.length > 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'An active SMT FG Session already exists for this Work Order. Please resume the existing session.' 
+            return res.status(400).json({
+                message: 'An active SMT FG Session already exists for this Work Order. Please resume the existing session.'
             });
         }
 
@@ -110,13 +111,13 @@ export const createFgSession = async (req: Request, res: Response) => {
 
         const insertQuery = `
             INSERT INTO smt_fg_sessions (
-                work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, status,
+                work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, status,
                 created_by, created_by_name, updated_by, updated_by_name
-            ) VALUES ($1, $2, $3, $4, $5, 'In Progress', $6, $7, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, 'In Progress', $7, $8, $7, $8)
             RETURNING *
         `;
         const result = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_number, solder_paste_barcode, side, operator.name, operator.name
+            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
         ]);
         const session = result.rows[0];
 
@@ -163,7 +164,7 @@ const fetchFgSessionStatsHelper = async (client: any, sessionId: string, workOrd
 
     const failed = 0;
     const processed = passed + failed;
-    const pending = Math.max(0, workOrderQty - processed);
+    const pending = Math.max(0, workOrderQty - passed);
 
     const invalidRes = await client.query(
         `SELECT COUNT(id) AS count 
@@ -561,8 +562,8 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         if (session.status !== 'In Progress') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.` 
+            return res.status(400).json({
+                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.`
             });
         }
 
@@ -668,7 +669,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             const workOrderQty = woResQty.rows[0]?.quantity || 0;
             const stats = await fetchFgSessionStatsHelper(client, id, workOrderQty);
             await client.query('COMMIT');
-            return res.status(409).json({ 
+            return res.status(409).json({
                 success: false,
                 isValid: true,
                 isCompleted: false,
@@ -802,7 +803,7 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         // FG has no failure mode but tracks invalid scan attempts
         const failed = 0;
         const processed = passed + failed;
-        const pending = Math.max(0, workOrderQty - processed);
+        const pending = Math.max(0, workOrderQty - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count 
@@ -880,7 +881,7 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = 0;
-        const pending = Math.max(0, (session.work_order_quantity || 0) - passed - failed);
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count FROM smt_inspections WHERE fg_session_id = $1 AND status = 'INVALID'`, [id]
@@ -906,18 +907,18 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
             pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true }
         });
 
-        const NAVY:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
-        const BLUE:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
-        const TEAL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
+        const NAVY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+        const BLUE: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+        const TEAL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
         const INDIGO: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } };
-        const PLUM:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
+        const PLUM: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
         const GREEN: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF15803D' } };
         const LIGHT_GRAY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
-        const WHITE_FILL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+        const WHITE_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
 
-        const WHITE_FONT  = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
-        const DARK_FONT   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
-        const BOLD_DARK   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
+        const WHITE_FONT = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
+        const DARK_FONT = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
+        const BOLD_DARK = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
 
         const thinBorder: Partial<ExcelJS.Borders> = {
             top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
@@ -1022,7 +1023,8 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
 
         // SECTION 3: Session Details
         addSectionHeader('  3.  SMT FG SESSION DETAILS', INDIGO, r); r++;
-        addKVRow(r, 'Squeegee Number', session.squeegee_number); r++;
+        addKVRow(r, 'Squeegee Front Number', session.squeegee_front_number); r++;
+        addKVRow(r, 'Squeegee Rear Number', session.squeegee_rear_number); r++;
         addKVRow(r, 'Solder Paste Barcode', session.solder_paste_barcode); r++;
         addKVRow(r, 'PCB Side', session.side); r++;
         addKVRow(r, 'SMT FG Released By', session.created_by_name); r++;

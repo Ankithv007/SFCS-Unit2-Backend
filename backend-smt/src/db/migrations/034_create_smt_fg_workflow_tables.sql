@@ -15,7 +15,9 @@ CREATE TABLE IF NOT EXISTS smt_fg_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     work_order_id VARCHAR(255) NOT NULL REFERENCES smt_work_orders(id) ON DELETE RESTRICT,
     stencil_lifecycle_id UUID NOT NULL REFERENCES smt_stencil_lifecycle(id) ON DELETE RESTRICT,
-    squeegee_number VARCHAR(255) NOT NULL,
+    squeegee_number VARCHAR(255),
+    squeegee_front_number VARCHAR(255),
+    squeegee_rear_number VARCHAR(255),
     solder_paste_barcode VARCHAR(255) NOT NULL,
     side VARCHAR(30) NOT NULL,
     status VARCHAR(50) DEFAULT 'Pending' NOT NULL, -- Pending, In Progress, Completed, Cancelled, Aborted
@@ -33,6 +35,10 @@ CREATE TABLE IF NOT EXISTS smt_fg_sessions (
     deleted_by_name VARCHAR(255),
     deleted_at TIMESTAMP
 );
+
+-- Add squeegee front/rear columns to existing smt_fg_sessions table (idempotent)
+ALTER TABLE smt_fg_sessions ADD COLUMN IF NOT EXISTS squeegee_front_number VARCHAR(255);
+ALTER TABLE smt_fg_sessions ADD COLUMN IF NOT EXISTS squeegee_rear_number VARCHAR(255);
 
 -- 3. Extend smt_inspections table for SMT FG session ID link
 ALTER TABLE smt_inspections ADD COLUMN IF NOT EXISTS fg_session_id UUID REFERENCES smt_fg_sessions(id) ON DELETE SET NULL;
