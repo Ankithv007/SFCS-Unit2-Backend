@@ -1101,8 +1101,38 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
                 ins.rework_reason AS remark,
                 ins.scanned_by,
                 ins.scanned_at,
-                ins.repair_time,
-                ins.repair_remark
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_time,
+                            (SELECT r.repair_time 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_time,
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_remark,
+                            (SELECT r.repair_remark 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_remark
             FROM smt_inspections ins
             WHERE ins.post_aoi_session_id = $1
             ORDER BY ins.scanned_at DESC
@@ -1174,8 +1204,45 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
 
         // Scans list
         const scansRes = await pool.query(
-            `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at, repair_time, repair_remark
-             FROM smt_inspections WHERE post_aoi_session_id = $1 ORDER BY scanned_at ASC`,
+            `SELECT 
+                ins.scanned_barcode AS barcode,
+                ins.status AS result,
+                ins.rework_reason AS remark,
+                ins.scanned_by,
+                ins.scanned_at,
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_time,
+                            (SELECT r.repair_time 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_time,
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_remark,
+                            (SELECT r.repair_remark 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_remark
+             FROM smt_inspections ins WHERE ins.post_aoi_session_id = $1 ORDER BY ins.scanned_at ASC`,
             [id]
         );
 
@@ -1460,8 +1527,45 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
         const invalid = parseInt(invalidRes.rows[0].count);
 
         const scansRes = await pool.query(
-            `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at, repair_time, repair_remark
-             FROM smt_inspections WHERE post_aoi_session_id = $1 ORDER BY scanned_at ASC`,
+            `SELECT 
+                ins.scanned_barcode AS barcode,
+                ins.status AS result,
+                ins.rework_reason AS remark,
+                ins.scanned_by,
+                ins.scanned_at,
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_time,
+                            (SELECT r.repair_time 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_time,
+                CASE 
+                    WHEN ins.status = 'PASS' THEN
+                        COALESCE(
+                            ins.repair_remark,
+                            (SELECT r.repair_remark 
+                             FROM smt_inspections r 
+                             WHERE r.process_step = 'Rework' 
+                               AND r.status = 'PASS' 
+                               AND (
+                                 (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
+                                 OR (r.scanned_barcode = ins.scanned_barcode)
+                               )
+                             ORDER BY r.scanned_at DESC LIMIT 1)
+                        )
+                    ELSE NULL
+                END AS repair_remark
+             FROM smt_inspections ins WHERE ins.post_aoi_session_id = $1 ORDER BY ins.scanned_at ASC`,
             [id]
         );
 
