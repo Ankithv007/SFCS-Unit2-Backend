@@ -273,7 +273,14 @@ const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, wor
         SELECT COUNT(*) AS count FROM latest_post_aoi WHERE status = 'FAIL'`,
         [workOrderId, side]
     );
-    const workOrderQty = parseInt(targetRes.rows[0].count, 10) || 0;
+    const reworkTargetQty = parseInt(targetRes.rows[0].count, 10) || 0;
+
+    // Actual Work Order Quantity
+    const woRes = await client.query(
+        `SELECT quantity FROM smt_work_orders WHERE id = $1`,
+        [workOrderId]
+    );
+    const workOrderQtyActual = woRes.rows[0]?.quantity || 0;
 
     // Passed: unique serials with status PASS in this rework session
     const passedRes = await client.query(
@@ -293,8 +300,7 @@ const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, wor
     );
     const failed = parseInt(failedRes.rows[0].count, 10) || 0;
 
-    const processed = passed + failed;
-    const pending = Math.max(0, workOrderQty - passed);
+    const pending = Math.max(0, workOrderQtyActual - passed);
 
     const invalidRes = await client.query(
         `SELECT COUNT(id) AS count 
@@ -316,7 +322,8 @@ const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, wor
         pending,
         invalid,
         duplicate,
-        workOrderQuantity: workOrderQty
+        workOrderQuantity: workOrderQtyActual,
+        reworkTargetQty
     };
 };
 
@@ -1054,6 +1061,12 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         );
         const reworkTargetQty = parseInt(targetRes.rows[0].count, 10) || 0;
 
+        const woRes = await pool.query(
+            `SELECT quantity FROM smt_work_orders WHERE id = $1`,
+            [session.work_order_id]
+        );
+        const workOrderQtyActual = woRes.rows[0]?.quantity || 0;
+
         // Passed: unique serials with status PASS in this rework session
         const passedRes = await pool.query(
             `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
@@ -1072,8 +1085,7 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         );
         const failed = parseInt(failedRes.rows[0].count);
 
-        const processed = passed + failed;
-        const pending = Math.max(0, reworkTargetQty - passed);
+        const pending = Math.max(0, workOrderQtyActual - passed);
 
         // Invalid: total invalid scan attempts
         const invalidRes = await pool.query(
@@ -1102,8 +1114,8 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         const scansListRes = await pool.query(scansListQuery, [id]);
 
         return res.status(200).json({
-            workOrderQuantity: reworkTargetQty,
-            processedQuantity: processed,
+            workOrderQuantity: workOrderQtyActual,
+            reworkTargetQty,
             passed,
             failed,
             pending,
@@ -1172,7 +1184,7 @@ export const exportReworkSessionExcel = async (req: Request, res: Response) => {
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, reworkTargetQty - passed);
+        const pending = Math.max(0, session.work_order_quantity - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count FROM smt_inspections WHERE rework_session_id = $1 AND status = 'INVALID'`, [id]
@@ -1325,18 +1337,12 @@ export const exportReworkSessionExcel = async (req: Request, res: Response) => {
         r++; // Spacer
 
         // SECTION 4: Production Summary
-        const yieldPercent = (session.work_order_quantity && session.work_order_quantity > 0)
-            ? ((passed / session.work_order_quantity) * 100).toFixed(2) + '%'
-            : (reworkTargetQty && reworkTargetQty > 0)
-                ? ((passed / reworkTargetQty) * 100).toFixed(2) + '%'
-                : '0.00%';
-
         addSectionHeader('  4.  PRODUCTION SUMMARY', PLUM, r); r++;
+        addKVRow(r, 'Work Order Quantity', session.work_order_quantity); r++;
         addKVRow(r, 'Rework Target Quantity', reworkTargetQty); r++;
         addKVRow(r, 'Repaired (Passed) Quantity', passed); r++;
-        addKVRow(r, 'Yield (%)', yieldPercent); r++;
         addKVRow(r, 'Failed Quantity', failed); r++;
-        addKVRow(r, 'Pending Rework Quantity', pending); r++;
+        addKVRow(r, 'Pending Quantity', pending); r++;
         addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
         addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count); r++;
 
@@ -1476,7 +1482,7 @@ export const exportReworkSessionPdfData = async (req: Request, res: Response) =>
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, reworkTargetQty - passed);
+        const pending = Math.max(0, session.work_order_quantity - passed);
 
         const invalidRes = await pool.query(
             `SELECT COUNT(id) AS count FROM smt_inspections WHERE rework_session_id = $1 AND status = 'INVALID'`, [id]
@@ -1528,7 +1534,8 @@ export const exportReworkSessionPdfData = async (req: Request, res: Response) =>
                 status: session.status
             },
             production: {
-                quantity: reworkTargetQty, // target quantity is failed boards
+                quantity: session.work_order_quantity,
+                reworkTargetQty,
                 passed,
                 failed,
                 pending,

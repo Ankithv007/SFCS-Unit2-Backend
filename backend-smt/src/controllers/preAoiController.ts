@@ -251,13 +251,6 @@ const fetchPreAoiSessionStatsHelper = async (client: any, sessionId: string, wor
     );
     const failed = parseInt(failedRes.rows[0].count, 10) || 0;
 
-    const processedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-         FROM smt_inspections 
-         WHERE pre_aoi_session_id = $1 AND status IN ('PASS', 'FAIL')`,
-        [sessionId]
-    );
-    const processed = parseInt(processedRes.rows[0].count, 10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
     const invalidRes = await client.query(
@@ -1122,13 +1115,6 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         );
         const failed = parseInt(failedRes.rows[0].count);
 
-        const processedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE pre_aoi_session_id = $1 AND status IN ('PASS', 'FAIL')`,
-            [id]
-        );
-        const processed = parseInt(processedRes.rows[0].count);
         const pending = Math.max(0, workOrderQty - passed);
 
         // Invalid: total invalid scan attempts
@@ -1159,7 +1145,6 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
 
         return res.status(200).json({
             workOrderQuantity: workOrderQty,
-            processedQuantity: processed,
             passed,
             failed,
             pending,

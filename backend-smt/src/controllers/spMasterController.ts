@@ -384,10 +384,9 @@ export const startSession = async (req: Request, res: Response) => {
         let can = canRow.rows[0];
 
         // Concurrency Check: Is this can available?
-        // Available means: is_active = true, expiry_date >= current_date, remaining weight > 0, and no session with working_expires_at >= CURRENT_TIMESTAMP
         const activeSessionEx = await client.query(
             `SELECT id FROM smt_solder_paste_sessions 
-             WHERE can_id = $1 AND working_expires_at >= CURRENT_TIMESTAMP`, [can_id]
+             WHERE can_id = $1 AND is_deleted = false AND status NOT IN ('COMPLETED', 'DISCARDED')`, [can_id]
         );
         const remainingWeight = Number(can.total_weight_g) - Number(can.used_weight_g);
         const isExpired = new Date(can.expiry_date) < new Date(new Date().toDateString());
@@ -397,14 +396,15 @@ export const startSession = async (req: Request, res: Response) => {
         if (!can.is_active || isExpired || remainingWeight <= 0 || activeSessionEx.rows.length > 0) {
             // Can is unavailable! Find the NEXT available FIFO Can for the same master_id
             const nextCanEx = await client.query(
-                `SELECT c.* FROM smt_solder_paste_cans c
+                `SELECT c.*, m.model, m.make FROM smt_solder_paste_cans c
+                 JOIN smt_solder_paste_master m ON c.master_id = m.id
                  WHERE c.master_id = $1
                    AND c.is_active = true
                    AND c.expiry_date >= CURRENT_DATE
                    AND (c.total_weight_g - c.used_weight_g) > 0
                    AND c.id NOT IN (
                        SELECT can_id FROM smt_solder_paste_sessions 
-                       WHERE working_expires_at >= CURRENT_TIMESTAMP
+                       WHERE is_deleted = false AND status NOT IN ('COMPLETED', 'DISCARDED')
                    )
                  ORDER BY c.expiry_date ASC, c.can_id ASC
                  FOR UPDATE OF c
@@ -425,17 +425,39 @@ export const startSession = async (req: Request, res: Response) => {
         const workingExpiresAt = new Date(thawingReadyAt.getTime()  + Number(can.max_working_hours) * 3600000);
 
         const { rows } = await client.query(
-            `INSERT INTO smt_solder_paste_sessions (can_id, removed_at, thawing_ready_at, working_expires_at, operator, notes)
-             VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-            [targetCanId, removedAt, thawingReadyAt, workingExpiresAt, actor, notes || null]
+            `INSERT INTO smt_solder_paste_sessions (
+                can_id, removed_at, thawing_ready_at, working_expires_at, operator, notes,
+                model_id, model_name, make, can_barcode, manufacturing_date, expiry_date,
+                total_weight_g, min_thawing_hours, max_working_hours, status, created_by, updated_by
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+            [
+                targetCanId, removedAt, thawingReadyAt, workingExpiresAt, actor, notes || null,
+                can.master_id, can.model, can.make, can.can_id, can.manufacturing_date, can.expiry_date,
+                can.total_weight_g, can.min_thawing_hours, can.max_working_hours, 'THAWING', actor, actor
+            ]
         );
         const session = rows[0];
 
-        // Audit Trail
+        // Audit Trail in Solder Paste Usage History
         await client.query(
             `INSERT INTO smt_solder_paste_usage_history (can_id, master_id, weight_used_g, operator, action, notes)
              VALUES ($1, $2, 0, $3, 'SESSION_START', $4)`,
-            [targetCanId, can.master_id, actor, `Session started for can ${can.can_id}`]
+             [targetCanId, can.master_id, actor, `Session started for can ${can.can_id}`]
+        );
+
+        // Centralized Audit Log
+        await client.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                'CREATE',
+                'SOLDER_PASTE_SESSION',
+                session.id,
+                actor,
+                `Active session created for Can ID ${can.can_id} (Model: ${can.model}, Make: ${can.make}). Thawing started.`,
+                JSON.stringify(session)
+            ]
         );
 
         await client.query('COMMIT');
@@ -453,7 +475,9 @@ export const getLatestSession = async (req: Request, res: Response) => {
     if (!canId) return res.status(400).json({ error: 'canId is required' });
     try {
         const { rows } = await pool.query(
-            `SELECT * FROM smt_solder_paste_sessions WHERE can_id = $1 ORDER BY removed_at DESC LIMIT 1`,
+            `SELECT * FROM smt_solder_paste_sessions 
+             WHERE can_id = $1 AND is_deleted = false 
+             ORDER BY removed_at DESC LIMIT 1`,
             [canId]
         );
         if (!rows.length) return res.status(404).json({ error: 'No session found' });
@@ -463,8 +487,6 @@ export const getLatestSession = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to fetch session: ' + err.message });
     }
 };
-
-// ─── Weight Consumption ────────────────────────────────────────────────────────
 
 /** POST /sp-master/consume */
 export const recordConsumption = async (req: Request, res: Response) => {
@@ -499,6 +521,28 @@ export const recordConsumption = async (req: Request, res: Response) => {
             [newUsed, actor, can_id]
         );
 
+        // Transition session status if exists
+        const remainingWeightAfter = Number(can.total_weight_g) - newUsed;
+        const newStatus = remainingWeightAfter <= 0 ? 'COMPLETED' : 'IN_USE';
+
+        let activeSessionId = session_id;
+        const activeSessionRes = await client.query(
+            `SELECT id FROM smt_solder_paste_sessions 
+             WHERE can_id = $1 AND is_deleted = false AND status NOT IN ('COMPLETED', 'DISCARDED')
+             ORDER BY removed_at DESC LIMIT 1`,
+            [can_id]
+        );
+
+        if (activeSessionRes.rows.length > 0) {
+            activeSessionId = activeSessionRes.rows[0].id;
+            await client.query(
+                `UPDATE smt_solder_paste_sessions 
+                 SET status=$1, updated_by=$2, updated_at=CURRENT_TIMESTAMP 
+                 WHERE id=$3`,
+                [newStatus, actor, activeSessionId]
+            );
+        }
+
         // Audit Trail (consolidated under usage history table)
         const { rows: historyRows } = await client.query(
             `INSERT INTO smt_solder_paste_usage_history 
@@ -506,6 +550,22 @@ export const recordConsumption = async (req: Request, res: Response) => {
              VALUES ($1,$2,$3,$4,'CONSUME',$5) RETURNING *`,
             [can_id, can.master_id, weight_consumed_g, actor, notes || `Consumed ${weight_consumed_g}g`]
         );
+
+        // Centralized Audit Log
+        if (activeSessionId) {
+            await client.query(
+                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [
+                    'UPDATE',
+                    'SOLDER_PASTE_SESSION',
+                    activeSessionId,
+                    actor,
+                    `Consumption of ${weight_consumed_g}g recorded. Remaining: ${remainingWeightAfter.toFixed(2)}g. Status updated to ${newStatus}.`,
+                    JSON.stringify({ can_id, weight_consumed_g, remaining: remainingWeightAfter, status: newStatus })
+                ]
+            );
+        }
 
         const newRemaining = Number(can.total_weight_g) - newUsed;
         await client.query('COMMIT');
@@ -540,4 +600,223 @@ export const getConsumptionHistory = async (req: Request, res: Response) => {
         logger.error('getConsumptionHistory:', err);
         return res.status(500).json({ error: 'Failed to fetch history: ' + err.message });
     }
+};
+
+/** GET /sp-master/active-sessions */
+export const getActiveSessions = async (req: Request, res: Response) => {
+    const { search = '', sort = 'removed_desc', page = '1', limit = '10' } = req.query as Record<string, string>;
+    try {
+        const params: any[] = [];
+        const conds: string[] = ['s.is_deleted = false'];
+
+        if (search.trim()) {
+            params.push(`%${search.trim().toLowerCase()}%`);
+            const p = `$${params.length}`;
+            conds.push(`(LOWER(s.model_name) LIKE ${p} OR LOWER(s.make) LIKE ${p} OR LOWER(s.can_barcode) LIKE ${p} OR LOWER(s.operator) LIKE ${p})`);
+        }
+
+        const where = 'WHERE ' + conds.join(' AND ');
+        
+        const orderMap: Record<string, string> = {
+            removed_asc:   's.removed_at ASC',
+            removed_desc:  's.removed_at DESC',
+            model_asc:     's.model_name ASC',
+            model_desc:    's.model_name DESC',
+            can_asc:       's.can_barcode ASC',
+            can_desc:      's.can_barcode DESC',
+        };
+        const order = orderMap[sort] ?? 's.removed_at DESC';
+
+        const pg = Math.max(1, parseInt(page));
+        const lim = Math.min(200, Math.max(1, parseInt(limit)));
+        const offset = (pg - 1) * lim;
+
+        const countQuery = `
+            SELECT COUNT(*)::int AS total 
+            FROM smt_solder_paste_sessions s
+            ${where}
+        `;
+        const countRes = await pool.query(countQuery, params);
+        const total = countRes.rows[0].total;
+
+        const dataQuery = `
+            SELECT s.*,
+                   c.used_weight_g,
+                   (s.total_weight_g - c.used_weight_g) AS remaining_weight_g
+            FROM smt_solder_paste_sessions s
+            LEFT JOIN smt_solder_paste_cans c ON s.can_id = c.id
+            ${where}
+            ORDER BY ${order}
+            LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        `;
+        const dataRes = await pool.query(dataQuery, [...params, lim, offset]);
+
+        // Dynamically calculate status for each record
+        const now = new Date();
+        const records = dataRes.rows.map(row => {
+            const remainingWeight = Number(row.remaining_weight_g ?? row.total_weight_g);
+            const isCanExpired = new Date(row.expiry_date) < now;
+            const thawingReadyAt = new Date(row.thawing_ready_at);
+            const workingExpiresAt = new Date(row.working_expires_at);
+
+            let calculatedStatus = row.status || 'THAWING';
+
+            if (row.is_deleted) {
+                calculatedStatus = 'DISCARDED';
+            } else if (remainingWeight <= 0) {
+                calculatedStatus = 'COMPLETED';
+            } else if (isCanExpired || now > workingExpiresAt) {
+                calculatedStatus = 'EXPIRED';
+            } else if (now >= thawingReadyAt && now < workingExpiresAt) {
+                if (Number(row.used_weight_g) > 0) {
+                    calculatedStatus = 'IN_USE';
+                } else {
+                    calculatedStatus = 'READY';
+                }
+            } else if (now < thawingReadyAt) {
+                calculatedStatus = 'THAWING';
+            }
+
+            return {
+                ...row,
+                calculatedStatus
+            };
+        });
+
+        const totalPages = Math.ceil(total / lim);
+
+        return res.json({
+            records,
+            totalRecords: total,
+            page: pg,
+            pageSize: lim,
+            totalPages
+        });
+    } catch (err: any) {
+        logger.error('getActiveSessions:', err);
+        return res.status(500).json({ error: 'Failed to fetch active sessions: ' + err.message });
+    }
+};
+
+/** GET /sp-master/active-sessions/:id */
+export const getActiveSessionById = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const query = `
+            SELECT s.*,
+                   c.used_weight_g,
+                   (s.total_weight_g - c.used_weight_g) AS remaining_weight_g
+            FROM smt_solder_paste_sessions s
+            LEFT JOIN smt_solder_paste_cans c ON s.can_id = c.id
+            WHERE s.id = $1 AND s.is_deleted = false
+        `;
+        const { rows } = await pool.query(query, [id]);
+        if (!rows.length) {
+            return res.status(404).json({ error: 'Active session not found' });
+        }
+        
+        const row = rows[0];
+        const now = new Date();
+        const remainingWeight = Number(row.remaining_weight_g ?? row.total_weight_g);
+        const isCanExpired = new Date(row.expiry_date) < now;
+        const thawingReadyAt = new Date(row.thawing_ready_at);
+        const workingExpiresAt = new Date(row.working_expires_at);
+
+        let calculatedStatus = row.status || 'THAWING';
+
+        if (row.is_deleted) {
+            calculatedStatus = 'DISCARDED';
+        } else if (remainingWeight <= 0) {
+            calculatedStatus = 'COMPLETED';
+        } else if (isCanExpired || now > workingExpiresAt) {
+            calculatedStatus = 'EXPIRED';
+        } else if (now >= thawingReadyAt && now < workingExpiresAt) {
+            if (Number(row.used_weight_g) > 0) {
+                calculatedStatus = 'IN_USE';
+            } else {
+                calculatedStatus = 'READY';
+            }
+        } else if (now < thawingReadyAt) {
+            calculatedStatus = 'THAWING';
+        }
+
+        return res.json({
+            ...row,
+            calculatedStatus
+        });
+    } catch (err: any) {
+        logger.error('getActiveSessionById:', err);
+        return res.status(500).json({ error: 'Failed to fetch active session details: ' + err.message });
+    }
+};
+
+/** DELETE /sp-master/active-sessions/:id */
+export const deleteActiveSession = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const actor = getActor(req);
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Fetch session
+        const sessionRes = await client.query(
+            `SELECT * FROM smt_solder_paste_sessions WHERE id = $1 FOR UPDATE`, [id]
+        );
+        if (!sessionRes.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Active session not found' });
+        }
+        const session = sessionRes.rows[0];
+
+        // Soft delete the session
+        await client.query(
+            `UPDATE smt_solder_paste_sessions 
+             SET is_deleted = true,
+                 deleted_at = CURRENT_TIMESTAMP,
+                 deleted_by = $1,
+                 status = 'DISCARDED',
+                 updated_at = CURRENT_TIMESTAMP,
+                 updated_by = $1
+             WHERE id = $2`,
+            [actor, id]
+        );
+
+        // Fetch master_id from linked can to write usage history
+        const canRes = await client.query(
+            `SELECT master_id, can_id FROM smt_solder_paste_cans WHERE id = $1`, [session.can_id]
+        );
+        const masterId = canRes.rows.length ? canRes.rows[0].master_id : null;
+        const canBarcode = canRes.rows.length ? canRes.rows[0].can_id : session.can_barcode;
+
+        if (masterId) {
+            // Log in usage history
+            await client.query(
+                `INSERT INTO smt_solder_paste_usage_history (can_id, master_id, weight_used_g, operator, action, notes)
+                 VALUES ($1, $2, 0, $3, 'DEACTIVATE', $4)`,
+                [session.can_id, masterId, actor, `Active session for can ${canBarcode} soft-deleted/discarded`]
+            );
+        }
+
+        // Centralized audit log
+        await client.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value, new_value)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+                'DELETE',
+                'SOLDER_PASTE_SESSION',
+                id,
+                actor,
+                `Active session for Can ID ${canBarcode} was soft-deleted/discarded.`,
+                JSON.stringify(session),
+                JSON.stringify({ ...session, is_deleted: true, status: 'DISCARDED', deleted_by: actor })
+            ]
+        );
+
+        await client.query('COMMIT');
+        return res.json({ message: 'Session deleted successfully' });
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        logger.error('deleteActiveSession:', err);
+        return res.status(500).json({ error: 'Failed to delete active session: ' + err.message });
+    } finally { client.release(); }
 };

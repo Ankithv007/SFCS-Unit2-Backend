@@ -102,10 +102,15 @@ export const createFgSession = async (req: Request, res: Response) => {
 
             const resolvedSide = await resolveWorkOrderSide(work_order_id, woRes.rows[0].sides);
             if (side.toLowerCase() !== resolvedSide.toLowerCase()) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({
-                    message: `Selected side ${side} does not match resolved active side ${resolvedSide}.`
-                });
+                const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+                if (isDoubleSided && side.toLowerCase() === 'top') {
+                    // Allow starting/resuming Top side SMT FG if bottom side is not fully completed yet
+                } else {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: `Selected side ${side} does not match resolved active side ${resolvedSide}.`
+                    });
+                }
             }
         }
 
@@ -163,7 +168,6 @@ const fetchFgSessionStatsHelper = async (client: any, sessionId: string, workOrd
     const passed = parseInt(passedRes.rows[0].count, 10) || 0;
 
     const failed = 0;
-    const processed = passed + failed;
     const pending = Math.max(0, workOrderQty - passed);
 
     const invalidRes = await client.query(
@@ -802,7 +806,6 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
 
         // FG has no failure mode but tracks invalid scan attempts
         const failed = 0;
-        const processed = passed + failed;
         const pending = Math.max(0, workOrderQty - passed);
 
         const invalidRes = await pool.query(
@@ -830,7 +833,6 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
 
         return res.status(200).json({
             workOrderQuantity: workOrderQty,
-            processedQuantity: processed,
             passed,
             failed,
             pending,
@@ -1166,7 +1168,24 @@ export const checkBottomCompleted = async (req: Request, res: Response) => {
             return res.status(404).json({ message: 'Work Order not found.' });
         }
         const resolvedSide = await resolveWorkOrderSide(woId, woRes.rows[0].sides);
-        return res.status(200).json({ completed: resolvedSide === 'Top' });
+        if (resolvedSide === 'Top') {
+            return res.status(200).json({ completed: true });
+        }
+
+        // For double-sided, if resolved side is Bottom but we have Top-side Post AOI PASS barcodes,
+        // we consider bottom side check satisfied (since Top side processing has already commenced)
+        const topPassCheck = await pool.query(
+            `SELECT 1 FROM smt_inspections i
+             JOIN smt_post_aoi_sessions pas ON i.post_aoi_session_id = pas.id
+             WHERE i.work_order_id = $1
+               AND LOWER(pas.side) = 'top'
+               AND i.process_step = 'Post AOI'
+               AND i.status = 'PASS'
+               AND pas.is_deleted = false
+             LIMIT 1`,
+            [woId]
+        );
+        return res.status(200).json({ completed: topPassCheck.rows.length > 0 });
     } catch (err: any) {
         logger.error('Error checking bottom side completion:', err);
         return res.status(500).json({ message: 'Internal server error while checking bottom side completion.' });

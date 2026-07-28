@@ -84,7 +84,17 @@ export const getAutoPopulateDetailsHelper = async (
     // 2. Determine Side
     let side = sideOverride;
     if (!side) {
-        side = await resolveWorkOrderSide(woId, wo.sides);
+        if (sessionTable === 'smt_fg_sessions') {
+            const woSides = (wo.sides || '').trim().toLowerCase();
+            const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+            if (isDoubleSided || woSides === 'top') {
+                side = 'Top';
+            } else {
+                side = 'Bottom';
+            }
+        } else {
+            side = await resolveWorkOrderSide(woId, wo.sides);
+        }
     }
 
     // 3. Fetch SMT Printing Session for this side (latest setup, ignoring status)
@@ -195,7 +205,16 @@ export const getEligibleWorkOrdersHelper = async (
     const eligibleList: any[] = [];
 
     for (const wo of candidates) {
-        const side = await resolveWorkOrderSide(wo.work_order_id, wo.sides);
+        let side = await resolveWorkOrderSide(wo.work_order_id, wo.sides);
+        if (stage === 'SMT FG') {
+            const woSides = (wo.sides || '').trim().toLowerCase();
+            const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+            if (isDoubleSided || woSides === 'top') {
+                side = 'Top';
+            } else {
+                side = 'Bottom';
+            }
+        }
         const lowerSide = side.toLowerCase();
         
         logger.info(`[Eligibility Debug] Processing WO: ${wo.work_order_id} | Sides in DB: ${wo.sides} | Resolved Active Side: ${side}`);

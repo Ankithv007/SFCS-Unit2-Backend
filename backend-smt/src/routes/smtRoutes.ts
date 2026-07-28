@@ -40,7 +40,10 @@ import {
     getLatestSession,
     recordConsumption,
     getConsumptionHistory,
-    updateModel
+    updateModel,
+    getActiveSessions,
+    getActiveSessionById,
+    deleteActiveSession
 } from '../controllers/spMasterController';
 import {
     getEligibleWorkOrders as getMsdEligibleWorkOrders,
@@ -260,6 +263,14 @@ router.post('/sp-master/sessions',           authenticateToken, startSession);
 router.get('/sp-master/sessions/latest',     authenticateToken, getLatestSession);
 router.post('/sp-master/consume',            authenticateToken, recordConsumption);
 router.get('/sp-master/consumption',         authenticateToken, getConsumptionHistory);
+router.get('/sp-master/active-sessions',     authenticateToken, getActiveSessions);
+router.get('/sp-master/active-sessions/:id', authenticateToken, getActiveSessionById);
+router.delete('/sp-master/active-sessions/:id', [authenticateToken, requirePermission('smt_solder_paste', 'can_delete')], deleteActiveSession);
+
+// Backward compatible aliases without /sp-master prefix
+router.get('/active-sessions',                 authenticateToken, getActiveSessions);
+router.get('/active-sessions/:id',             authenticateToken, getActiveSessionById);
+router.delete('/active-sessions/:id',           [authenticateToken, requirePermission('smt_solder_paste', 'can_delete')], deleteActiveSession);
 
 // QMS endpoints
 router.get('/qms/work-orders', authenticateToken, getQmsWorkOrders);
