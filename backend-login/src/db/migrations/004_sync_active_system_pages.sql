@@ -41,6 +41,7 @@ BEGIN
     ('pre_trace', 'Pre Testing', 'Trace', '/pre-testing/trace', 'Pre Testing', 35, 'GitCommit', 'PAGE', 'pretesting.trace'),
     
     ('vacuum_leak_test', 'Vacuum Leak Test', 'Vacuum Leak Test', '/vacuum-leak-test', NULL, 40, 'Wind', 'PAGE', 'qc.vacuum-leak-test'),
+    ('bom_split', 'BOM Split', 'BOM Split', '/bom-split', NULL, 45, 'Split', 'PAGE', NULL),
     
     ('smt_dashboard', 'SMT', 'SMT Dashboard', '/smt', 'SMT', 50, 'Cpu', 'PAGE', NULL),
     ('smt_work_order', 'SMT', 'Work Order', '/smt/work-order', 'SMT', 51, 'Clipboard', 'PAGE', 'smt.work-order'),
