@@ -166,6 +166,7 @@ export const login = async (req: Request, res: Response) => {
         const token = generateToken({ 
             id: user.id, 
             email: user.email, 
+            name: user.name || null,
             role: user.role, 
             permission_version: user.permission_version || 1,
             employee_code: user.employee_code || null
@@ -449,6 +450,7 @@ export const getMe = async (req: any, res: Response) => {
             const refreshedToken = generateToken({
                 id: user.id,
                 email: user.email,
+                name: user.name || null,
                 role: user.role,
                 permission_version: user.permission_version || 1,
                 employee_code: user.employee_code || null
