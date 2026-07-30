@@ -47,7 +47,7 @@ router.delete('/departments/:deptId', adminAuth, deleteDepartment);
 // System Pages Routes
 // ----------------------------
 router.get('/system-pages', adminAuth, getSystemPages);
-router.post('/system-pages/sync', [authenticateToken, requireRole(['Super Admin'])], syncSystemPages);
+router.post('/system-pages/sync', authenticateToken, syncSystemPages);
 
 // ----------------------------
 // Audit Trail Routes

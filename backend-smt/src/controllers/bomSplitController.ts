@@ -59,22 +59,37 @@ const matchColumn = (header: string, target: string): boolean => {
     const cleanedTarget = target.toLowerCase().replace(/[^a-z0-9]/g, '');
 
     if (cleanedTarget === 'customerpartnumber') {
-        return ['customerpartnumber', 'customerpartno', 'cpn'].includes(cleanedHeader);
+        return ['customerpartnumber', 'customerpartno', 'cpn'].includes(cleanedHeader) || 
+               cleanedHeader.includes('customerpart') || 
+               cleanedHeader.includes('cpn');
     }
     if (cleanedTarget === 'description') {
-        return ['description', 'desc'].includes(cleanedHeader);
+        return ['description', 'desc'].includes(cleanedHeader) || 
+               cleanedHeader.includes('description') || 
+               cleanedHeader.includes('desc');
     }
     if (cleanedTarget === 'mfr') {
-        return ['mfr', 'manufacturer', 'mfg', 'make'].includes(cleanedHeader);
+        return ['mfr', 'manufacturer', 'mfg', 'make'].includes(cleanedHeader) || 
+               cleanedHeader === 'mfr' || 
+               cleanedHeader === 'mfg' || 
+               cleanedHeader === 'make' || 
+               cleanedHeader.includes('manufacturer');
     }
     if (cleanedTarget === 'mfrpartno') {
-        return ['mfrpartno', 'mfrpartnumber', 'manufacturerpartnumber', 'manufacturerpartno', 'mpn'].includes(cleanedHeader);
+        return ['mfrpartno', 'mfrpartnumber', 'manufacturerpartnumber', 'manufacturerpartno', 'mpn'].includes(cleanedHeader) || 
+               cleanedHeader.includes('mfrpart') || 
+               cleanedHeader.includes('mpn') || 
+               cleanedHeader.includes('manufacturerpart');
     }
     if (cleanedTarget === 'ref') {
-        return ['ref', 'reference', 'refdesignator', 'designator'].includes(cleanedHeader);
+        return ['ref', 'reference', 'refdesignator', 'designator'].includes(cleanedHeader) || 
+               cleanedHeader.includes('ref') || 
+               cleanedHeader.includes('designator');
     }
     if (cleanedTarget === 'qty') {
-        return ['qty', 'quantity', 'qtyperproduct'].includes(cleanedHeader);
+        return ['qty', 'quantity', 'qtyperproduct'].includes(cleanedHeader) || 
+               cleanedHeader.includes('qty') || 
+               cleanedHeader.includes('quantity');
     }
     return cleanedHeader === cleanedTarget;
 };
