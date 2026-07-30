@@ -459,5 +459,29 @@ router.get('/smt-fg/work-orders/:woId/check-bottom', authenticateToken, checkFgB
 router.get('/smt-fg/sessions/:id/post-aoi-passed', authenticateToken, getPostAoiPassedBarcodes);
 router.get('/smt-fg/auto-populate-details/:woId', authenticateToken, getFgAutoPopulateDetails);
 
+// BOM Split Module Routes
+import {
+    parseBomWorkbook,
+    getBomHistoryList,
+    downloadBomFile,
+    getAuditLogs,
+    recordResetAction,
+    getBomDetail,
+    updateBomSplitItem,
+    parseAgain,
+    deleteBomHistory,
+    uploadExcel
+} from '../controllers/bomSplitController';
+
+router.post('/bom-split/parse', authenticateToken, uploadExcel.single('file'), parseBomWorkbook);
+router.get('/bom-split/history', authenticateToken, getBomHistoryList);
+router.get('/bom-split/download/:id/:type', authenticateToken, downloadBomFile);
+router.get('/bom-split/audit-logs', authenticateToken, getAuditLogs);
+router.post('/bom-split/reset', authenticateToken, recordResetAction);
+router.get('/bom-split/detail/:id', authenticateToken, getBomDetail);
+router.put('/bom-split/items/:itemId', authenticateToken, updateBomSplitItem);
+router.post('/bom-split/parse-again/:id', authenticateToken, parseAgain);
+router.delete('/bom-split/history/:id', [authenticateToken, requirePermission('bom_split', 'can_delete')], deleteBomHistory);
+
 export default router;
 

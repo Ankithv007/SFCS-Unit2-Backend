@@ -28,7 +28,16 @@ export const ensureUploadDirectoriesExist = () => {
     try {
         const uploadsDir = getUploadsDir();
         logger.info(`[Uploads] Centralized initialization in: ${uploadsDir}`);
-        const subdirs = ['avatars', 'QMS-Data', 'SMT-PO-Documents', 'temp'];
+        const subdirs = [
+            'avatars', 
+            'QMS-Data', 
+            'SMT-PO-Documents', 
+            'temp',
+            'BOM-Split',
+            'BOM-Split/Original',
+            'BOM-Split/Processed',
+            'BOM-Split/Temp'
+        ];
         subdirs.forEach(subdir => {
             const dirPath = path.join(uploadsDir, subdir);
             if (!fs.existsSync(dirPath)) {
