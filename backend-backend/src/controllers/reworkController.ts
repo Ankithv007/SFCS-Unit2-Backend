@@ -52,6 +52,8 @@ export const deleteBatch = async (req: Request, res: Response) => {
     }
 };
 
+import { determineScannedBy } from '../utils/scanUser';
+
 export const createReworkScan = async (req: Request, res: Response) => {
     const { batch_id, barcode, scanned_by, status, remarks } = req.body;
     
@@ -60,12 +62,13 @@ export const createReworkScan = async (req: Request, res: Response) => {
     }
 
     try {
+        const resolvedScannedBy = determineScannedBy((req as any).user, scanned_by);
         const result = await ScanProcessingService.processStageScan('REWORK', {
             work_order_id: null,
             batch_id,
             barcode,
             status: status || 'RESOLVED',
-            scanned_by: scanned_by || 'system',
+            scanned_by: resolvedScannedBy,
             remarks: remarks.trim(),
             failed_stage_id: req.body.failed_stage_id
         });

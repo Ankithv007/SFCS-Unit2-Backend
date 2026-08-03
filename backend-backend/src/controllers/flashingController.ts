@@ -34,9 +34,15 @@ export const getBatches = async (req: Request, res: Response) => {
     }
 };
 
+import { determineScannedBy } from '../utils/scanUser';
+
 export const createFlashingScan = async (req: Request, res: Response) => {
     try {
-        const result = await ScanProcessingService.processStageScan('FLASHING', req.body);
+        const scannedBy = determineScannedBy((req as any).user, req.body.scanned_by);
+        const result = await ScanProcessingService.processStageScan('FLASHING', {
+            ...req.body,
+            scanned_by: scannedBy
+        });
         return res.status(200).json(result);
     } catch (err: any) {
         return res.status(500).json({ success: false, error: err.message });

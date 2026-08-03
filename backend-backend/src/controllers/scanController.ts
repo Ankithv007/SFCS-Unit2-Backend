@@ -2,6 +2,8 @@ import { Response } from 'express';
 import pool from '../config/db';
 import { AuthRequest } from '../middleware/authMiddleware';
 
+import { determineScannedBy } from '../utils/scanUser';
+
 export const updateScan = async (req: AuthRequest, res: Response) => {
     const scanId = req.params.id;
     let { barcode, unit_serial_no } = req.body;
@@ -18,7 +20,7 @@ export const updateScan = async (req: AuthRequest, res: Response) => {
         unit_serial_no = null;
     }
 
-    const actor = req.user ? (req.user.name || req.user.email || 'system') : 'system';
+    const actor = determineScannedBy(req.user);
 
     const client = await pool.connect();
     try {
