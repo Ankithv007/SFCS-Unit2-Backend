@@ -206,6 +206,7 @@ import {
     validateAndRecordScan as validateAndRecordFgScan,
     getSessionStatistics as getFgSessionStatistics,
     exportFgSessionExcel,
+    exportFgSessionPdfData,
     getPostAoiPassedBarcodes,
     getAutoPopulateDetails as getFgAutoPopulateDetails,
     checkBottomCompleted as checkFgBottomCompleted
@@ -455,6 +456,7 @@ router.delete('/smt-fg/sessions/:id', [authenticateToken, requirePermission('smt
 router.post('/smt-fg/sessions/:id/scan', authenticateToken, validateAndRecordFgScan);
 router.get('/smt-fg/sessions/:id/stats', authenticateToken, getFgSessionStatistics);
 router.get('/smt-fg/sessions/:id/export/excel', authenticateToken, exportFgSessionExcel);
+router.get('/smt-fg/sessions/:id/export/pdf-data', authenticateToken, exportFgSessionPdfData);
 router.get('/smt-fg/work-orders/:woId/check-bottom', authenticateToken, checkFgBottomCompleted);
 router.get('/smt-fg/sessions/:id/post-aoi-passed', authenticateToken, getPostAoiPassedBarcodes);
 router.get('/smt-fg/auto-populate-details/:woId', authenticateToken, getFgAutoPopulateDetails);

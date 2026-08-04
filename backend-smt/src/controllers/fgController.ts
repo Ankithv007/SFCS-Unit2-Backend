@@ -902,6 +902,8 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
             ['EXPORT', 'SMT_FG_SESSION', id, operator.name, `Exported SMT FG session report to Excel.`]
         );
 
+
+
         const workbook = new ExcelJS.Workbook();
         workbook.creator = 'SFCS SMT System';
         workbook.created = new Date();
@@ -942,32 +944,32 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
         const addSectionHeader = (label: string, fill: ExcelJS.Fill, startRow: number) => {
             const row = ws.getRow(startRow);
             row.height = 22;
+            ws.mergeCells(`A${startRow}:G${startRow}`);
             const cell = ws.getCell(`A${startRow}`);
             cell.value = label;
             cell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
             cell.fill = fill;
             cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
-            ws.mergeCells(`A${startRow}:G${startRow}`);
         };
 
         const addKVRow = (rowNum: number, label: string, value: any) => {
             const row = ws.getRow(rowNum);
             row.height = 18;
+            ws.mergeCells(`A${rowNum}:B${rowNum}`);
             const lCell = ws.getCell(`A${rowNum}`);
             lCell.value = label;
             lCell.font = BOLD_DARK;
             lCell.fill = LIGHT_GRAY;
             lCell.border = thinBorder;
             lCell.alignment = { vertical: 'middle', indent: 1 };
-            ws.mergeCells(`A${rowNum}:B${rowNum}`);
 
+            ws.mergeCells(`C${rowNum}:G${rowNum}`);
             const vCell = ws.getCell(`C${rowNum}`);
-            vCell.value = value ?? '-';
+            vCell.value = (value !== null && value !== undefined && value !== '') ? String(value) : '-';
             vCell.font = DARK_FONT;
             vCell.fill = WHITE_FILL;
             vCell.border = thinBorder;
             vCell.alignment = { vertical: 'middle', indent: 1 };
-            ws.mergeCells(`C${rowNum}:G${rowNum}`);
         };
 
         const fmtDate = (d: any) => d ? new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) : '-';
@@ -1037,12 +1039,12 @@ export const exportFgSessionExcel = async (req: Request, res: Response) => {
 
         // SECTION 4: Production Summary
         addSectionHeader('  4.  PRODUCTION SUMMARY', PLUM, r); r++;
-        addKVRow(r, 'Work Order Quantity', session.work_order_quantity); r++;
-        addKVRow(r, 'Passed Quantity', passed); r++;
-        addKVRow(r, 'Failed Quantity', failed); r++;
-        addKVRow(r, 'Pending Quantity', pending); r++;
-        addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
-        addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count); r++;
+        addKVRow(r, 'Work Order Quantity', session.work_order_quantity ?? 0); r++;
+        addKVRow(r, 'Passed Quantity', passed ?? 0); r++;
+        addKVRow(r, 'Failed Quantity', failed ?? 0); r++;
+        addKVRow(r, 'Pending Quantity', pending ?? 0); r++;
+        addKVRow(r, 'Invalid Scan Quantity', invalid ?? 0); r++;
+        addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count ?? 0); r++;
 
         r++; // Spacer
 
@@ -1261,3 +1263,81 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
         return res.status(500).json({ message: 'Internal server error while fetching stencil details.' });
     }
 };
+
+/**
+ * GET /api/smt/smt-fg/sessions/:id/export/pdf-data
+ * Returns structured JSON consumed by the frontend jsPDF renderer to produce the PDF report.
+ */
+export const exportFgSessionPdfData = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const operator = getSessionUser(req);
+
+    try {
+        const sessionRes = await pool.query(
+            `SELECT 
+                ps.*,
+                wo.product_name, wo.product_description, wo.po_id,
+                wo.quantity AS work_order_quantity, wo.panel_quantity,
+                wo.sides AS work_order_sides, wo.line_id, wo.remark AS work_order_remarks,
+                lc.stencil_name, lc.qty_life_cycle, lc.balance_life_cycle, lc.current_used_life_cycle,
+                lc.sides AS stencil_side,
+                sm.job_number, sm.revision, sm.thickness_mills, sm.manufacturing_date
+             FROM smt_fg_sessions ps
+             JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+             JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
+             JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+             WHERE ps.id = $1 AND ps.is_deleted = false`,
+            [id]
+        );
+        if (sessionRes.rows.length === 0) {
+            return res.status(404).json({ message: 'SMT FG session not found.' });
+        }
+        const session = sessionRes.rows[0];
+
+        // Production counts
+        const passedRes = await pool.query(
+            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count FROM smt_inspections WHERE fg_session_id = $1 AND status = 'PASS'`, [id]
+        );
+        const passed = parseInt(passedRes.rows[0].count) || 0;
+        const failed = 0;
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
+
+        const invalidRes = await pool.query(
+            `SELECT COUNT(id) AS count FROM smt_inspections WHERE fg_session_id = $1 AND status = 'INVALID'`, [id]
+        );
+        const invalid = parseInt(invalidRes.rows[0].count) || 0;
+
+        const scansRes = await pool.query(
+            `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at
+             FROM smt_inspections WHERE fg_session_id = $1 ORDER BY scanned_at ASC`,
+            [id]
+        );
+
+        await pool.query(
+            `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description) VALUES ($1, $2, $3, $4, $5)`,
+            ['EXPORT', 'SMT_FG_SESSION', id, operator.name, `Exported SMT FG session report to PDF.`]
+        );
+
+        return res.status(200).json({
+            ...session,
+            passed,
+            failed,
+            pending,
+            invalid,
+            duplicate: session.duplicate_scan_count ?? 0,
+            production: {
+                quantity: session.work_order_quantity ?? 0,
+                passed,
+                failed,
+                pending,
+                invalid,
+                duplicate: session.duplicate_scan_count ?? 0
+            },
+            scans: scansRes.rows
+        });
+    } catch (err: any) {
+        logger.error('Error exporting SMT FG session to PDF data:', err);
+        return res.status(500).json({ message: 'Internal server error while exporting SMT FG session PDF data.' });
+    }
+};
+
