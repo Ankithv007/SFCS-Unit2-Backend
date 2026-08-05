@@ -119,8 +119,8 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
 
         if (activeCheck.rows.length > 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'An active Post AOI Session already exists for this Work Order. Please resume the existing session.' 
+            return res.status(400).json({
+                message: 'An active Post AOI Session already exists for this Work Order. Please resume the existing session.'
             });
         }
 
@@ -563,8 +563,8 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         if (session.status !== 'In Progress') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.` 
+            return res.status(400).json({
+                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.`
             });
         }
 
@@ -653,7 +653,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         if (latestPostAoiRes.rows.length > 0 && latestPostAoiRes.rows[0].status === 'FAIL') {
             const failTime = latestPostAoiRes.rows[0].scanned_at;
-            
+
             // Check if there is a subsequent PASS in Rework
             const reworkCheck = await client.query(
                 `SELECT ri.id FROM smt_inspections ri
@@ -707,7 +707,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
             const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
             await client.query('COMMIT');
-            return res.status(409).json({ 
+            return res.status(409).json({
                 success: false,
                 isValid: true,
                 isCompleted: false,
@@ -850,8 +850,8 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         );
         if (serialRes.rows.length === 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.' 
+            return res.status(400).json({
+                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.'
             });
         }
         const newSerial = serialRes.rows[0];
@@ -885,8 +885,8 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         );
         if (duplicateCheck.rows.length > 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'This barcode has already been scanned in this Post AOI Session.' 
+            return res.status(400).json({
+                message: 'This barcode has already been scanned in this Post AOI Session.'
             });
         }
 
@@ -1009,6 +1009,43 @@ export const failScanRow = async (req: Request, res: Response) => {
              WHERE id = $3`,
             [remark.trim(), operator.name, scanId]
         );
+
+        // Reactivate completed rework session if exists
+        const completedReworkRes = await client.query(
+            `SELECT id FROM smt_rework_sessions 
+             WHERE work_order_id = $1 
+               AND LOWER(side) = $2 
+               AND status = 'Completed' 
+               AND is_deleted = false`,
+            [session.work_order_id, session.side.toLowerCase()]
+        );
+        if (completedReworkRes.rows.length > 0) {
+            const reworkSessionId = completedReworkRes.rows[0].id;
+            await client.query(
+                `UPDATE smt_rework_sessions 
+                 SET status = 'In Progress', 
+                     updated_at = CURRENT_TIMESTAMP,
+                     updated_by = $1,
+                     updated_by_name = $2
+                 WHERE id = $3`,
+                [operator.name, operator.name, reworkSessionId]
+            );
+
+            // Audit Log for Rework Session reactivation
+            await client.query(
+                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, old_value, new_value)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [
+                    'SESSION_STATUS_CHANGED',
+                    'REWORK_SESSION',
+                    reworkSessionId,
+                    operator.name,
+                    `Reactivated completed Rework session for Work Order ${session.work_order_id} on side ${session.side} because a barcode was failed in Post AOI.`,
+                    JSON.stringify({ status: 'Completed' }),
+                    JSON.stringify({ status: 'In Progress' })
+                ]
+            );
+        }
 
         // Audit Log
         await client.query(
@@ -1249,18 +1286,18 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
             pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true }
         });
 
-        const NAVY:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
-        const BLUE:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
-        const TEAL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
+        const NAVY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+        const BLUE: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+        const TEAL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
         const INDIGO: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } };
-        const PLUM:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
+        const PLUM: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
         const GREEN: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF15803D' } };
         const LIGHT_GRAY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
-        const WHITE_FILL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+        const WHITE_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
 
-        const WHITE_FONT  = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
-        const DARK_FONT   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
-        const BOLD_DARK   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
+        const WHITE_FONT = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
+        const DARK_FONT = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
+        const BOLD_DARK = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
 
         const thinBorder: Partial<ExcelJS.Borders> = {
             top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
@@ -1699,8 +1736,8 @@ export const getAutoPopulateDetails = async (req: Request, res: Response) => {
             [woId, details.side.toLowerCase()]
         );
         if (preAoiCheck.rows.length === 0) {
-            return res.status(400).json({ 
-                message: `There are no eligible PASS barcodes from the SMT Pre AOI stage for Work Order ${woId} on side ${details.side}.` 
+            return res.status(400).json({
+                message: `There are no eligible PASS barcodes from the SMT Pre AOI stage for Work Order ${woId} on side ${details.side}.`
             });
         }
 

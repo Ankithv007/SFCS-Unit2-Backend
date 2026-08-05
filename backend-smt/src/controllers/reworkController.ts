@@ -770,8 +770,37 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         );
         const reworkTargetQty = parseInt(targetRes.rows[0].count, 10) || 0;
 
+        // Calculate currently unrepaired failed barcodes (latest Post AOI status is FAIL and no subsequent Rework PASS)
+        const unrepairedRes = await client.query(
+            `WITH latest_post_aoi AS (
+                SELECT DISTINCT ON (i.serial_id) 
+                    i.serial_id, i.status, i.scanned_at
+                FROM smt_inspections i
+                JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+                WHERE i.work_order_id = $1 AND ps.side = $2 AND i.process_step = 'Post AOI'
+                ORDER BY i.serial_id, i.scanned_at DESC, i.id DESC
+            ),
+            failed_post_aoi AS (
+                SELECT * FROM latest_post_aoi WHERE status = 'FAIL'
+            )
+            SELECT COUNT(*) AS count FROM failed_post_aoi f
+            WHERE NOT EXISTS (
+                SELECT 1 FROM smt_inspections ri
+                JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                WHERE ri.work_order_id = $1
+                  AND rs.side = $2
+                  AND ri.serial_id = f.serial_id
+                  AND ri.process_step = 'Rework'
+                  AND ri.status = 'PASS'
+                  AND ri.scanned_at > f.scanned_at
+                  AND rs.is_deleted = false
+            )`,
+            [session.work_order_id, session.side]
+        );
+        const unrepairedCount = parseInt(unrepairedRes.rows[0].count, 10) || 0;
+
         let completed = false;
-        if (reworkTargetQty > 0 && passCount >= reworkTargetQty) {
+        if (reworkTargetQty > 0 && unrepairedCount === 0) {
             completed = true;
             await client.query(
                 `UPDATE smt_rework_sessions SET status = 'Completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -786,7 +815,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     'REWORK_SESSION',
                     id,
                     'System',
-                    `Rework Session automatically completed. Passed Count (${passCount}) reached failed target count (${reworkTargetQty}).`
+                    `Rework Session automatically completed. All failed boards (${reworkTargetQty}) have been successfully repaired.`
                 ]
             );
         }
