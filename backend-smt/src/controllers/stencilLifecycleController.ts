@@ -279,30 +279,11 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             }
             registrationSide = 'Bottom';
         } else if (woSides === 'top / bottom' || woSides.includes('/')) {
-            const stencilSide = (stencil.side || '').trim().toLowerCase();
-            if (stencilSide === 'top') {
-                registrationSide = 'Top';
-            } else if (stencilSide === 'bottom') {
-                registrationSide = 'Bottom';
-            } else {
-                const hasTop = existingRecords.some(r => r.sides.trim().toLowerCase() === 'top');
-                const hasBottom = existingRecords.some(r => r.sides.trim().toLowerCase() === 'bottom');
-                if (!hasTop) {
-                    registrationSide = 'Top';
-                } else if (!hasBottom) {
-                    registrationSide = 'Bottom';
-                } else {
-                    registrationSide = 'Top';
-                }
-            }
-
-            const duplicateForSide = existingRecords.some(r => r.sides.trim().toLowerCase() === registrationSide.toLowerCase());
-            if (duplicateForSide) {
+            if (existingRecords.length > 0) {
                 await client.query('ROLLBACK');
-                return res.status(400).json({ 
-                    message: `A Stencil Life Cycle record already exists for the ${registrationSide.toUpperCase()} side of this Work Order.` 
-                });
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this Work Order.' });
             }
+            registrationSide = 'Top / Bottom';
         } else {
             if (existingRecords.length > 0) {
                 await client.query('ROLLBACK');

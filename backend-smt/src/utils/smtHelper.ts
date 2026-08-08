@@ -18,7 +18,21 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
         return 'Bottom';
     }
     if (woSides === 'top / bottom' || woSides.includes('/')) {
-        // Get all serial IDs generated for this Work Order (excluding those belonging to deleted batches)
+        // 1. Check if a Completed printing session exists for Bottom side
+        const completedPrintingRes = await pool.query(
+            `SELECT 1 FROM smt_printing_sessions
+             WHERE work_order_id = $1
+               AND LOWER(side) = 'bottom'
+               AND status = 'Completed'
+               AND is_deleted = false
+             LIMIT 1`,
+            [woId]
+        );
+        if (completedPrintingRes.rows.length > 0) {
+            return 'Top';
+        }
+
+        // 2. Get all serial IDs generated for this Work Order
         const serialsRes = await pool.query(
             `SELECT sn.id FROM smt_serial_numbers sn
              WHERE sn.work_order_id = $1
@@ -52,7 +66,7 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
             latestStatuses.set(r.serial_id, r.status);
         });
         
-        let allPassed = true;
+        let allPassed = serialIds.length > 0;
         for (const serialId of serialIds) {
             const status = latestStatuses.get(serialId);
             if (status !== 'PASS') {
@@ -220,22 +234,8 @@ export const getEligibleWorkOrdersHelper = async (
         
         logger.info(`[Eligibility Debug] Processing WO: ${wo.work_order_id} | Sides in DB: ${wo.sides} | Resolved Active Side: ${side}`);
 
-        // For Printing stage, we must check if there is an active stencil lifecycle record for this resolved side
+        // For Printing stage, exclude if a session in printing exists for this side (active or completed)
         if (stage === 'Printing') {
-            const lcRes = await pool.query(
-                `SELECT 1 FROM smt_stencil_lifecycle 
-                 WHERE work_order_id = $1 
-                   AND LOWER(sides) = $2 
-                   AND is_deleted = false
-                 LIMIT 1`,
-                [wo.work_order_id, lowerSide]
-            );
-            if (lcRes.rows.length === 0) {
-                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no active stencil lifecycle record exists for side ${side}`);
-                continue;
-            }
-
-            // Exclude if a session in printing exists for this side (active or completed)
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_printing_sessions 
                  WHERE work_order_id = $1 

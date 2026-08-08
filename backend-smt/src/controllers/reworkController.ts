@@ -197,8 +197,12 @@ export const createReworkSession = async (req: Request, res: Response) => {
             const resolvedSide = await resolveWorkOrderSide(work_order_id, woRes.rows[0].sides);
             if (side.toLowerCase() !== resolvedSide.toLowerCase()) {
                 await client.query('ROLLBACK');
+                const isDoubleSided = (woRes.rows[0].sides || '').trim().toLowerCase().includes('/');
+                const errMsg = (isDoubleSided && side.toLowerCase() === 'top')
+                    ? 'Bottom side Rework must be completed before Top side Rework can start.'
+                    : `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`;
                 return res.status(400).json({
-                    message: `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`
+                    message: errMsg
                 });
             }
         }

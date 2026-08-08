@@ -40,11 +40,12 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
     const { woId } = req.params;
     const side = req.query.side as string; // 'Top' or 'Bottom'
     try {
-        let query = `
+        // First check smt_stencil_lifecycle for active records tied to this work_order_id
+        let queryLc = `
             SELECT 
                 lc.id AS stencil_lifecycle_id,
                 lc.stencil_record_id,
-                lc.stencil_name,
+                COALESCE(lc.stencil_name, srl.stencil_name, srl.job_number) AS stencil_name,
                 srl.revision AS stencil_version,
                 srl.status AS stencil_status,
                 srl.job_number,
@@ -62,16 +63,50 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
             WHERE lc.work_order_id = $1
               AND lc.is_deleted = false
         `;
-        const params: any[] = [woId];
+        const paramsLc: any[] = [woId];
         if (side) {
-            query += ` AND LOWER(lc.sides) = $2`;
-            params.push(side.toLowerCase());
+            queryLc += ` AND (LOWER(lc.sides) = $2 OR LOWER(lc.sides) IN ('top/bottom', 'top / bottom'))`;
+            paramsLc.push(side.toLowerCase().trim());
         }
-        query += ` ORDER BY lc.created_at DESC LIMIT 1`;
+        queryLc += ` ORDER BY lc.created_at DESC LIMIT 1`;
 
-        const result = await pool.query(query, params);
+        let result = await pool.query(queryLc, paramsLc);
+
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order.' });
+            // Fallback: Check stencil_rack_locations for stencils checked out to this Work Order
+            let queryRack = `
+                SELECT 
+                    COALESCE(lc.id, srl.id) AS stencil_lifecycle_id,
+                    srl.id AS stencil_record_id,
+                    COALESCE(srl.stencil_name, srl.job_number, 'Stencil') AS stencil_name,
+                    srl.revision AS stencil_version,
+                    srl.status AS stencil_status,
+                    srl.job_number,
+                    srl.thickness_mills,
+                    COALESCE(lc.qty_life_cycle, 100000) AS qty_life_cycle,
+                    COALESCE(lc.balance_life_cycle, 100000) AS remaining_life,
+                    COALESCE(lc.current_used_life_cycle, 0) AS current_life_count,
+                    COALESCE(srl.checked_out_work_order_side, srl.side) AS stencil_side,
+                    srl.remarks AS stencil_remarks,
+                    srl.manufacturing_date AS stencil_manufacturing_date,
+                    NULL AS last_cleaning_date,
+                    NULL AS last_inspection_date
+                FROM stencil_rack_locations srl
+                LEFT JOIN smt_stencil_lifecycle lc ON (lc.stencil_record_id = srl.id AND lc.is_deleted = false)
+                WHERE srl.checked_out_work_order_id = $1
+                  AND srl.status = 'CHECKED_OUT'
+            `;
+            const paramsRack: any[] = [woId];
+            if (side) {
+                queryRack += ` AND (LOWER(srl.checked_out_work_order_side) = $2 OR LOWER(srl.side) = $2 OR LOWER(srl.checked_out_work_order_side) IN ('top/bottom', 'top / bottom') OR LOWER(srl.side) IN ('top/bottom', 'top / bottom'))`;
+                paramsRack.push(side.toLowerCase().trim());
+            }
+            queryRack += ` ORDER BY srl.updated_at DESC LIMIT 1`;
+            result = await pool.query(queryRack, paramsRack);
+        }
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order and Side.' });
         }
         return res.status(200).json(result.rows[0]);
     } catch (err: any) {
@@ -137,8 +172,12 @@ export const createPrintingSession = async (req: Request, res: Response) => {
             const resolvedSide = await resolveWorkOrderSide(work_order_id, woRes.rows[0].sides);
             if (side.toLowerCase() !== resolvedSide.toLowerCase()) {
                 await client.query('ROLLBACK');
+                const isDoubleSided = (woRes.rows[0].sides || '').trim().toLowerCase().includes('/');
+                const errMsg = (isDoubleSided && side.toLowerCase() === 'top')
+                    ? 'Bottom side printing must be completed before Top side printing can start.'
+                    : `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`;
                 return res.status(400).json({
-                    message: `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`
+                    message: errMsg
                 });
             }
         }
