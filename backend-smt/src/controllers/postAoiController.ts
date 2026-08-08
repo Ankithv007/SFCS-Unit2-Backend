@@ -45,32 +45,20 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
                 lc.id AS stencil_lifecycle_id,
                 lc.stencil_record_id,
                 lc.stencil_name,
-                sm.revision AS stencil_version,
-                sm.status AS stencil_status,
-                sm.job_number,
-                sm.thickness_mills,
+                srl.revision AS stencil_version,
+                srl.status AS stencil_status,
+                srl.job_number,
+                srl.thickness_mills,
                 lc.qty_life_cycle,
                 lc.balance_life_cycle AS remaining_life,
                 lc.current_used_life_cycle AS current_life_count,
                 lc.sides AS stencil_side,
-                sm.remarks AS stencil_remarks,
-                sm.manufacturing_date AS stencil_manufacturing_date,
-                (
-                    SELECT created_at FROM audit_log 
-                    WHERE entity_type = 'STENCIL_MASTER' 
-                      AND entity_id = sm.id::text 
-                      AND event_type = 'CLEAN'
-                    ORDER BY created_at DESC LIMIT 1
-                ) AS last_cleaning_date,
-                (
-                    SELECT created_at FROM audit_log 
-                    WHERE entity_type = 'STENCIL_MASTER' 
-                      AND entity_id = sm.id::text 
-                      AND event_type = 'INSPECT'
-                    ORDER BY created_at DESC LIMIT 1
-                ) AS last_inspection_date
+                srl.remarks AS stencil_remarks,
+                srl.manufacturing_date AS stencil_manufacturing_date,
+                NULL AS last_cleaning_date,
+                NULL AS last_inspection_date
             FROM smt_stencil_lifecycle lc
-            JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+            JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
             WHERE lc.work_order_id = $1
               AND lc.is_deleted = false
         `;
@@ -305,13 +293,13 @@ export const getPostAoiSessions = async (req: Request, res: Response) => {
                 wo.panel_quantity,
                 wo.remark AS work_order_remarks,
                 lc.stencil_name,
-                sm.revision AS stencil_version,
+                srl.revision AS stencil_version,
                 lc.balance_life_cycle AS remaining_life,
                 lc.current_used_life_cycle AS current_life_count
             FROM smt_post_aoi_sessions ps
             JOIN smt_work_orders wo ON ps.work_order_id = wo.id
             JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-            JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+            JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
             WHERE ps.is_deleted = false
         `;
 
@@ -377,13 +365,13 @@ export const getSessionById = async (req: Request, res: Response) => {
                 wo.panel_quantity,
                 wo.remark AS work_order_remarks,
                 lc.stencil_name,
-                sm.revision AS stencil_version,
+                srl.revision AS stencil_version,
                 lc.balance_life_cycle AS remaining_life,
                 lc.current_used_life_cycle AS current_life_count
             FROM smt_post_aoi_sessions ps
             JOIN smt_work_orders wo ON ps.work_order_id = wo.id
             JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-            JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+            JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
             WHERE ps.id = $1 AND ps.is_deleted = false
         `;
         const result = await pool.query(query, [id]);
@@ -1201,11 +1189,11 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
                 wo.sides AS work_order_sides, wo.line_id, wo.remark AS work_order_remarks,
                 lc.stencil_name, lc.qty_life_cycle, lc.balance_life_cycle, lc.current_used_life_cycle,
                 lc.sides AS stencil_side,
-                sm.job_number, sm.revision, sm.thickness_mills, sm.manufacturing_date
+                srl.job_number, srl.revision, srl.thickness_mills, srl.manufacturing_date
              FROM smt_post_aoi_sessions ps
              JOIN smt_work_orders wo ON ps.work_order_id = wo.id
              JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-             JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+             JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
              WHERE ps.id = $1 AND ps.is_deleted = false`,
             [id]
         );
@@ -1526,11 +1514,11 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
                 wo.sides AS work_order_sides, wo.line_id, wo.remark AS work_order_remarks,
                 lc.stencil_name, lc.qty_life_cycle, lc.balance_life_cycle, lc.current_used_life_cycle,
                 lc.sides AS stencil_side,
-                sm.job_number, sm.revision, sm.thickness_mills, sm.manufacturing_date
+                srl.job_number, srl.revision, srl.thickness_mills, srl.manufacturing_date
              FROM smt_post_aoi_sessions ps
              JOIN smt_work_orders wo ON ps.work_order_id = wo.id
              JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-             JOIN stencil_master sm ON lc.stencil_record_id = sm.id
+             JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
              WHERE ps.id = $1 AND ps.is_deleted = false`,
             [id]
         );

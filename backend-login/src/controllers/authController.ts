@@ -163,13 +163,20 @@ export const login = async (req: Request, res: Response) => {
         const isMatch = await comparePassword(password, user.password);
         if (!isMatch) return res.status(401).json({ message: 'Incorrect credentials' });
 
+        const deptRes = await pool.query(
+            `SELECT d.name FROM department_users du JOIN departments d ON d.id = du.department_id WHERE du.user_id = $1 LIMIT 1`,
+            [user.id]
+        );
+        const userDept = deptRes.rows[0]?.name || null;
+
         const token = generateToken({ 
             id: user.id, 
             email: user.email, 
             name: user.name || null,
             role: user.role, 
             permission_version: user.permission_version || 1,
-            employee_code: user.employee_code || null
+            employee_code: user.employee_code || null,
+            department: userDept
         });
         res.json({
             token,
@@ -453,7 +460,8 @@ export const getMe = async (req: any, res: Response) => {
                 name: user.name || null,
                 role: user.role,
                 permission_version: user.permission_version || 1,
-                employee_code: user.employee_code || null
+                employee_code: user.employee_code || null,
+                department: deptResult.rows[0]?.name || null
             });
             responsePayload.token = refreshedToken;
         }

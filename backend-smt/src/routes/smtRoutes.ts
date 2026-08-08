@@ -88,19 +88,16 @@ import {
 } from '../controllers/materialManagementController';
 
 import {
-    createStencilRecord,
-    updateStencilRecord,
-    deleteStencilRecord,
-    getStencilRecords,
-    exportStencilExcel
-} from '../controllers/stencilController';
-import {
     getActiveStencils,
     getLifecycleWorkOrders,
     createLifecycleRecord,
     getLifecycleRecords,
     getLifecycleRecordById,
-    deleteLifecycleRecord
+    deleteLifecycleRecord,
+    completeMaintenance,
+    scrapStencil,
+    getMaintenanceHistory,
+    getStatusHistory
 } from '../controllers/stencilLifecycleController';
 import {
     createBakingRecord,
@@ -109,6 +106,22 @@ import {
     stopBakingRecord,
     deleteBakingRecord
 } from '../controllers/bakingTrackingController';
+import {
+    getDashboardStats,
+    getRacks,
+    createRack,
+    updateRack,
+    deleteRack,
+    getRackLocations,
+    assignStencil,
+    clearLocation,
+    getStencilInfoByJob,
+    scanReceive,
+    scanReturn,
+    relocateStencil,
+    getMovementHistory,
+    exportRackReport
+} from '../controllers/stencilRackController';
 import { authenticateToken, requireRole, requirePermission } from '../middleware/authMiddleware';
 import {
     createSerialGenerationRecord,
@@ -298,13 +311,6 @@ router.post('/material-management/records/:id/complete-return', authenticateToke
 
 
 
-// Stencil Management
-router.post('/stencil-management/create', authenticateToken, createStencilRecord);
-router.put('/stencil-management/:id', authenticateToken, updateStencilRecord);
-router.delete('/stencil-management/:id', [authenticateToken, requirePermission('smt_stencil_master', 'can_delete')], deleteStencilRecord);
-router.get('/stencil-management/records', authenticateToken, getStencilRecords);
-router.get('/stencil-management/export', authenticateToken, exportStencilExcel);
-
 // Stencil Life Cycle Management
 router.get('/stencil-lifecycle/stencils', authenticateToken, getActiveStencils);
 router.get('/stencil-lifecycle/work-orders', authenticateToken, getLifecycleWorkOrders);
@@ -312,6 +318,12 @@ router.post('/stencil-lifecycle/create', authenticateToken, createLifecycleRecor
 router.get('/stencil-lifecycle/records', authenticateToken, getLifecycleRecords);
 router.get('/stencil-lifecycle/records/:id', authenticateToken, getLifecycleRecordById);
 router.delete('/stencil-lifecycle/records/:id', [authenticateToken, requirePermission('smt_stencil_lifecycle', 'can_delete')], deleteLifecycleRecord);
+
+// New Maintenance & History routes
+router.post('/stencil-lifecycle/maintenance/complete', [authenticateToken, requirePermission('smt_stencil_lifecycle', 'can_edit')], completeMaintenance);
+router.post('/stencil-lifecycle/maintenance/scrap', [authenticateToken, requirePermission('smt_stencil_lifecycle', 'can_edit')], scrapStencil);
+router.get('/stencil-lifecycle/maintenance/history/:rackNumber', authenticateToken, getMaintenanceHistory);
+router.get('/stencil-lifecycle/status-history/:rackNumber', authenticateToken, getStatusHistory);
 
 // Baking Tracking Record
 router.post('/baking-tracking/create', authenticateToken, createBakingRecord);
@@ -484,6 +496,24 @@ router.get('/bom-split/detail/:id', authenticateToken, getBomDetail);
 router.put('/bom-split/items/:itemId', authenticateToken, updateBomSplitItem);
 router.post('/bom-split/parse-again/:id', authenticateToken, parseAgain);
 router.delete('/bom-split/history/:id', [authenticateToken, requirePermission('bom_split', 'can_delete')], deleteBomHistory);
+
+// Stencil Rack Management Routes
+router.get('/stencil-rack/dashboard', authenticateToken, getDashboardStats);
+router.get('/stencil-rack', authenticateToken, getRacks);
+router.post('/stencil-rack', [authenticateToken, requirePermission('smt_stencil_rack', 'can_create')], createRack);
+router.put('/stencil-rack/:id', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], updateRack);
+router.delete('/stencil-rack/:id', [authenticateToken, requirePermission('smt_stencil_rack', 'can_delete')], deleteRack);
+router.get('/stencil-rack/:id/locations', authenticateToken, getRackLocations);
+router.post('/stencil-rack/locations/:locationId/assign', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], assignStencil);
+router.post('/stencil-rack/locations/:locationId/clear', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], clearLocation);
+router.post('/stencil-rack/locations/:locationId/relocate', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], relocateStencil);
+router.get('/stencil-rack/reports/export', authenticateToken, exportRackReport);
+
+// Stencil Scan Routes
+router.get('/stencil-rack/stencil-info/:jobNumber', authenticateToken, getStencilInfoByJob);
+router.post('/stencil-rack/scan/receive', [authenticateToken, requirePermission('smt_stencil_scan', 'can_edit')], scanReceive);
+router.post('/stencil-rack/scan/return', [authenticateToken, requirePermission('smt_stencil_scan', 'can_edit')], scanReturn);
+router.get('/stencil-rack/history/:jobNumber', authenticateToken, getMovementHistory);
 
 export default router;
 

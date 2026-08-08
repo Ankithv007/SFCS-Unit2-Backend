@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import fetch from 'node-fetch';
+import pool from '../config/db';
 
 export interface AuthRequest extends Request {
     user?: any;
@@ -60,6 +61,32 @@ export const requirePermission = (permissionKey: string, action: 'can_view' | 'c
 
         // Restrict 'can_delete' action exclusively to Super Admin users
         if (action === 'can_delete') {
+            try {
+                const sessionUser = {
+                    id: user?.id || null,
+                    name: user?.name || user?.email || 'Unknown User',
+                    role: user?.role || 'OPERATOR',
+                    employee_code: user?.employee_code || 'OP-UNKNOWN',
+                    department: user?.department || 'SMT'
+                };
+                const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown') as string;
+                const details = `Unauthorized Delete Rack Attempt - User: ${sessionUser.name} (${sessionUser.employee_code}, Role: ${sessionUser.role}), Permission Key: ${permissionKey}, Action: ${action}, Module: Stencil Rack Management, Endpoint: ${req.originalUrl}, Method: ${req.method}, IP: ${ip}, Reason: Unauthorized Delete Rack Attempt`;
+                
+                await pool.query(`
+                    INSERT INTO audit_log (event_type, entity_type, entity_id, actor, old_value, new_value, description)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [
+                    'DELETE',
+                    'STENCIL_RACK',
+                    req.params.id || 'N/A',
+                    sessionUser.name,
+                    null,
+                    null,
+                    details
+                ]);
+            } catch (auditErr: any) {
+                console.error('[AUTH SMT ERROR] Failed to log unauthorized delete:', auditErr.message);
+            }
             return res.status(403).json({ message: 'Access Denied: Only Super Admin users are allowed to perform delete operations.' });
         }
 

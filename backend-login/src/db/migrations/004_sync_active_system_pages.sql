@@ -58,7 +58,6 @@ BEGIN
     ('smt_qms', 'SMT', 'Document Process', '/smt/qms', 'SMT', 62, 'File', 'PAGE', 'smt.qms'),
     ('smt_material_mgmt', 'SMT', 'Material Management', '/smt/material-management', 'SMT', 63, 'Box', 'PAGE', 'smt.material-management'),
     ('smt_msd_tracker', 'SMT', 'MSD Tracker', '/smt/msd-tracker', 'SMT', 64, 'Thermometer', 'PAGE', 'smt.msd-tracker'),
-    ('smt_stencil_master', 'SMT', 'Stencil Master Record', '/smt/stencil/master', 'SMT', 65, 'Layers', 'PAGE', 'smt.stencil-master'),
     ('smt_stencil_lifecycle', 'SMT', 'Stencil Lifecycle', '/smt/stencil/lifecycle', 'SMT', 66, 'RefreshCw', 'PAGE', 'smt.stencil-lifecycle'),
     ('smt_baking_tracking', 'SMT', 'Baking Tracking Record', '/smt/baking-tracking', 'SMT', 67, 'Flame', 'PAGE', 'smt.baking-tracking'),
     

@@ -129,20 +129,21 @@ export const getAutoPopulateDetailsHelper = async (
     }
     const stencilLc = stencilLcRes.rows[0];
 
-    // 5. Fetch Stencil Master record
-    const stencilMasterRes = await pool.query(
-        `SELECT * FROM stencil_master 
-         WHERE id = $1 
-           AND is_deleted = false`,
+    // 5. Fetch Stencil Location record
+    const stencilRackLocationRes = await pool.query(
+        `SELECT s.*, COALESCE(states.lifecycle_status, 'ACTIVE') AS lifecycle_status
+         FROM stencil_rack_locations s
+         LEFT JOIN smt_stencil_lifecycle_states states ON s.id = states.stencil_record_id
+         WHERE s.id = $1`,
         [stencilLc.stencil_record_id]
     );
-    if (stencilMasterRes.rows.length === 0) {
+    if (stencilRackLocationRes.rows.length === 0) {
         throw { 
             status: 400, 
-            message: `Stencil Master record is missing for the associated stencil.` 
+            message: `Stencil Rack Location record is missing for the associated stencil.` 
         };
     }
-    const stencilMaster = stencilMasterRes.rows[0];
+    const stencilRackLocation = stencilRackLocationRes.rows[0];
 
     // 6. Return response structure
     return {
@@ -154,14 +155,14 @@ export const getAutoPopulateDetailsHelper = async (
         workOrderQuantity: parseInt(wo.quantity, 10) || 0,
         panelQuantity: parseInt(wo.panel_quantity, 10) || 0,
         stencilName: stencilLc.stencil_name || '',
-        jobNumber: stencilMaster.job_number || '',
-        revision: stencilMaster.revision || '',
-        thickness: stencilMaster.thickness_mills || stencilMaster.thickness || '',
-        manufacturingDate: stencilMaster.manufacturing_date || '',
+        jobNumber: stencilRackLocation.job_number || '',
+        revision: stencilRackLocation.revision || '',
+        thickness: stencilRackLocation.thickness_mills || '',
+        manufacturingDate: stencilRackLocation.manufacturing_date || '',
         side: side,
         currentLifeCycleCount: parseInt(stencilLc.current_used_life_cycle, 10) || 0,
         remainingLifeCycleCount: parseInt(stencilLc.balance_life_cycle, 10) || 0,
-        lifeCycleStatus: stencilMaster.status || '',
+        lifeCycleStatus: stencilRackLocation.lifecycle_status || '',
         squeegeeFrontNumber: printingSession.squeegee_front_number || '',
         squeegeeRearNumber: printingSession.squeegee_rear_number || '',
         solderPasteBarcode: printingSession.solder_paste_barcode || '',
