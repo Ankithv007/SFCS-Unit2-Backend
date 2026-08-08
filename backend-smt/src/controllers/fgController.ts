@@ -34,20 +34,29 @@ export const createFgSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if there is already an active session for this Work Order
+        // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
-            `SELECT id FROM smt_fg_sessions 
+            `SELECT * FROM smt_fg_sessions 
              WHERE work_order_id = $1 
+               AND LOWER(side) = $2
                AND status IN ('Pending', 'In Progress', 'Paused') 
-               AND is_deleted = false`,
-            [work_order_id]
+               AND is_deleted = false
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [work_order_id, side.toLowerCase()]
         );
 
         if (activeCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({
-                message: 'An active SMT FG Session already exists for this Work Order. Please resume the existing session.'
-            });
+            const existingSession = activeCheck.rows[0];
+            if (existingSession.status !== 'In Progress') {
+                await client.query(
+                    `UPDATE smt_fg_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                    [existingSession.id]
+                );
+                existingSession.status = 'In Progress';
+            }
+            await client.query('COMMIT');
+            return res.status(200).json(existingSession);
         }
 
         // Check stage-specific completed session validation
@@ -625,7 +634,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             `SELECT i.status FROM smt_inspections i
              JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
              WHERE i.work_order_id = $1
-               AND ps.side = $2
+               AND LOWER(ps.side) = LOWER($2)
                AND i.serial_id = $3
                AND i.process_step = 'Post AOI'
              ORDER BY i.scanned_at DESC, i.id DESC

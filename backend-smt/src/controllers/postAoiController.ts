@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
-import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper } from '../utils/smtHelper';
+import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted } from '../utils/smtHelper';
 
 const logger = createLogger('PostAoiController');
 
@@ -96,20 +96,29 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if there is already an active session for this Work Order
+        // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
-            `SELECT id FROM smt_post_aoi_sessions 
+            `SELECT * FROM smt_post_aoi_sessions 
              WHERE work_order_id = $1 
+               AND LOWER(side) = $2
                AND status IN ('Pending', 'In Progress', 'Paused') 
-               AND is_deleted = false`,
-            [work_order_id]
+               AND is_deleted = false
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [work_order_id, side.toLowerCase()]
         );
 
         if (activeCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({
-                message: 'An active Post AOI Session already exists for this Work Order. Please resume the existing session.'
-            });
+            const existingSession = activeCheck.rows[0];
+            if (existingSession.status !== 'In Progress') {
+                await client.query(
+                    `UPDATE smt_post_aoi_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                    [existingSession.id]
+                );
+                existingSession.status = 'In Progress';
+            }
+            await client.query('COMMIT');
+            return res.status(200).json(existingSession);
         }
 
         // Check if a completed session already exists for this Work Order and side in this stage
@@ -169,16 +178,25 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
             [work_order_id]
         );
         if (woRes.rows.length > 0) {
-            const resolvedSide = await resolveWorkOrderSide(work_order_id, woRes.rows[0].sides);
-            if (side.toLowerCase() !== resolvedSide.toLowerCase()) {
-                await client.query('ROLLBACK');
-                const isDoubleSided = (woRes.rows[0].sides || '').trim().toLowerCase().includes('/');
-                const errMsg = (isDoubleSided && side.toLowerCase() === 'top')
-                    ? 'Bottom side Post AOI must be completed before Top side Post AOI can start.'
-                    : `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`;
-                return res.status(400).json({
-                    message: errMsg
-                });
+            const woSides = (woRes.rows[0].sides || '').trim().toLowerCase();
+            const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+            if (isDoubleSided) {
+                if (side.toLowerCase() === 'top') {
+                    const hasBottomDone = await hasAnyBarcodeBottomCompleted(work_order_id);
+                    if (!hasBottomDone) {
+                        await client.query('ROLLBACK');
+                        return res.status(400).json({
+                            message: 'Bottom side Post AOI must be completed before Top side Post AOI can start.'
+                        });
+                    }
+                }
+            } else {
+                if (side.toLowerCase() !== woSides) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: `Selected side ${side} does not match Work Order side ${woRes.rows[0].sides}.`
+                    });
+                }
             }
         }
 
@@ -615,7 +633,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             `SELECT i.status FROM smt_inspections i
              JOIN smt_pre_aoi_sessions ps ON i.pre_aoi_session_id = ps.id
              WHERE i.work_order_id = $1 
-               AND ps.side = $2
+               AND LOWER(ps.side) = LOWER($2)
                AND i.serial_id = $3
                AND i.process_step = 'Pre AOI'
              ORDER BY i.scanned_at DESC, i.id DESC
@@ -635,7 +653,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             `SELECT i.status, i.scanned_at FROM smt_inspections i
              JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
              WHERE i.work_order_id = $1
-               AND ps.side = $2
+               AND LOWER(ps.side) = LOWER($2)
                AND i.serial_id = $3
                AND i.process_step = 'Post AOI'
              ORDER BY i.scanned_at DESC, i.id DESC
@@ -651,7 +669,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 `SELECT ri.id FROM smt_inspections ri
                  JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
                  WHERE ri.work_order_id = $1
-                   AND rs.side = $2
+                   AND LOWER(rs.side) = LOWER($2)
                    AND ri.serial_id = $3
                    AND ri.process_step = 'Rework'
                    AND ri.status = 'PASS'

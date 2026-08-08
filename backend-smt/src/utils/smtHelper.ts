@@ -4,10 +4,92 @@ import { createLogger } from './logger';
 const logger = createLogger('SMT_HELPER');
 
 /**
+ * Checks if a specific barcode (by serialId or barcode string) has completed Bottom side processing.
+ * Bottom side completion means having a PASS inspection in Post AOI or SMT FG for side = 'bottom'.
+ */
+export const isBarcodeBottomCompleted = async (
+    woId: string,
+    serialId: number | null,
+    barcode: string,
+    clientParam?: any
+): Promise<boolean> => {
+    const db = clientParam || pool;
+    const postAoiPass = await db.query(
+        `SELECT 1 FROM smt_inspections i
+         JOIN smt_post_aoi_sessions s ON i.post_aoi_session_id = s.id
+         WHERE i.work_order_id = $1
+           AND (
+             ($2::integer IS NOT NULL AND i.serial_id = $2::integer)
+             OR (i.scanned_barcode = $3)
+           )
+           AND i.process_step = 'Post AOI'
+           AND LOWER(s.side) = 'bottom'
+           AND i.status = 'PASS'
+           AND (s.is_deleted = false OR s.is_deleted IS NULL)
+         LIMIT 1`,
+        [woId, serialId, barcode]
+    );
+    if (postAoiPass.rows.length > 0) {
+        return true;
+    }
+
+    const fgPass = await db.query(
+        `SELECT 1 FROM smt_inspections i
+         JOIN smt_fg_sessions s ON i.fg_session_id = s.id
+         WHERE i.work_order_id = $1
+           AND (
+             ($2::integer IS NOT NULL AND i.serial_id = $2::integer)
+             OR (i.scanned_barcode = $3)
+           )
+           AND i.process_step = 'SMT FG'
+           AND LOWER(s.side) = 'bottom'
+           AND i.status = 'PASS'
+           AND (s.is_deleted = false OR s.is_deleted IS NULL)
+         LIMIT 1`,
+        [woId, serialId, barcode]
+    );
+    return fgPass.rows.length > 0;
+};
+
+/**
+ * Checks if at least one barcode in a Work Order has completed Bottom side processing.
+ */
+export const hasAnyBarcodeBottomCompleted = async (woId: string, clientParam?: any): Promise<boolean> => {
+    const db = clientParam || pool;
+    const postAoiPass = await db.query(
+        `SELECT 1 FROM smt_inspections i
+         JOIN smt_post_aoi_sessions s ON i.post_aoi_session_id = s.id
+         WHERE i.work_order_id = $1
+           AND i.process_step = 'Post AOI'
+           AND LOWER(s.side) = 'bottom'
+           AND i.status = 'PASS'
+           AND (s.is_deleted = false OR s.is_deleted IS NULL)
+         LIMIT 1`,
+        [woId]
+    );
+    if (postAoiPass.rows.length > 0) {
+        return true;
+    }
+
+    const fgPass = await db.query(
+        `SELECT 1 FROM smt_inspections i
+         JOIN smt_fg_sessions s ON i.fg_session_id = s.id
+         WHERE i.work_order_id = $1
+           AND i.process_step = 'SMT FG'
+           AND LOWER(s.side) = 'bottom'
+           AND i.status = 'PASS'
+           AND (s.is_deleted = false OR s.is_deleted IS NULL)
+         LIMIT 1`,
+        [woId]
+    );
+    return fgPass.rows.length > 0;
+};
+
+/**
  * Resolves the active side for a Work Order.
- * If the Work Order is double-sided, it checks if the Bottom side is fully completed in Post AOI.
- * If Bottom side is fully completed (all generated serials have latest status = PASS), it resolves to Top.
- * Otherwise, it resolves to Bottom.
+ * For double-sided (TOP/BOTTOM) Work Orders:
+ * Resolves to Top if at least one barcode has completed Bottom side processing.
+ * Otherwise resolves to Bottom.
  */
 export const resolveWorkOrderSide = async (woId: string, sides: string): Promise<'Top' | 'Bottom'> => {
     const woSides = (sides || '').trim().toLowerCase();
@@ -18,66 +100,10 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
         return 'Bottom';
     }
     if (woSides === 'top / bottom' || woSides.includes('/')) {
-        // 1. Check if a Completed printing session exists for Bottom side
-        const completedPrintingRes = await pool.query(
-            `SELECT 1 FROM smt_printing_sessions
-             WHERE work_order_id = $1
-               AND LOWER(side) = 'bottom'
-               AND status = 'Completed'
-               AND is_deleted = false
-             LIMIT 1`,
-            [woId]
-        );
-        if (completedPrintingRes.rows.length > 0) {
-            return 'Top';
-        }
-
-        // 2. Get all serial IDs generated for this Work Order
-        const serialsRes = await pool.query(
-            `SELECT sn.id FROM smt_serial_numbers sn
-             WHERE sn.work_order_id = $1
-               AND (sn.batch_id IS NULL OR EXISTS (
-                   SELECT 1 FROM smt_serial_batches sb
-                   WHERE sb.id = sn.batch_id AND sb.is_deleted = false
-               ))`,
-            [woId]
-        );
-        const serialIds = serialsRes.rows.map(r => r.id);
-        if (serialIds.length === 0) {
-            return 'Bottom'; // No serials yet, so Bottom first
-        }
-        
-        // Fetch the latest Post AOI inspection status for each serial on Bottom side
-        const latestPostAoiRes = await pool.query(
-            `SELECT DISTINCT ON (i.serial_id) 
-                 i.serial_id, i.status
-             FROM smt_inspections i
-             JOIN smt_post_aoi_sessions s ON i.post_aoi_session_id = s.id
-             WHERE i.work_order_id = $1 
-               AND i.process_step = 'Post AOI'
-               AND LOWER(s.side) = 'bottom'
-               AND s.is_deleted = false
-             ORDER BY i.serial_id, i.scanned_at DESC, i.id DESC`,
-            [woId]
-        );
-        
-        const latestStatuses = new Map<number, string>();
-        latestPostAoiRes.rows.forEach(r => {
-            latestStatuses.set(r.serial_id, r.status);
-        });
-        
-        let allPassed = serialIds.length > 0;
-        for (const serialId of serialIds) {
-            const status = latestStatuses.get(serialId);
-            if (status !== 'PASS') {
-                allPassed = false;
-                break;
-            }
-        }
-        
-        return allPassed ? 'Top' : 'Bottom';
+        const completedAny = await hasAnyBarcodeBottomCompleted(woId);
+        return completedAny ? 'Top' : 'Bottom';
     }
-    return 'Top'; // Fallback
+    return 'Top';
 };
 
 /**
@@ -234,19 +260,19 @@ export const getEligibleWorkOrdersHelper = async (
         
         logger.info(`[Eligibility Debug] Processing WO: ${wo.work_order_id} | Sides in DB: ${wo.sides} | Resolved Active Side: ${side}`);
 
-        // For Printing stage, exclude if a session in printing exists for this side (active or completed)
+        // For Printing stage, exclude if a session in printing is completed for this side
         if (stage === 'Printing') {
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_printing_sessions 
                  WHERE work_order_id = $1 
                    AND LOWER(side) = $2 
-                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND status = 'Completed'
                    AND is_deleted = false
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
             if (sessionRes.rows.length > 0) {
-                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Printing session already exists for side ${side}`);
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because Printing is already Completed for side ${side}`);
             } else {
                 logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
                 eligibleList.push(wo);
@@ -270,18 +296,18 @@ export const getEligibleWorkOrdersHelper = async (
                 continue;
             }
 
-            // Exclude if a session in Pre AOI exists for this side (active or completed)
+            // Exclude if a completed session in Pre AOI exists for this side
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_pre_aoi_sessions 
                  WHERE work_order_id = $1 
                    AND LOWER(side) = $2 
-                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND status = 'Completed'
                    AND is_deleted = false
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
             if (sessionRes.rows.length > 0) {
-                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Pre AOI session already exists for side ${side}`);
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because Pre AOI is already Completed for side ${side}`);
             } else {
                 logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
                 eligibleList.push(wo);
@@ -305,18 +331,18 @@ export const getEligibleWorkOrdersHelper = async (
                 continue;
             }
 
-            // Exclude if a session in Post AOI exists for this side (active or completed)
+            // Exclude if a completed session in Post AOI exists for this side
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_post_aoi_sessions 
                  WHERE work_order_id = $1 
                    AND LOWER(side) = $2 
-                   AND status IN ('Pending', 'In Progress', 'Paused', 'Completed')
+                   AND status = 'Completed'
                    AND is_deleted = false
                  LIMIT 1`,
                 [wo.work_order_id, lowerSide]
             );
             if (sessionRes.rows.length > 0) {
-                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because a Post AOI session already exists for side ${side}`);
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because Post AOI is already Completed for side ${side}`);
             } else {
                 logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
                 eligibleList.push(wo);

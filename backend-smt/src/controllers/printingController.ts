@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
-import { resolveWorkOrderSide, getEligibleWorkOrdersHelper } from '../utils/smtHelper';
+import { resolveWorkOrderSide, getEligibleWorkOrdersHelper, isBarcodeBottomCompleted, hasAnyBarcodeBottomCompleted } from '../utils/smtHelper';
 
 const logger = createLogger('PrintingController');
 
@@ -131,20 +131,29 @@ export const createPrintingSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if there is already an active session for this Work Order
+        // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
-            `SELECT id FROM smt_printing_sessions 
+            `SELECT * FROM smt_printing_sessions 
              WHERE work_order_id = $1 
+               AND LOWER(side) = $2
                AND status IN ('Pending', 'In Progress', 'Paused') 
-               AND is_deleted = false`,
-            [work_order_id]
+               AND is_deleted = false
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [work_order_id, side.toLowerCase()]
         );
 
         if (activeCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'An active Printing Session already exists for this Work Order. Please resume the existing session.' 
-            });
+            const existingSession = activeCheck.rows[0];
+            if (existingSession.status !== 'In Progress') {
+                await client.query(
+                    `UPDATE smt_printing_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                    [existingSession.id]
+                );
+                existingSession.status = 'In Progress';
+            }
+            await client.query('COMMIT');
+            return res.status(200).json(existingSession);
         }
 
         // Check if a completed session already exists for this Work Order and side in this stage
@@ -169,16 +178,25 @@ export const createPrintingSession = async (req: Request, res: Response) => {
             [work_order_id]
         );
         if (woRes.rows.length > 0) {
-            const resolvedSide = await resolveWorkOrderSide(work_order_id, woRes.rows[0].sides);
-            if (side.toLowerCase() !== resolvedSide.toLowerCase()) {
-                await client.query('ROLLBACK');
-                const isDoubleSided = (woRes.rows[0].sides || '').trim().toLowerCase().includes('/');
-                const errMsg = (isDoubleSided && side.toLowerCase() === 'top')
-                    ? 'Bottom side printing must be completed before Top side printing can start.'
-                    : `Selected side ${side} does not match the resolved active side ${resolvedSide} for this Work Order.`;
-                return res.status(400).json({
-                    message: errMsg
-                });
+            const rawSides = (woRes.rows[0].sides || '').trim().toLowerCase();
+            const isDoubleSided = rawSides === 'top / bottom' || rawSides.includes('/');
+            if (isDoubleSided) {
+                if (side.toLowerCase() === 'top') {
+                    const hasBottomDone = await hasAnyBarcodeBottomCompleted(work_order_id, client);
+                    if (!hasBottomDone) {
+                        await client.query('ROLLBACK');
+                        return res.status(400).json({
+                            message: 'Bottom side printing must be completed before Top side printing can start.'
+                        });
+                    }
+                }
+            } else {
+                if (side.toLowerCase() !== rawSides) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: `Selected side ${side} does not match the Work Order side ${woRes.rows[0].sides}.`
+                    });
+                }
             }
         }
 
@@ -760,6 +778,22 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         // Case B: Valid Barcode
         const serialRecord = serialRes.rows[0];
+
+        // For double-sided (TOP/BOTTOM) Work Orders, Top side Printing scan requires this SPECIFIC barcode to have completed Bottom side
+        if (session.side.toLowerCase() === 'top') {
+            const woSidesRes = await client.query(`SELECT sides FROM smt_work_orders WHERE id = $1`, [session.work_order_id]);
+            const woSides = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
+            const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+            if (isDoubleSided) {
+                const bottomDone = await isBarcodeBottomCompleted(session.work_order_id, serialRecord.id, cleanBarcode);
+                if (!bottomDone) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'Bottom side processing must be completed before Top side processing can start for this barcode.'
+                    });
+                }
+            }
+        }
 
         // Insert PASS inspection
         const insertInspection = `
