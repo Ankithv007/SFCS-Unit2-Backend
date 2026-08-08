@@ -841,6 +841,7 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
                     elapsed_time: elapsedTime,
                     work_order_id: stencil.checked_out_work_order_id,
                     work_order_number: stencil.checked_out_work_order_number || stencil.checked_out_work_order_id,
+                    work_order_side: stencil.checked_out_work_order_side,
                     machine: stencil.checked_out_machine,
                     production_line: stencil.checked_out_line,
                     remarks: stencil.checked_out_remarks
@@ -916,6 +917,19 @@ export const scanReceive = async (req: Request, res: Response) => {
         const validWoId = validWO.id;
         const validWoNumber = validWO.work_order_number || validWO.id;
 
+        // 4b. MANDATORY VALIDATION: Work Order Side vs Stencil Side Strict 1:1 Matching
+        const rawWoSide = validWO.sides || '';
+        const rawStencilSide = location.side || '';
+        const normWOSide = rawWoSide.trim().toUpperCase().replace(/\s*\/\s*/g, '/');
+        const normStencilSide = rawStencilSide.trim().toUpperCase().replace(/\s*\/\s*/g, '/');
+
+        if (normWOSide !== normStencilSide) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                message: `Work Order side does not match the stencil side. Work Order: ${rawWoSide || 'N/A'}, Stencil: ${rawStencilSide || 'N/A'}.`
+            });
+        }
+
         const now = new Date();
         // 5. Perform Receive & Save Work Order details
         await client.query(`
@@ -928,11 +942,12 @@ export const scanReceive = async (req: Request, res: Response) => {
                 checked_out_at = $5,
                 checked_out_work_order_id = $6,
                 checked_out_work_order_number = $7,
-                checked_out_machine = $8,
-                checked_out_line = $9,
-                checked_out_remarks = $10,
+                checked_out_work_order_side = $8,
+                checked_out_machine = $9,
+                checked_out_line = $10,
+                checked_out_remarks = $11,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $11
+            WHERE id = $12
         `, [
             sessionUser.employee_code,
             sessionUser.name,
@@ -941,6 +956,7 @@ export const scanReceive = async (req: Request, res: Response) => {
             now,
             validWoId,
             validWoNumber,
+            rawWoSide,
             machine ? machine.trim() : null,
             production_line ? production_line.trim() : null,
             remarks ? remarks.trim() : null,
@@ -953,8 +969,8 @@ export const scanReceive = async (req: Request, res: Response) => {
                 stencil_rack_number, job_number, stencil_name, revision, thickness_mills, manufacturing_date, side,
                 action, previous_status, current_status, employee_code, employee_name, department, role,
                 machine, production_line, rack_id, row_number, column_number, location_code, remarks,
-                work_order_id, work_order_number
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'STORED', 'CHECKED_OUT', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                work_order_id, work_order_number, work_order_side
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'STORED', 'CHECKED_OUT', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         `, [
             location.stencil_rack_number,
             location.job_number,
@@ -976,7 +992,8 @@ export const scanReceive = async (req: Request, res: Response) => {
             location.location_code,
             remarks ? remarks.trim() : 'Checked out to production.',
             validWoId,
-            validWoNumber
+            validWoNumber,
+            rawWoSide
         ]);
 
         // Audit Log
@@ -984,8 +1001,10 @@ export const scanReceive = async (req: Request, res: Response) => {
         const auditPayload = {
             stencil_rack_number: location.stencil_rack_number,
             job_number: location.job_number,
+            stencil_side: rawStencilSide,
             work_order_id: validWoId,
             work_order_number: validWoNumber,
+            work_order_side: rawWoSide,
             employee_code: sessionUser.employee_code,
             employee_name: sessionUser.name,
             target_smt_machine: machine ? machine.trim() : null,
@@ -1002,7 +1021,7 @@ export const scanReceive = async (req: Request, res: Response) => {
             'STENCIL_SCAN',
             location.id,
             sessionUser.name,
-            `Stencil RECEIVED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number}, Work Order: ${validWoNumber} by ${sessionUser.name} (${sessionUser.employee_code}) at ${auditPayload.date} ${auditPayload.time}`,
+            `Stencil RECEIVED - Rack Number: ${location.stencil_rack_number} (Side: ${rawStencilSide || 'N/A'}), Work Order: ${validWoNumber} (Side: ${rawWoSide || 'N/A'}) by ${sessionUser.name} (${sessionUser.employee_code}) at ${auditPayload.date} ${auditPayload.time}`,
             null,
             auditPayload
         );
@@ -1104,6 +1123,7 @@ export const scanReturn = async (req: Request, res: Response) => {
                     checked_out_at = null,
                     checked_out_work_order_id = null,
                     checked_out_work_order_number = null,
+                    checked_out_work_order_side = null,
                     checked_out_machine = null,
                     checked_out_line = null,
                     checked_out_remarks = null,
@@ -1131,6 +1151,7 @@ export const scanReturn = async (req: Request, res: Response) => {
                 checked_out_at = null,
                 checked_out_work_order_id = null,
                 checked_out_work_order_number = null,
+                checked_out_work_order_side = null,
                 checked_out_machine = null,
                 checked_out_line = null,
                 checked_out_remarks = null,
