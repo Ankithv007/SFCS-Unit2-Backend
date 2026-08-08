@@ -838,7 +838,12 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
                     department: stencil.checked_out_by_dept,
                     role: stencil.checked_out_by_role,
                     received_at: stencil.checked_out_at,
-                    elapsed_time: elapsedTime
+                    elapsed_time: elapsedTime,
+                    work_order_id: stencil.checked_out_work_order_id,
+                    work_order_number: stencil.checked_out_work_order_number || stencil.checked_out_work_order_id,
+                    machine: stencil.checked_out_machine,
+                    production_line: stencil.checked_out_line,
+                    remarks: stencil.checked_out_remarks
                 } : null
             },
             history: historyQuery.rows
@@ -854,11 +859,16 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
  * Operator Receive transaction (Check out to user)
  */
 export const scanReceive = async (req: Request, res: Response) => {
-    const { job_number, machine, production_line, remarks } = req.body;
+    const { job_number, work_order_id, work_order_number, machine, production_line, remarks } = req.body;
     const sessionUser = getSessionUser(req);
 
     if (!job_number) {
         return res.status(400).json({ message: 'Job Number or Stencil Rack Number is required.' });
+    }
+
+    const targetWoRef = (work_order_id || work_order_number || '').trim();
+    if (!targetWoRef) {
+        return res.status(400).json({ message: 'Please select a valid Work Order before checking out the stencil.' });
     }
 
     const client = await pool.connect();
@@ -874,6 +884,7 @@ export const scanReceive = async (req: Request, res: Response) => {
         `, [job_number.trim()]);
 
         if (locationQuery.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'This stencil is not assigned to any physical rack location.' });
         }
         const location = locationQuery.rows[0];
@@ -890,8 +901,23 @@ export const scanReceive = async (req: Request, res: Response) => {
             return res.status(400).json({ message: 'Receive is allowed only when status is STORED.' });
         }
 
+        // 4. Verify Work Order exists in smt_work_orders
+        const woCheck = await client.query(`
+            SELECT id, id as work_order_number, product_name, sides, quantity 
+            FROM smt_work_orders 
+            WHERE id = $1
+        `, [targetWoRef]);
+
+        if (woCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ message: `Work Order '${targetWoRef}' was not found. Please select a valid Work Order.` });
+        }
+        const validWO = woCheck.rows[0];
+        const validWoId = validWO.id;
+        const validWoNumber = validWO.work_order_number || validWO.id;
+
         const now = new Date();
-        // 4. Perform Receive
+        // 5. Perform Receive & Save Work Order details
         await client.query(`
             UPDATE stencil_rack_locations
             SET status = 'CHECKED_OUT',
@@ -900,24 +926,35 @@ export const scanReceive = async (req: Request, res: Response) => {
                 checked_out_by_dept = $3,
                 checked_out_by_role = $4,
                 checked_out_at = $5,
+                checked_out_work_order_id = $6,
+                checked_out_work_order_number = $7,
+                checked_out_machine = $8,
+                checked_out_line = $9,
+                checked_out_remarks = $10,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $6
+            WHERE id = $11
         `, [
             sessionUser.employee_code,
             sessionUser.name,
             sessionUser.department,
             sessionUser.role,
             now,
+            validWoId,
+            validWoNumber,
+            machine ? machine.trim() : null,
+            production_line ? production_line.trim() : null,
+            remarks ? remarks.trim() : null,
             location.id
         ]);
 
-        // 5. Log movement history
+        // 6. Log movement history
         await client.query(`
             INSERT INTO stencil_rack_movement_history (
                 stencil_rack_number, job_number, stencil_name, revision, thickness_mills, manufacturing_date, side,
                 action, previous_status, current_status, employee_code, employee_name, department, role,
-                machine, production_line, rack_id, row_number, column_number, location_code, remarks
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'STORED', 'CHECKED_OUT', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                machine, production_line, rack_id, row_number, column_number, location_code, remarks,
+                work_order_id, work_order_number
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'STORED', 'CHECKED_OUT', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         `, [
             location.stencil_rack_number,
             location.job_number,
@@ -937,7 +974,9 @@ export const scanReceive = async (req: Request, res: Response) => {
             location.row_number,
             location.column_number,
             location.location_code,
-            remarks ? remarks.trim() : 'Checked out to production.'
+            remarks ? remarks.trim() : 'Checked out to production.',
+            validWoId,
+            validWoNumber
         ]);
 
         // Audit Log
@@ -945,11 +984,16 @@ export const scanReceive = async (req: Request, res: Response) => {
         const auditPayload = {
             stencil_rack_number: location.stencil_rack_number,
             job_number: location.job_number,
+            work_order_id: validWoId,
+            work_order_number: validWoNumber,
             employee_code: sessionUser.employee_code,
             employee_name: sessionUser.name,
+            target_smt_machine: machine ? machine.trim() : null,
+            target_production_line: production_line ? production_line.trim() : null,
             action: 'RECEIVED',
             date: nowTime.toISOString().split('T')[0],
-            time: nowTime.toTimeString().split(' ')[0]
+            time: nowTime.toTimeString().split(' ')[0],
+            remarks: remarks ? remarks.trim() : null
         };
 
         await recordAuditLog(
@@ -958,7 +1002,7 @@ export const scanReceive = async (req: Request, res: Response) => {
             'STENCIL_SCAN',
             location.id,
             sessionUser.name,
-            `Stencil RECEIVED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number} by ${sessionUser.name} (${sessionUser.employee_code}) at ${auditPayload.date} ${auditPayload.time}`,
+            `Stencil RECEIVED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number}, Work Order: ${validWoNumber} by ${sessionUser.name} (${sessionUser.employee_code}) at ${auditPayload.date} ${auditPayload.time}`,
             null,
             auditPayload
         );
@@ -1058,6 +1102,11 @@ export const scanReturn = async (req: Request, res: Response) => {
                     checked_out_by_dept = null,
                     checked_out_by_role = null,
                     checked_out_at = null,
+                    checked_out_work_order_id = null,
+                    checked_out_work_order_number = null,
+                    checked_out_machine = null,
+                    checked_out_line = null,
+                    checked_out_remarks = null,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
             `, [currentLoc.id]);
@@ -1080,6 +1129,11 @@ export const scanReturn = async (req: Request, res: Response) => {
                 checked_out_by_dept = null,
                 checked_out_by_role = null,
                 checked_out_at = null,
+                checked_out_work_order_id = null,
+                checked_out_work_order_number = null,
+                checked_out_machine = null,
+                checked_out_line = null,
+                checked_out_remarks = null,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $9
         `, [
