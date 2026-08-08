@@ -73,7 +73,7 @@ export const getActiveStencils = async (req: Request, res: Response) => {
             LEFT JOIN smt_stencil_lifecycle_states states
             ON s.id = states.stencil_record_id
             WHERE
-                s.status IN ('STORED', 'CHECKED_OUT')
+                s.status = 'CHECKED_OUT'
                 AND COALESCE(states.lifecycle_status, 'ACTIVE') <> 'SCRAPPED'
             ORDER BY
                 s.stencil_name ASC
@@ -174,14 +174,12 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         }
         const stencil = stencilRes.rows[0];
 
-        // 2. Validate physical status
-        if (stencil.status === 'CHECKED_OUT') {
+        // 2. Validate physical status: Stencil MUST be CHECKED_OUT from rack before assignment
+        if (stencil.status !== 'CHECKED_OUT') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ message: 'The selected stencil is currently checked out and cannot be assigned until it has been returned to the rack.' });
-        }
-        if (stencil.status !== 'STORED') {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ message: 'The selected stencil is not stored in the rack.' });
+            return res.status(400).json({ 
+                message: 'The selected stencil is still available in the rack. Please check out the stencil from Stencil Rack Management before assigning it to a Work Order.' 
+            });
         }
 
         // 3. Fetch or initialize stencil lifecycle state record
