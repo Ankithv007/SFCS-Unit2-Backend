@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
+import { isStencilSideCompatible } from '../utils/smtHelper';
 
 const logger = createLogger('StencilRackController');
 
@@ -917,17 +918,78 @@ export const scanReceive = async (req: Request, res: Response) => {
         const validWoId = validWO.id;
         const validWoNumber = validWO.work_order_number || validWO.id;
 
-        // 4b. MANDATORY VALIDATION: Work Order Side vs Stencil Side Strict 1:1 Matching
+        // 4b. MANDATORY VALIDATION: Work Order Side vs Stencil Side Compatibility Matrix Validation
         const rawWoSide = validWO.sides || '';
         const rawStencilSide = location.side || '';
-        const normWOSide = rawWoSide.trim().toUpperCase().replace(/\s*\/\s*/g, '/');
-        const normStencilSide = rawStencilSide.trim().toUpperCase().replace(/\s*\/\s*/g, '/');
 
-        if (normWOSide !== normStencilSide) {
+        if (!isStencilSideCompatible(rawWoSide, rawStencilSide)) {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: `Work Order side does not match the stencil side. Work Order: ${rawWoSide || 'N/A'}, Stencil: ${rawStencilSide || 'N/A'}.`
+                message: `Work Order side is not compatible with the stencil side. Work Order: ${rawWoSide || 'N/A'}, Stencil: ${rawStencilSide || 'N/A'}.`
             });
+        }
+
+        // 4c. MANDATORY VALIDATION: Strategy & Sequence Validation for TOP/BOTTOM Work Orders
+        const woSidesNorm = rawWoSide.trim().toLowerCase();
+        const stencilSideNorm = rawStencilSide.trim().toLowerCase();
+
+        if (woSidesNorm.includes('/') || woSidesNorm === 'top / bottom' || woSidesNorm === 'top/bottom') {
+            const existingLcRes = await client.query(
+                `SELECT sides FROM smt_stencil_lifecycle WHERE work_order_id = $1 AND is_deleted = false`,
+                [validWoId]
+            );
+            const existingRecords = existingLcRes.rows;
+
+            const hasCombinedExisting = existingRecords.some(r => {
+                const s = (r.sides || '').trim().toLowerCase();
+                return (s.includes('top') && s.includes('bottom')) || s.includes('/');
+            });
+
+            if (hasCombinedExisting) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({
+                    message: 'This Work Order has already been assigned a combined TOP/BOTTOM stencil. Additional stencil checkouts are not permitted.'
+                });
+            }
+
+            const hasTopExisting = existingRecords.some(r => (r.sides || '').trim().toLowerCase() === 'top');
+            const hasBottomExisting = existingRecords.some(r => (r.sides || '').trim().toLowerCase() === 'bottom');
+
+            if (hasTopExisting && hasBottomExisting) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({
+                    message: 'This Work Order has already completed stencil assignments for both TOP and BOTTOM sides.'
+                });
+            }
+
+            if (stencilSideNorm.includes('top') && stencilSideNorm.includes('bottom')) {
+                if (hasTopExisting || hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'Separate stencil(s) have already been assigned to this Work Order. You cannot check out a combined TOP/BOTTOM stencil.'
+                    });
+                }
+            } else if (stencilSideNorm.includes('bottom')) {
+                if (hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'A separate BOTTOM stencil has already been checked out/registered for this Work Order.'
+                    });
+                }
+            } else if (stencilSideNorm.includes('top')) {
+                if (!hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'Please register the BOTTOM stencil first for this TOP/BOTTOM Work Order.'
+                    });
+                }
+                if (hasTopExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'A separate TOP stencil has already been checked out/registered for this Work Order.'
+                    });
+                }
+            }
         }
 
         const now = new Date();

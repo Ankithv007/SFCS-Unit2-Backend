@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
+import { isStencilSideCompatible, calculateRequiredLifecyclePrints } from '../utils/smtHelper';
 
 const logger = createLogger('StencilLifecycleController');
 
@@ -124,7 +125,10 @@ export const getLifecycleWorkOrders = async (req: Request, res: Response) => {
                    wo.quantity, wo.panel_quantity, wo.sides, wo.status, wo.created_by, wo.created_at, wo.remark
             FROM smt_work_orders wo
             LEFT JOIN (
-                SELECT work_order_id, COUNT(*) as lifecycle_count
+                SELECT 
+                    work_order_id, 
+                    COUNT(*) as lifecycle_count,
+                    BOOL_OR(LOWER(sides) LIKE '%top%bottom%' OR sides LIKE '%/%') as has_combined
                 FROM smt_stencil_lifecycle
                 WHERE is_deleted = false
                 GROUP BY work_order_id
@@ -135,7 +139,9 @@ export const getLifecycleWorkOrders = async (req: Request, res: Response) => {
                     (LOWER(wo.sides) = 'top' OR LOWER(wo.sides) = 'bottom') AND l.lifecycle_count < 1
                 )
                 OR (
-                    (LOWER(wo.sides) = 'top / bottom' OR wo.sides LIKE '%/%') AND l.lifecycle_count < 2
+                    (LOWER(wo.sides) LIKE '%/%' OR LOWER(wo.sides) = 'top / bottom' OR LOWER(wo.sides) = 'top/bottom') 
+                    AND l.has_combined IS NOT TRUE 
+                    AND l.lifecycle_count < 2
                 )
             ORDER BY wo.created_at DESC
         `;
@@ -244,18 +250,15 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         }
         const workOrder = woRes.rows[0];
 
-        // 5b. MANDATORY VALIDATION: Work Order Side vs Stencil Rack Side Strict 1:1 Matching
-        const normWOSide = (workOrder.sides || '').trim().toUpperCase().replace(/\s*\/\s*/g, '/');
-        const normStencilSide = (stencil.side || '').trim().toUpperCase().replace(/\s*\/\s*/g, '/');
-
-        if (normWOSide !== normStencilSide) {
+        // 5b. MANDATORY VALIDATION: Work Order Side vs Stencil Rack Side Compatibility Matrix Validation
+        if (!isStencilSideCompatible(workOrder.sides, stencil.side)) {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: `Stencil side ${stencil.side || 'N/A'} does not match Work Order side ${workOrder.sides}. A ${stencil.side || 'N/A'} stencil can only be used for a ${stencil.side || 'N/A'} Work Order.`
+                message: `Stencil side ${stencil.side || 'N/A'} is not compatible with Work Order side ${workOrder.sides}.`
             });
         }
 
-        // 6. Determine the Side being registered and perform uniqueness checks per Work Order
+        // 6. Determine the Side being registered and perform configuration / strategy enforcement checks per Work Order
         const existingRes = await client.query(
             `SELECT id, sides FROM smt_stencil_lifecycle 
              WHERE work_order_id = $1 AND is_deleted = false`,
@@ -264,32 +267,83 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         const existingRecords = existingRes.rows;
 
         const woSides = (workOrder.sides || '').trim().toLowerCase();
+        const stencilSideNorm = (stencil.side || '').trim().toLowerCase();
         let registrationSide = '';
 
         if (woSides === 'top') {
+            registrationSide = 'Top';
             if (existingRecords.length > 0) {
                 await client.query('ROLLBACK');
-                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for the TOP side of this Work Order.' });
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this TOP Work Order.' });
             }
-            registrationSide = 'Top';
         } else if (woSides === 'bottom') {
-            if (existingRecords.length > 0) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for the BOTTOM side of this Work Order.' });
-            }
             registrationSide = 'Bottom';
+            if (existingRecords.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this BOTTOM Work Order.' });
+            }
         } else if (woSides === 'top / bottom' || woSides.includes('/')) {
-            if (existingRecords.length > 0) {
+            const hasCombinedExisting = existingRecords.some(r => {
+                const s = (r.sides || '').trim().toLowerCase();
+                return (s.includes('top') && s.includes('bottom')) || s.includes('/');
+            });
+
+            if (hasCombinedExisting) {
                 await client.query('ROLLBACK');
-                return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this Work Order.' });
+                return res.status(400).json({
+                    message: 'This Work Order has already been assigned a combined TOP/BOTTOM stencil. Additional stencil assignments are not permitted for this Work Order.'
+                });
             }
-            registrationSide = 'Top / Bottom';
+
+            const hasTopExisting = existingRecords.some(r => (r.sides || '').trim().toLowerCase() === 'top');
+            const hasBottomExisting = existingRecords.some(r => (r.sides || '').trim().toLowerCase() === 'bottom');
+
+            if (hasTopExisting && hasBottomExisting) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({
+                    message: 'This Work Order has already completed stencil lifecycle assignments for both TOP and BOTTOM sides.'
+                });
+            }
+
+            if (stencilSideNorm.includes('top') && stencilSideNorm.includes('bottom')) {
+                if (hasTopExisting || hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'Separate stencil(s) have already been assigned to this Work Order. You cannot assign a combined TOP/BOTTOM stencil to a Work Order using separate stencils.'
+                    });
+                }
+                registrationSide = 'Top / Bottom';
+            } else if (stencilSideNorm.includes('bottom')) {
+                if (hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'A separate BOTTOM stencil has already been assigned to this Work Order.'
+                    });
+                }
+                registrationSide = 'Bottom';
+            } else if (stencilSideNorm.includes('top')) {
+                if (!hasBottomExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'Please register the BOTTOM stencil first for this TOP/BOTTOM Work Order.'
+                    });
+                }
+                if (hasTopExisting) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        message: 'A separate TOP stencil has already been assigned to this Work Order.'
+                    });
+                }
+                registrationSide = 'Top';
+            } else {
+                registrationSide = 'Top';
+            }
         } else {
+            registrationSide = 'Top';
             if (existingRecords.length > 0) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ message: 'A Stencil Life Cycle record already exists for this Work Order.' });
             }
-            registrationSide = 'Top';
         }
 
         // 7. Calculate Current Cycle Life Cycle Consumption dynamically
@@ -303,8 +357,11 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         );
         const currentCycleUsed = printsRes.rows[0].print_count;
         const currentCycleCapacity = parseInt(lifecycleState.current_cycle_capacity || lifecycleState.target_life_cycle || 60000, 10);
-        const workOrderQty = workOrder.quantity || 0;
-        const projectedUsed = currentCycleUsed + workOrderQty;
+        
+        // Panel Quantity-based lifecycle calculation (NOT Work Order Quantity)
+        const panelQty = Number(workOrder.panel_quantity || workOrder.panel_qty || workOrder.panelQuantity || workOrder.quantity || 0);
+        const requiredPrints = calculateRequiredLifecyclePrints(workOrder.sides, stencil.side, panelQty);
+        const projectedUsed = currentCycleUsed + requiredPrints;
 
         const remainingBefore = Math.max(0, currentCycleCapacity - currentCycleUsed);
         const remainingAfter = currentCycleCapacity - projectedUsed;
@@ -314,13 +371,13 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             await client.query('ROLLBACK');
             const excessPrints = projectedUsed - currentCycleCapacity;
             return res.status(400).json({
-                message: `The selected Work Order quantity exceeds the stencil's remaining lifecycle capacity. Insufficient capacity: Remaining ${remainingBefore} prints, Work Order requires ${workOrderQty} prints.`,
+                message: `The required lifecycle prints (${requiredPrints}) exceed the stencil's remaining lifecycle capacity. Insufficient capacity: Current Cycle Remaining ${remainingBefore} prints, Required ${requiredPrints} prints.`,
                 details: {
                     current_used_prints: currentCycleUsed,
                     current_lifecycle_capacity: currentCycleCapacity,
                     remaining_prints: remainingBefore,
-                    work_order_quantity: workOrderQty,
-                    required_prints: workOrderQty,
+                    panel_quantity: panelQty,
+                    required_prints: requiredPrints,
                     excess_prints: excessPrints
                 }
             });
@@ -359,7 +416,7 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             registrationSide,
             workOrder.quantity,
             currentCycleCapacity,
-            workOrderQty,
+            requiredPrints,
             remainingAfter,
             projectedUsed,
             assignmentStatus,
@@ -368,7 +425,7 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             sessionUser.name,
             currentCycleNumber,
             currentCycleUsed,
-            workOrderQty,
+            requiredPrints,
             projectedUsed,
             remainingBefore,
             remainingAfter
@@ -377,7 +434,7 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
         const savedRecord = lifecycleRes.rows[0];
 
         // 9. Update total lifetime prints & automatically set status to MAINTENANCE if current cycle capacity is reached
-        const newLifetimePrints = (parseInt(lifecycleState.total_lifetime_prints, 10) || 0) + workOrderQty;
+        const newLifetimePrints = (parseInt(lifecycleState.total_lifetime_prints, 10) || 0) + requiredPrints;
 
         if (projectedUsed === currentCycleCapacity) {
             await client.query(
@@ -419,7 +476,7 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
                 'STENCIL_LIFECYCLE',
                 savedRecord.id,
                 sessionUser.name,
-                `Work Order ${workOrder.id} (${workOrderQty} prints) assigned to Stencil '${stencil.stencil_name}' (Cycle ${currentCycleNumber}). Cycle usage: ${projectedUsed}/${currentCycleCapacity}.`,
+                `Work Order ${workOrder.id} (${requiredPrints} prints) assigned to Stencil '${stencil.stencil_name}' (Cycle ${currentCycleNumber}). Cycle usage: ${projectedUsed}/${currentCycleCapacity}.`,
                 JSON.stringify(savedRecord)
             ]
         );
