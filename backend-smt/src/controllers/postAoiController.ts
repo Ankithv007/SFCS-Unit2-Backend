@@ -1145,9 +1145,16 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
                         COALESCE(
                             ins.repair_time,
                             (SELECT r.repair_time 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)
@@ -1161,9 +1168,16 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
                         COALESCE(
                             ins.repair_remark,
                             (SELECT r.repair_remark 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)
@@ -1253,9 +1267,16 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
                         COALESCE(
                             ins.repair_time,
                             (SELECT r.repair_time 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)
@@ -1269,9 +1290,16 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
                         COALESCE(
                             ins.repair_remark,
                             (SELECT r.repair_remark 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)
@@ -1576,9 +1604,16 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
                         COALESCE(
                             ins.repair_time,
                             (SELECT r.repair_time 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)
@@ -1592,9 +1627,16 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
                         COALESCE(
                             ins.repair_remark,
                             (SELECT r.repair_remark 
-                             FROM smt_inspections r 
+                             FROM smt_inspections r
+                             JOIN smt_rework_sessions rs ON r.rework_session_id = rs.id
                              WHERE r.process_step = 'Rework' 
-                               AND r.status = 'PASS' 
+                               AND r.status = 'PASS'
+                               AND rs.work_order_id = ins.work_order_id
+                               AND LOWER(rs.side) = (
+                                   SELECT LOWER(ps2.side) FROM smt_post_aoi_sessions ps2
+                                   WHERE ps2.id = ins.post_aoi_session_id LIMIT 1
+                               )
+                               AND rs.is_deleted = false
                                AND (
                                  (r.serial_id IS NOT NULL AND ins.serial_id IS NOT NULL AND r.serial_id = ins.serial_id)
                                  OR (r.scanned_barcode = ins.scanned_barcode)

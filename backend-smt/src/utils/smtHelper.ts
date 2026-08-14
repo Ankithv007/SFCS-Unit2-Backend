@@ -164,6 +164,95 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
 };
 
 /**
+ * Resolves the side for Rework.
+ * Checks if there are any unrepaired Post AOI failures on Bottom or Top.
+ */
+export const resolveReworkSide = async (woId: string, sides: string): Promise<'Top' | 'Bottom'> => {
+    const woSides = (sides || '').trim().toLowerCase();
+    if (woSides === 'top') return 'Top';
+    if (woSides === 'bottom') return 'Bottom';
+    if (woSides === 'top / bottom' || woSides.includes('/')) {
+        // Check for unrepaired failures on Bottom side
+        const bottomFails = await pool.query(
+            `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
+             JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+             WHERE i.work_order_id = $1
+               AND LOWER(ps.side) = 'bottom'
+               AND i.process_step = 'Post AOI'
+               AND i.status = 'FAIL'
+               AND ps.is_deleted = false`,
+            [woId]
+        );
+        let hasBottomUnrepaired = false;
+        for (const row of bottomFails.rows) {
+            const reworkCheck = await pool.query(
+                `SELECT ri.id FROM smt_inspections ri
+                 JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                 WHERE ri.work_order_id = $1
+                   AND LOWER(rs.side) = 'bottom'
+                   AND (
+                     (ri.serial_id IS NOT NULL AND ri.serial_id = $2)
+                     OR (ri.scanned_barcode = $3)
+                   )
+                   AND ri.process_step = 'Rework'
+                   AND ri.status = 'PASS'
+                   AND ri.scanned_at > $4
+                   AND rs.is_deleted = false
+                 LIMIT 1`,
+                [woId, row.serial_id, row.scanned_barcode, row.scanned_at]
+            );
+            if (reworkCheck.rows.length === 0) {
+                hasBottomUnrepaired = true;
+                break;
+            }
+        }
+        if (hasBottomUnrepaired) {
+            return 'Bottom';
+        }
+
+        // Check for unrepaired failures on Top side
+        const topFails = await pool.query(
+            `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
+             JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+             WHERE i.work_order_id = $1
+               AND LOWER(ps.side) = 'top'
+               AND i.process_step = 'Post AOI'
+               AND i.status = 'FAIL'
+               AND ps.is_deleted = false`,
+            [woId]
+        );
+        let hasTopUnrepaired = false;
+        for (const row of topFails.rows) {
+            const reworkCheck = await pool.query(
+                `SELECT ri.id FROM smt_inspections ri
+                 JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                 WHERE ri.work_order_id = $1
+                   AND LOWER(rs.side) = 'top'
+                   AND (
+                     (ri.serial_id IS NOT NULL AND ri.serial_id = $2)
+                     OR (ri.scanned_barcode = $3)
+                   )
+                   AND ri.process_step = 'Rework'
+                   AND ri.status = 'PASS'
+                   AND ri.scanned_at > $4
+                   AND rs.is_deleted = false
+                 LIMIT 1`,
+                [woId, row.serial_id, row.scanned_barcode, row.scanned_at]
+            );
+            if (reworkCheck.rows.length === 0) {
+                hasTopUnrepaired = true;
+                break;
+            }
+        }
+        if (hasTopUnrepaired) {
+            return 'Top';
+        }
+    }
+    return await resolveWorkOrderSide(woId, sides);
+};
+
+
+/**
  * Helper to fetch and validate all required auto-populate details for a work order and determined side.
  */
 export const getAutoPopulateDetailsHelper = async (
@@ -189,6 +278,8 @@ export const getAutoPopulateDetailsHelper = async (
             } else {
                 side = 'Bottom';
             }
+        } else if (sessionTable === 'smt_rework_sessions') {
+            side = await resolveReworkSide(woId, wo.sides);
         } else {
             side = await resolveWorkOrderSide(woId, wo.sides);
         }
@@ -303,8 +394,10 @@ export const getEligibleWorkOrdersHelper = async (
     const eligibleList: any[] = [];
 
     for (const wo of candidates) {
-        let side = await resolveWorkOrderSide(wo.work_order_id, wo.sides);
-        if (stage === 'SMT FG') {
+        let side: 'Top' | 'Bottom';
+        if (stage === 'Rework') {
+            side = await resolveReworkSide(wo.work_order_id, wo.sides);
+        } else if (stage === 'SMT FG') {
             const woSides = (wo.sides || '').trim().toLowerCase();
             const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
             if (isDoubleSided || woSides === 'top') {
@@ -312,6 +405,8 @@ export const getEligibleWorkOrdersHelper = async (
             } else {
                 side = 'Bottom';
             }
+        } else {
+            side = await resolveWorkOrderSide(wo.work_order_id, wo.sides);
         }
         const lowerSide = side.toLowerCase();
         
