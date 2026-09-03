@@ -239,7 +239,7 @@ const workOrderExport = [authenticateToken, requirePermission('smt_work_order', 
 router.post('/work-orders', workOrderCreate, createWorkOrder);
 router.put('/work-orders/:id', workOrderEdit, updateWorkOrder);
 router.get('/work-orders', workOrderView, getWorkOrders);
-router.get('/workorders/pending', workOrderView, getPendingWorkOrders);
+router.get('/workorders/pending', authenticateToken, getPendingWorkOrders);
 router.post('/work-orders/:id/register', workOrderCreate, registerWorkOrder);
 router.get('/work-orders/registered', workOrderView, getRegisteredWorkOrders);
 router.get('/workorder-history', workOrderView, getWorkOrderHistory);
