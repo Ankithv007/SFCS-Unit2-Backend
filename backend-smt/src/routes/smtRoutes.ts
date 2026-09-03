@@ -242,7 +242,7 @@ router.get('/work-orders', workOrderView, getWorkOrders);
 router.get('/workorders/pending', authenticateToken, getPendingWorkOrders);
 router.post('/work-orders/:id/register', workOrderCreate, registerWorkOrder);
 router.get('/work-orders/registered', workOrderView, getRegisteredWorkOrders);
-router.get('/workorder-history', workOrderView, getWorkOrderHistory);
+router.get('/workorder-history', authenticateToken, getWorkOrderHistory);
 router.delete('/work-orders/:id', workOrderDelete, deleteWorkOrder);
 router.get('/work-orders/:id/preview-po', workOrderView, previewPoDocument);
 router.get('/work-orders/:id/view-po-file', workOrderView, viewPoDocumentFile);

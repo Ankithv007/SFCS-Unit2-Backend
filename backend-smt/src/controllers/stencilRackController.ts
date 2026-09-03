@@ -131,7 +131,11 @@ export const createRack = async (req: Request, res: Response) => {
     const { name, rows, columns, description, status } = req.body;
     const sessionUser = getSessionUser(req);
 
-    if (sessionUser.role !== 'Super Admin') {
+    const allowedRoles = ['Super Admin', 'Admin', 'Manager'];
+    const userRole = (sessionUser.role || '').trim();
+    const isAllowedRole = allowedRoles.some(r => r.toLowerCase() === userRole.toLowerCase());
+
+    if (!isAllowedRole) {
         await recordUnauthorizedAttempt(req, 'smt_stencil_rack', 'can_create', 'Unauthorized Create Rack Attempt');
         return res.status(403).json({ message: 'Access Denied. You are not authorized to perform this operation.' });
     }
