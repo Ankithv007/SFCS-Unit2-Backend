@@ -181,6 +181,8 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
 
 export const getWorkOrders = async (req: Request, res: Response) => {
     const { page, limit, search } = req.query;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    const canAccessPo = sessionUserRole === 'super admin' || sessionUserRole === 'admin';
 
     // Backwards compatibility: If page and limit query parameters are missing, return legacy array
     if (!page && !limit) {
@@ -195,7 +197,15 @@ export const getWorkOrders = async (req: Request, res: Response) => {
             queryText += ' ORDER BY created_at DESC';
 
             const result = await pool.query(queryText, params);
-            return res.status(200).json(result.rows);
+            const rows = result.rows;
+            if (!canAccessPo) {
+                rows.forEach((row: any) => {
+                    row.po_document_name = null;
+                    row.po_document_path = null;
+                    row.po_document_type = null;
+                });
+            }
+            return res.status(200).json(rows);
         } catch (err) {
             logger.error("Error fetching work orders (legacy):", err);
             return res.status(500).json({ error: "Failed to fetch work orders" });
@@ -225,9 +235,18 @@ export const getWorkOrders = async (req: Request, res: Response) => {
         const dataParams = [...params, limitNum, offset];
         const dataResult = await pool.query(dataQuery, dataParams);
 
+        const rows = dataResult.rows;
+        if (!canAccessPo) {
+            rows.forEach((row: any) => {
+                row.po_document_name = null;
+                row.po_document_path = null;
+                row.po_document_type = null;
+            });
+        }
+
         res.status(200).json({
             success: true,
-            data: dataResult.rows,
+            data: rows,
             total,
             page: pageNum,
             limit: limitNum,
@@ -472,6 +491,11 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
 
 export const viewPoDocumentFile = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    if (sessionUserRole !== 'super admin' && sessionUserRole !== 'admin') {
+        return res.status(403).json({ success: false, message: "Access Denied. Only Super Admin and Admin can access PO Documents." });
+    }
+
     try {
         const result = await pool.query(
             'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',
@@ -515,6 +539,11 @@ export const viewPoDocumentFile = async (req: Request, res: Response) => {
 
 export const downloadPoDocument = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    if (sessionUserRole !== 'super admin' && sessionUserRole !== 'admin') {
+        return res.status(403).json({ success: false, message: "Access Denied. Only Super Admin and Admin can access PO Documents." });
+    }
+
     try {
         const result = await pool.query(
             'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',
@@ -558,6 +587,11 @@ export const downloadPoDocument = async (req: Request, res: Response) => {
 
 export const previewPoDocument = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    if (sessionUserRole !== 'super admin' && sessionUserRole !== 'admin') {
+        return res.status(403).json({ success: false, message: "Access Denied. Only Super Admin and Admin can access PO Documents." });
+    }
+
     try {
         const result = await pool.query(
             'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',

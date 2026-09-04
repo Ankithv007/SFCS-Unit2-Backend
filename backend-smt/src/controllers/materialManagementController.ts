@@ -65,6 +65,9 @@ export const parseSMTBarcode = (rawBarcode: string): ParsedBarcode => {
  * Fetch all active QMS work orders that do NOT have a DRAFT or ACTIVE Material Management record
  */
 export const getEligibleWorkOrders = async (req: Request, res: Response) => {
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    const canAccessPo = sessionUserRole === 'super admin' || sessionUserRole === 'admin';
+
     try {
         const query = `
             SELECT 
@@ -104,7 +107,15 @@ export const getEligibleWorkOrders = async (req: Request, res: Response) => {
             ORDER BY qm.work_order_number ASC;
         `;
         const result = await pool.query(query);
-        res.status(200).json(result.rows);
+        const rows = result.rows;
+        if (!canAccessPo) {
+            rows.forEach((row: any) => {
+                row.po_document_name = null;
+                row.po_document_path = null;
+                row.po_document_type = null;
+            });
+        }
+        res.status(200).json(rows);
     } catch (err: any) {
         logger.error('Error fetching eligible work orders:', err);
         res.status(500).json({ error: 'Failed to fetch eligible work orders.' });
@@ -227,6 +238,9 @@ export const getMaterialManagementRecords = async (req: Request, res: Response) 
  */
 export const getMaterialManagementDetail = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    const canAccessPo = sessionUserRole === 'super admin' || sessionUserRole === 'admin';
+
     try {
         const query = `
             SELECT 
@@ -281,6 +295,12 @@ export const getMaterialManagementDetail = async (req: Request, res: Response) =
         row.work_order_no = row.work_order_number;
         row.production_qty = row.production_quantity;
         row.bom_revision = row.bom_revision_number ? `Rev ${row.bom_revision_number}` : 'Rev 1.1';
+
+        if (!canAccessPo) {
+            row.po_document_name = null;
+            row.po_document_path = null;
+            row.po_document_type = null;
+        }
 
         res.status(200).json(row);
     } catch (err: any) {

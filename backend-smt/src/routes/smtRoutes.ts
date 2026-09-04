@@ -235,6 +235,7 @@ const workOrderCreate = [authenticateToken, requirePermission('smt_work_order', 
 const workOrderEdit = [authenticateToken, requirePermission('smt_work_order', 'can_edit')];
 const workOrderDelete = [authenticateToken, requirePermission('smt_work_order', 'can_delete')];
 const workOrderExport = [authenticateToken, requirePermission('smt_work_order', 'can_export')];
+const poDocumentAccess = [authenticateToken, requireRole(['Super Admin', 'Admin'])];
 
 router.post('/work-orders', workOrderCreate, createWorkOrder);
 router.put('/work-orders/:id', workOrderEdit, updateWorkOrder);
@@ -244,9 +245,9 @@ router.post('/work-orders/:id/register', workOrderCreate, registerWorkOrder);
 router.get('/work-orders/registered', workOrderView, getRegisteredWorkOrders);
 router.get('/workorder-history', authenticateToken, getWorkOrderHistory);
 router.delete('/work-orders/:id', workOrderDelete, deleteWorkOrder);
-router.get('/work-orders/:id/preview-po', workOrderView, previewPoDocument);
-router.get('/work-orders/:id/view-po-file', workOrderView, viewPoDocumentFile);
-router.get('/work-orders/:id/download-po', workOrderExport, downloadPoDocument);
+router.get('/work-orders/:id/preview-po', poDocumentAccess, previewPoDocument);
+router.get('/work-orders/:id/view-po-file', poDocumentAccess, viewPoDocumentFile);
+router.get('/work-orders/:id/download-po', poDocumentAccess, downloadPoDocument);
 
 // Serial Numbers
 router.post('/serial-numbers', generateSerials);
