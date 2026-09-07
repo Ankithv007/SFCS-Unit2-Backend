@@ -11,15 +11,17 @@ export class AuditService {
         scanResult: string, 
         scannedBy: string, 
         remarks?: string, 
-        resolutionRemarks?: string
+        resolutionRemarks?: string,
+        dbClient?: any
     ): Promise<void> {
+        const db = dbClient || pool;
         try {
             const query = `
                 INSERT INTO scans 
                 (barcode, batch_id, stage_id, scan_result, scanned_by, remarks, resolution_remarks)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
             `;
-            await pool.query(query, [
+            await db.query(query, [
                 barcode, batchId, stageId, scanResult, scannedBy, remarks || null, resolutionRemarks || null
             ]);
         } catch (error: any) {

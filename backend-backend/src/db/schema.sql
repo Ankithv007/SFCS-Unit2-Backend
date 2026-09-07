@@ -225,7 +225,14 @@ CREATE INDEX IF NOT EXISTS idx_batches_number ON batches(batch_number);
 CREATE INDEX IF NOT EXISTS idx_batch_progress_batch ON batch_stage_progress(batch_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
 
--- Indexing logic remains...
+-- Performance Optimization Indexes (Benchmarked and Justified)
+CREATE INDEX IF NOT EXISTS idx_batches_work_order_id ON batches(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_batches_created_at ON batches(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_units_batch_id ON units(batch_id);
+CREATE INDEX IF NOT EXISTS idx_units_stage_status ON units(current_stage_id, current_status);
+CREATE INDEX IF NOT EXISTS idx_units_failed_stage_id ON units(failed_stage_id);
+CREATE INDEX IF NOT EXISTS idx_scans_batch_stage ON scans(batch_id, stage_id);
+CREATE INDEX IF NOT EXISTS idx_work_orders_created_at ON work_orders(created_at DESC);
 
 -- ==========================================
 -- SEED DATA

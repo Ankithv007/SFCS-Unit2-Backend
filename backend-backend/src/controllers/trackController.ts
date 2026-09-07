@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
-import pool from '../config/db';
+import pool, { smtPool } from '../config/db';
+import { syncSmtWorkOrders, syncSingleWorkOrder } from '../services/workOrderSyncService';
 import { ValidationService } from '../services/validation/ValidationService';
+import { WorkflowEngineService } from '../services/workflow/WorkflowEngineService';
 
 export const trackBarcode = async (req: Request, res: Response) => {
     const { id } = req.params;
@@ -34,8 +36,6 @@ export const trackBarcode = async (req: Request, res: Response) => {
             if (usnResult.rows.length > 0) {
                 barcode = usnResult.rows[0].barcode;
                 unitSerialNumber = usnResult.rows[0].unit_serial_number;
-            } else {
-                return res.status(404).json({ error: `"${inputValue}" was not found in the system. Please check the barcode or Unit Serial Number.` });
             }
         }
 
@@ -46,7 +46,9 @@ export const trackBarcode = async (req: Request, res: Response) => {
                 u.current_status,
                 u.failed_at AS failure_created_at,
                 u.last_scanned_at AS last_updated_at,
+                b.id AS batch_id,
                 b.batch_number,
+                wo.id AS work_order_id,
                 wo.wo_number,
                 wo.customer_name,
                 wo.model,
@@ -62,7 +64,51 @@ export const trackBarcode = async (req: Request, res: Response) => {
         `, [barcode]);
 
         if ((trackingResult.rowCount ?? 0) === 0) {
-            return res.status(404).json({ error: `"${inputValue}" was not found in the system. Please check the barcode or Unit Serial Number.` });
+            // Check if it exists in SMT serial numbers (generated but not yet scanned in backend)
+            try {
+                const smtSerialRes = await smtPool.query(`
+                    SELECT sn.serial_number, sn.work_order_id, wo.customer_name, wo.model_name, wo.quantity, wo.selected_stages
+                    FROM smt_serial_numbers sn
+                    LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
+                    WHERE UPPER(TRIM(sn.serial_number)) = $1
+                    LIMIT 1
+                `, [inputValue]);
+
+                if (smtSerialRes.rowCount && smtSerialRes.rowCount > 0) {
+                    const smtSn = smtSerialRes.rows[0];
+                    const activeRoute = await WorkflowEngineService.resolveActiveRoute({ stagesList: smtSn.selected_stages });
+                    const firstStage = activeRoute.length > 0 ? activeRoute[0].stage_name : 'Pre-Soldering';
+                    return res.status(200).json({
+                        barcode: smtSn.serial_number,
+                        unit_serial_number: null,
+                        searched_by: 'barcode',
+                        batch_number: smtSn.work_order_id || '-',
+                        wo_number: smtSn.work_order_id || '-',
+                        customer_name: smtSn.customer_name || '-',
+                        model: smtSn.model_name || '-',
+                        quantity: smtSn.quantity || '-',
+                        current_stage: firstStage,
+                        current_status: 'PENDING',
+                        failed_stage: null,
+                        final_status_label: 'AWAITING FIRST SCAN',
+                        last_updated_at: null,
+                        failure_created_at: null,
+                        repair_completed_at: null,
+                        revalidated_passed_at: null,
+                        total_failures: 0,
+                        total_reworks: 0,
+                        total_debugs: 0,
+                        scan_history: [],
+                    });
+                }
+            } catch (smtErr) {
+                console.warn('Fallback check to smt_serial_numbers failed:', smtErr);
+            }
+
+            return res.status(404).json({
+                error: `"${inputValue}" was not found in the system. Please check the barcode or Unit Serial Number.`,
+                code: 'UNIT_NOT_FOUND'
+            });
         }
 
         const tracking = trackingResult.rows[0];
@@ -138,10 +184,18 @@ export const trackBarcode = async (req: Request, res: Response) => {
         const totalReworks = history.filter((h: any) => h.station === 'Rework').length;
         const totalDebugs = history.filter((h: any) => h.station === 'Debug').length;
 
-        // 5. Compute "final status" label
+        // 5. Compute "final status" label dynamically based on active work order route
         const status = (tracking.current_status || '').toUpperCase();
         let finalStatusLabel = 'IN PRODUCTION';
-        if (status === 'ACCEPTED' && tracking.current_stage === 'Packing') {
+        const lastStage = await WorkflowEngineService.getLastStage({
+            workOrderId: tracking.work_order_id,
+            batchId: tracking.batch_id
+        });
+        const isFinalStage = lastStage 
+            ? (tracking.current_stage === lastStage.stage_name || tracking.current_stage === lastStage.stage_code)
+            : tracking.current_stage === 'Packing';
+
+        if (status === 'ACCEPTED' && isFinalStage) {
             finalStatusLabel = 'COMPLETED';
         } else if (status === 'ACCEPTED') {
             finalStatusLabel = 'IN PRODUCTION';
@@ -234,14 +288,31 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
     const inputValue = woId.trim().toUpperCase();
 
     try {
-        // 1. Find the work order record
-        const woResult = await pool.query(
-            `SELECT * FROM work_orders WHERE wo_number = $1`,
+        // 1. Find the work order record by wo_number OR integer ID
+        let woResult = await pool.query(
+            `SELECT * FROM work_orders 
+             WHERE UPPER(TRIM(wo_number)) = $1 
+                OR (CASE WHEN $1 ~ '^[0-9]+$' THEN id = $1::int ELSE false END)
+             LIMIT 1`,
             [inputValue]
         );
 
         if ((woResult.rowCount ?? 0) === 0) {
-            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.` });
+            await syncSingleWorkOrder(inputValue);
+            woResult = await pool.query(
+                `SELECT * FROM work_orders 
+                 WHERE UPPER(TRIM(wo_number)) = $1 
+                    OR (CASE WHEN $1 ~ '^[0-9]+$' THEN id = $1::int ELSE false END)
+                 LIMIT 1`,
+                [inputValue]
+            );
+        }
+
+        if ((woResult.rowCount ?? 0) === 0) {
+            return res.status(404).json({
+                error: `Work Order "${inputValue}" was not found in the system.`,
+                code: 'WORK_ORDER_NOT_FOUND'
+            });
         }
 
         const wo = woResult.rows[0];
@@ -275,17 +346,25 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             historyBySerial[row.barcode].push(row);
         });
 
-        const stepNames = [
-            'Pre-Soldering', 
-            'Visual Inspection', 
-            'Quality Assurance', 
-            'Flashing', 
-            'PCBA FCT', 
-            'Assembly', 
-            'Unit Testing', 
-            'Quality Inspection', 
-            'Packing'
-        ];
+        const activeRoute = await WorkflowEngineService.resolveActiveRoute({ workOrderId: wo.id });
+        const stepNames = activeRoute.length > 0
+            ? activeRoute.map(s => s.stage_name)
+            : [
+                'Pre-Soldering', 
+                'Visual Inspection', 
+                'Quality Assurance', 
+                'Flashing', 
+                'PCBA FCT', 
+                'Assembly', 
+                'Unit Testing', 
+                'Quality Inspection', 
+                'Packing'
+            ];
+        const lastStage = activeRoute.length > 0 ? activeRoute[activeRoute.length - 1] : null;
+        const isFinalStage = (stageName: string) => {
+            if (!lastStage) return stageName === 'Packing';
+            return stageName === lastStage.stage_name || stageName === lastStage.stage_code;
+        };
 
         const mappedSerials = serials.map((s: any) => {
             const history = historyBySerial[s.barcode] || [];
@@ -309,7 +388,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             });
 
             let finalStatusLabel = 'Pending';
-            if (s.current_status === 'ACCEPTED' && s.current_stage === 'Packing') {
+            if (s.current_status === 'ACCEPTED' && isFinalStage(s.current_stage)) {
                 finalStatusLabel = 'Completed';
             }
 
@@ -358,9 +437,14 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
 
     try {
         // Find stage details
-        const stageRes = await pool.query('SELECT id, stage_order, stage_name FROM production_stages WHERE stage_code = $1', [stageCode]);
+        const stageRes = await pool.query(`
+            SELECT id, stage_order, stage_name FROM production_stages 
+            WHERE UPPER(REPLACE(REPLACE(stage_code, '-', '_'), ' ', '_')) = UPPER(REPLACE(REPLACE($1, '-', '_'), ' ', '_'))
+               OR UPPER(stage_name) = UPPER($1)
+            LIMIT 1
+        `, [stageCode]);
         if (stageRes.rows.length === 0) {
-            return res.status(404).json({ error: `Stage with code "${stageCode}" not found.` });
+            return res.status(404).json({ error: `Stage with code "${stageCode}" not found.`, code: 'STAGE_NOT_FOUND' });
         }
         const stageId = stageRes.rows[0].id;
         const stageOrder = stageRes.rows[0].stage_order;
@@ -368,10 +452,10 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
         let prevStageId = null;
         let prevStageName = '';
         if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
-            const prevStageRes = await pool.query('SELECT id, stage_name FROM production_stages WHERE stage_order = $1 - 1', [stageOrder]);
-            if (prevStageRes.rows.length > 0) {
-                prevStageId = prevStageRes.rows[0].id;
-                prevStageName = prevStageRes.rows[0].stage_name;
+            const prevStage = await WorkflowEngineService.getPreviousStage(stageId, { batchId });
+            if (prevStage) {
+                prevStageId = prevStage.id;
+                prevStageName = prevStage.stage_name;
             }
         }
         const prevStageLabel = prevStageName ? `${prevStageName} - Passed` : '-';
@@ -762,7 +846,7 @@ export const getBatchUnitDetails = async (req: Request, res: Response) => {
         const listRes = await pool.query(listQuery, [...finalQueryParams, offset, limit]);
 
         let totalRecords = parseInt(countRes.rows[0].count);
-        if (stageCode === 'PTH' && columnType === 'pending') {
+        if (prevStageId === null && columnType === 'pending') {
             const woRes = await pool.query(`
                 SELECT w.quantity, 
                        (SELECT COUNT(DISTINCT s.barcode) FROM scans s WHERE s.batch_id = $1 AND s.stage_id = $2) as scanned

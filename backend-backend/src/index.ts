@@ -37,6 +37,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 // Mount routes
 app.use('/api/backend/work-order', workOrderRoutes);
+app.use('/api/backend/work-orders', workOrderRoutes);
+app.use('/work-orders', workOrderRoutes);
 app.use('/api/backend/pth', pthRoutes);
 app.use('/api/backend/vi', viRoutes);
 app.use('/api/backend/qa', qaRoutes);
@@ -103,7 +105,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     });
 });
 
-import { syncSmtWorkOrders } from './services/workOrderSyncService';
+import { syncSmtWorkOrders, ensureSchemaColumns } from './services/workOrderSyncService';
 
 const setupDatabase = async () => {
     try {
@@ -112,10 +114,11 @@ const setupDatabase = async () => {
         const schema = fs.readFileSync(schemaPath, 'utf8');
         await pool.query(schema);
 
+        await ensureSchemaColumns();
         logger.info('[Database] Schema initialized successfully.');
         
         // Initial sync of SMT work orders
-        await syncSmtWorkOrders();
+        await syncSmtWorkOrders({ force: true });
         
         logger.info('[Database] Ready.');
     } catch (error: any) {

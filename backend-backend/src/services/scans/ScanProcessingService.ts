@@ -91,52 +91,14 @@ export class ScanProcessingService {
                 throw new Error(`Failed to create/resolve master batch for ${batchNumber}`);
             }
 
-            // 2.5 Validate that this stage is in the Work Order's selected_stages routing
-            if (!['REWORK', 'DEBUG'].includes(stageCode.toUpperCase())) {
-                const woRes = await client.query(
-                    `SELECT w.selected_stages
-                     FROM batches b
-                     JOIN work_orders w ON b.work_order_id = w.id
-                     WHERE b.id = $1`,
-                    [batchId]
-                );
-                if (woRes.rows.length > 0) {
-                    const rawStages = woRes.rows[0].selected_stages;
-                    if (rawStages !== null && rawStages !== undefined) {
-                        let selectedStages: string[];
-                        if (Array.isArray(rawStages)) {
-                            selectedStages = rawStages;
-                        } else if (typeof rawStages === 'string') {
-                            try { selectedStages = JSON.parse(rawStages); } catch { selectedStages = []; }
-                        } else {
-                            selectedStages = [];
-                        }
-                        if (selectedStages.length > 0) {
-                            const displayName = STAGE_CODE_TO_DISPLAY_NAME[stageCode.toUpperCase()] || stageCode;
-                            const isIncluded = selectedStages.some(
-                                s => s.toLowerCase() === displayName.toLowerCase()
-                            );
-                            if (!isIncluded) {
-                                throw new ValidationError({
-                                    errorCode: 'STAGE_NOT_IN_ROUTING',
-                                    message: `Stage "${displayName}" is not part of this Work Order's process routing.`,
-                                    currentStage: displayName,
-                                    suggestedAction: 'This stage was not selected when the Work Order was created. Scanning is not allowed here.',
-                                    severity: 'error'
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. Fetch the Unit to validate transitions
+            // 3. Fetch the Unit to validate transitions (Row-locked for concurrency safety)
             const unitRes = await client.query(`
                 SELECT u.*, b.batch_number as unit_batch_number, w.wo_number as unit_wo_number 
                 FROM units u
                 LEFT JOIN batches b ON u.batch_id = b.id
                 LEFT JOIN work_orders w ON b.work_order_id = w.id
-                WHERE u.barcode = $1`, [payload.barcode]);
+                WHERE u.barcode = $1
+                FOR UPDATE OF u`, [payload.barcode]);
             const unit = unitRes.rows.length > 0 ? unitRes.rows[0] : null;
 
             // 4. Validate Batch Match
@@ -169,8 +131,12 @@ export class ScanProcessingService {
                 }
             }
 
-            // 5. Strict Workflow Validation
-            await WorkflowEngineService.validateTransition(unit, stage);
+            // 5. Strict Workflow Validation (Dynamic Work Order Route)
+            await WorkflowEngineService.validateTransition(unit, stage, {
+                batchId,
+                workOrderId: payload.work_order_id,
+                dbClient: client
+            });
 
             // Special handling for Rework/Debug return flow:
             // If the scanning stage is a Rework/Debug stage, and the result is ACCEPTED/RESOLVED,
@@ -198,13 +164,29 @@ export class ScanProcessingService {
                 nextStatus = 'DEBUG';
             }
 
+            // Check if this scan completes the unit at the final stage of this Work Order's route
+            if (payload.status === 'ACCEPTED') {
+                try {
+                    const lastStage = await WorkflowEngineService.getLastStage({
+                        workOrderId: payload.work_order_id || (unit ? unit.unit_wo_id : null),
+                        batchId: batchId || (unit ? unit.batch_id : null)
+                    }, client);
+
+                    if (lastStage && lastStage.id === stage.id) {
+                        nextStatus = 'COMPLETED';
+                    }
+                } catch (e: any) {
+                    logger.warn(`Could not determine last stage for completion: ${e.message}`);
+                }
+            }
+
             await TraceabilityService.updateUnitState(
-                payload.barcode, batchId, nextStageId, nextStatus, payload.scanned_by, payload.remarks
+                payload.barcode, batchId, nextStageId, nextStatus, payload.scanned_by, payload.remarks, client
             );
 
             // 7. Audit Trail (Insert into Scans)
             await AuditService.logScanEvent(
-                payload.barcode, batchId, stage.id, payload.status, payload.scanned_by, payload.remarks, payload.resolution_remarks
+                payload.barcode, batchId, stage.id, payload.status, payload.scanned_by, payload.remarks, payload.resolution_remarks, client
             );
 
             // 8. External Serial Number mapping (if provided)
@@ -563,8 +545,12 @@ export class ScanProcessingService {
                 }
             }
 
-            // 8. Strict Workflow Transition Validation
-            await WorkflowEngineService.validateTransition(unit, stage);
+            // 8. Strict Workflow Transition Validation (Dynamic Work Order Route)
+            await WorkflowEngineService.validateTransition(unit, stage, {
+                batchId,
+                workOrderId,
+                dbClient: client
+            });
 
             return {
                 success: true,

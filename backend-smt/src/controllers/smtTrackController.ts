@@ -185,12 +185,12 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
     try {
         // 1. Find the work order record
         const woResult = await pool.query(
-            `SELECT * FROM smt_work_orders WHERE id = $1`,
+            `SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = $1 OR UPPER(TRIM(po_id)) = $1 LIMIT 1`,
             [inputValue]
         );
 
         if ((woResult.rowCount ?? 0) === 0) {
-            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.` });
+            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.`, code: 'WORK_ORDER_NOT_FOUND' });
         }
 
         const wo = woResult.rows[0];
@@ -809,12 +809,12 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
     try {
         // 1. Fetch Work Order Details
         const woResult = await pool.query(
-            `SELECT * FROM smt_work_orders WHERE id = $1`,
+            `SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = $1 OR UPPER(TRIM(po_id)) = $1 LIMIT 1`,
             [inputValue]
         );
 
         if ((woResult.rowCount ?? 0) === 0) {
-            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.` });
+            return res.status(404).json({ error: `Work Order "${inputValue}" was not found in the system.`, code: 'WORK_ORDER_NOT_FOUND' });
         }
 
         const wo = woResult.rows[0];

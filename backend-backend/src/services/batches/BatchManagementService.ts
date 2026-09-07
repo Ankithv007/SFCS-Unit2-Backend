@@ -1,6 +1,7 @@
 import pool from '../../config/db';
 import { createLogger } from '../../utils/logger';
-import { syncSmtWorkOrders } from '../workOrderSyncService';
+import { syncSmtWorkOrders, syncSingleWorkOrder } from '../workOrderSyncService';
+import { WorkflowEngineService } from '../workflow/WorkflowEngineService';
 
 const logger = createLogger('BatchManagementService');
 
@@ -12,6 +13,13 @@ export class BatchManagementService {
         createdBy: string
     ): Promise<number | null> {
         try {
+            if (workOrderId) {
+                const woCheck = await pool.query('SELECT id, selected_stages FROM work_orders WHERE id = $1', [workOrderId]);
+                if (woCheck.rows.length === 0 || !woCheck.rows[0].selected_stages) {
+                    await syncSingleWorkOrder(workOrderId);
+                }
+            }
+
             const checkQuery = `SELECT id FROM batches WHERE batch_number = $1`;
             const checkResult = await pool.query(checkQuery, [batchNumber]);
             
@@ -69,52 +77,33 @@ export class BatchManagementService {
 
     static async getBatchesByStage(stageCode: string, limit: number, offset: number, status?: string, search?: string) {
         await syncSmtWorkOrders();
-        // Find the stage and previous stage
-        const stageRes = await pool.query('SELECT id, stage_order FROM production_stages WHERE stage_code = $1', [stageCode]);
 
-        if (stageRes.rows.length === 0) return { data: [], total: 0 };
-        const stageId = stageRes.rows[0].id;
-        const stageOrder = stageRes.rows[0].stage_order;
-        
-        let prevStageIdQuery = 'SELECT id FROM production_stages WHERE stage_order = $1 - 1';
-        let prevStageIdRes = await pool.query(prevStageIdQuery, [stageOrder]);
-        const prevStageId = prevStageIdRes.rows.length > 0 ? prevStageIdRes.rows[0].id : null;
+        // 1. Resolve stage using cached production stages
+        const allStages = await WorkflowEngineService.getAllProductionStages();
+        const stage = WorkflowEngineService.matchStageToProductionStage(stageCode, allStages) 
+            || allStages.find(s => s.stage_code.toUpperCase() === stageCode.toUpperCase() || s.stage_name.toUpperCase() === stageCode.toUpperCase());
 
-        // Stage name -> stage_code mapping for selected_stages lookup
-        // (selected_stages stores display names; production_stages uses stage_code)
-        const STAGE_NAME_TO_CODE: Record<string, string> = {
-            'PTH': 'PTH', 'VI': 'VI', 'QA': 'QA',
-            'Flashing': 'FLASHING', 'PCBA-FCT': 'PCBA_FCT',
-            'Assembly': 'ASSEMBLY', 'Unit Testing': 'UNIT_TESTING',
-            'QI': 'QI', 'Packing': 'PACKING'
-        };
-        // Build a SQL CASE expression mapping display name -> stage_code
-        const nameToCaseSql = Object.entries(STAGE_NAME_TO_CODE)
-            .map(([name, code]: [string, string]) => `WHEN '${name}' THEN '${code}'`)
-            .join(' ');
-        // Per-WO subquery: finds the stage_id of the nearest preceding stage
-        // that is in this WO's selected_stages, with stage_order < current stage.
-        // Falls back to null (= first stage, no prior check needed) if none found.
-        const prevStagePerWoSubquery = `
-            (
-                SELECT ps2.id
-                FROM production_stages ps2
-                WHERE ps2.stage_order < ${stageOrder}
-                  AND ps2.stage_code IN (
-                      SELECT CASE elem ${nameToCaseSql} END
-                      FROM jsonb_array_elements_text(
-                          COALESCE(w.selected_stages, '[]'::jsonb)
-                      ) AS elem
-                      WHERE CASE elem ${nameToCaseSql} END IS NOT NULL
-                  )
-                ORDER BY ps2.stage_order DESC
-                LIMIT 1
+        if (!stage) return { data: [], total: 0 };
+        const stageId = stage.id;
+        const stageName = stage.stage_name;
+
+        const isReworkOrDebug = stageCode === 'REWORK' || stageCode === 'DEBUG';
+
+        // Filter batches so standard stage pages only show Work Orders that selected this stage (or legacy NULL)
+        const stageInRoutingFilter = isReworkOrDebug ? '' : `
+            AND (
+                w.selected_stages IS NULL
+                OR jsonb_typeof(w.selected_stages) != 'array'
+                OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements_text(w.selected_stages) AS elem
+                    WHERE UPPER(REPLACE(REPLACE(REPLACE(elem, '-', ''), '_', ''), ' ', '')) = UPPER(REPLACE(REPLACE(REPLACE('${stageCode}', '-', ''), '_', ''), ' ', ''))
+                       OR UPPER(elem) = UPPER('${stageName}')
+                )
             )
         `;
 
-
         let statusFilter = '';
-        if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
+        if (!isReworkOrDebug) {
             if (status === 'completed') {
                 statusFilter = 'AND COALESCE(p.accepted_qty, 0) >= w.quantity';
             } else if (status === 'pending') {
@@ -131,226 +120,251 @@ export class BatchManagementService {
             searchParams.push(`%${search.trim()}%`);
         }
 
-        let previousStagePassedQuery = `
-            COALESCE(
-                (
-                    SELECT COUNT(DISTINCT u.barcode)
-                    FROM units u
-                    JOIN batches pb ON u.batch_id = pb.id
-                    WHERE pb.work_order_id = w.id
-                      AND (
-                          ${prevStagePerWoSubquery} IS NULL
-                          OR u.current_stage_id > (${prevStagePerWoSubquery})
-                          OR (u.current_stage_id = (${prevStagePerWoSubquery}) AND u.current_status = 'ACCEPTED')
-                      )
-                ), w.quantity
-            )
-        `;
-
-
-        if (stageCode === 'REWORK') {
-            previousStagePassedQuery = `
-                COALESCE(
+        if (isReworkOrDebug) {
+            const query = `
+                SELECT 
+                    b.id, 
+                    b.batch_number, 
+                    b.work_order_id, 
+                    b.created_at, 
+                    b.created_by, 
+                    b.is_deleted,
+                    w.wo_number, 
+                    w.customer_name,
+                    w.model,
+                    w.quantity as "workOrderQty",
+                    w.selected_stages as "selectedStages",
+                    
                     (
-                        SELECT SUM(p2.rework_qty) 
-                        FROM batch_stage_progress p2 
-                        JOIN batches b2 ON p2.batch_id = b2.id 
-                        WHERE b2.work_order_id = w.id
-                          AND ($4::int IS NULL OR true)
-                    ), 0
-                )
-            `;
-        } else if (stageCode === 'DEBUG') {
-            previousStagePassedQuery = `
-                COALESCE(
-                    (
-                        SELECT SUM(p2.debug_qty) 
-                        FROM batch_stage_progress p2 
-                        JOIN batches b2 ON p2.batch_id = b2.id 
-                        WHERE b2.work_order_id = w.id
-                          AND ($4::int IS NULL OR true)
-                    ), 0
-                )
-            `;
-        }
-
-        const isReworkOrDebug = stageCode === 'REWORK' || stageCode === 'DEBUG';
-
-        const query = isReworkOrDebug ? `
-            SELECT 
-                b.id, 
-                b.batch_number, 
-                b.work_order_id, 
-                b.created_at, 
-                b.created_by, 
-                b.is_deleted,
-                w.wo_number, 
-                w.customer_name,
-                w.model,
-                w.quantity as "workOrderQty",
-                w.selected_stages as "selectedStages",
-                
-                (
-                    SELECT COUNT(DISTINCT s.barcode)
-                    FROM scans s
-                    WHERE s.batch_id = b.id 
-                      AND s.stage_id = $1 
-                      AND (
-                          SELECT sf.stage_id 
-                          FROM scans sf 
-                          WHERE sf.barcode = s.barcode 
-                            AND sf.scan_result IN ('REWORK', 'DEBUG') 
-                            AND sf.scanned_at < s.scanned_at 
-                          ORDER BY sf.scanned_at DESC LIMIT 1
-                      ) = ps.id
-                ) as scanned,
-                
-                COUNT(u.barcode) as pending,
-                ps.stage_name as "sourceStage",
-                ps.id as "failedStageId",
-                
-                (
-                    SELECT COUNT(DISTINCT s.barcode)
-                    FROM scans s
-                    WHERE s.batch_id = b.id 
-                      AND s.stage_id = $1 
-                      AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
-                      AND (
-                          SELECT sf.stage_id 
-                          FROM scans sf 
-                          WHERE sf.barcode = s.barcode 
-                            AND sf.scan_result IN ('REWORK', 'DEBUG') 
-                            AND sf.scanned_at < s.scanned_at 
-                          ORDER BY sf.scanned_at DESC LIMIT 1
-                      ) = ps.id
-                ) as passed,
-                COUNT(u.barcode) as rework,
-                COUNT(u.barcode) as debug,
-                b.status
-            FROM batches b
-            JOIN work_orders w ON b.work_order_id = w.id
-            JOIN units u ON u.batch_id = b.id
-            JOIN production_stages ps ON u.failed_stage_id = ps.id
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
-              AND u.current_status = '${stageCode}'
-              AND ($1::int IS NULL OR true)
-              AND (true)
-            GROUP BY b.id, w.id, ps.id, ps.stage_name
-            ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
-        ` : `
-            SELECT 
-                b.id, 
-                b.batch_number, 
-                b.work_order_id, 
-                b.created_at, 
-                b.created_by, 
-                b.is_deleted,
-                w.wo_number, 
-                w.customer_name,
-                w.model,
-                w.quantity as "workOrderQty",
-                w.selected_stages as "selectedStages",
-                
-                -- Previous Stage Passed calculation
-                ${previousStagePassedQuery} as "previousStagePassed",
-                
-                (
-                    SELECT COUNT(DISTINCT s.barcode)
-                    FROM scans s
-                    WHERE s.batch_id = b.id AND s.stage_id = $1
-                ) as scanned,
-                
-                CASE WHEN (${prevStagePerWoSubquery}) IS NULL THEN
-                    GREATEST(0, w.quantity - (
                         SELECT COUNT(DISTINCT s.barcode)
                         FROM scans s
-                        WHERE s.batch_id = b.id AND s.stage_id = $1
-                    ))
-                ELSE
+                        WHERE s.batch_id = b.id 
+                          AND s.stage_id = $1 
+                          AND (
+                              SELECT sf.stage_id 
+                              FROM scans sf 
+                              WHERE sf.barcode = s.barcode 
+                                AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                AND sf.scanned_at < s.scanned_at 
+                              ORDER BY sf.scanned_at DESC LIMIT 1
+                          ) = ps.id
+                    ) as scanned,
+                    
+                    COUNT(u.barcode) as pending,
+                    ps.stage_name as "sourceStage",
+                    ps.id as "failedStageId",
+                    
                     (
-                        SELECT COUNT(DISTINCT u.barcode)
-                        FROM units u
-                        WHERE u.batch_id = b.id
-                          AND u.barcode NOT IN (
-                              SELECT s2.barcode
-                              FROM scans s2
-                              WHERE s2.batch_id = b.id AND s2.stage_id = $1
-                          )
-                    )
-                END as pending,
-                
-                NULL as "sourceStage",
-                NULL as "failedStageId",
-                
-                (
-                    SELECT COUNT(*)
-                    FROM units u
-                    WHERE u.batch_id = b.id
-                      AND (u.current_stage_id > $1 OR (u.current_stage_id = $1 AND u.current_status = 'ACCEPTED'))
-                ) as passed,
-                
-                (
-                    SELECT COUNT(*)
-                    FROM units u
-                    WHERE u.batch_id = b.id
-                      AND u.failed_stage_id = $1
-                      AND (u.current_stage_id = $1 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
-                      AND u.current_status != 'ACCEPTED'
-                      AND (
-                          SELECT s.scan_result 
-                          FROM scans s 
-                          WHERE s.barcode = u.barcode AND s.stage_id = $1 AND s.scan_result IN ('REWORK', 'DEBUG') 
-                          ORDER BY s.scanned_at DESC LIMIT 1
-                      ) = 'REWORK'
-                ) as rework,
-                
-                (
-                    SELECT COUNT(*)
-                    FROM units u
-                    WHERE u.batch_id = b.id
-                      AND u.failed_stage_id = $1
-                      AND (u.current_stage_id = $1 OR u.current_stage_id = 10 OR u.current_stage_id = 11)
-                      AND u.current_status != 'ACCEPTED'
-                      AND (
-                          SELECT s.scan_result 
-                          FROM scans s 
-                          WHERE s.barcode = u.barcode AND s.stage_id = $1 AND s.scan_result IN ('REWORK', 'DEBUG') 
-                          ORDER BY s.scanned_at DESC LIMIT 1
-                      ) = 'DEBUG'
-                ) as debug,
-                
-                b.status
+                        SELECT COUNT(DISTINCT s.barcode)
+                        FROM scans s
+                        WHERE s.batch_id = b.id 
+                          AND s.stage_id = $1 
+                          AND s.scan_result IN ('ACCEPTED', 'RESOLVED')
+                          AND (
+                              SELECT sf.stage_id 
+                              FROM scans sf 
+                              WHERE sf.barcode = s.barcode 
+                                AND sf.scan_result IN ('REWORK', 'DEBUG') 
+                                AND sf.scanned_at < s.scanned_at 
+                              ORDER BY sf.scanned_at DESC LIMIT 1
+                          ) = ps.id
+                    ) as passed,
+                    COUNT(u.barcode) as rework,
+                    COUNT(u.barcode) as debug,
+                    b.status
+                FROM batches b
+                JOIN work_orders w ON b.work_order_id = w.id
+                JOIN units u ON u.batch_id = b.id
+                JOIN production_stages ps ON u.failed_stage_id = ps.id
+                WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
+                  AND u.current_status = '${stageCode}'
+                  AND ($1::int IS NULL OR true)
+                GROUP BY b.id, w.id, ps.id, ps.stage_name
+                ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
+            `;
+            const result = await pool.query(query, [stageId, limit, offset, ...searchParams]);
+
+            const countQuery = `
+                SELECT COUNT(DISTINCT b.id || '_' || ps.id) as count
+                FROM batches b 
+                JOIN work_orders w ON b.work_order_id = w.id
+                JOIN units u ON u.batch_id = b.id
+                JOIN production_stages ps ON u.failed_stage_id = ps.id
+                WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
+                  AND u.current_status = '${stageCode}'
+                  AND ($1::int IS NULL OR true)
+            `;
+            const countRes = await pool.query(countQuery, searchParams.length > 0 ? [stageId, searchParams[0]] : [stageId]);
+
+            return {
+                data: result.rows,
+                total: parseInt(countRes.rows[0]?.count || '0')
+            };
+        }
+
+        // Standard stage query: ultra-fast set-based paginated lookup
+        const query = `
+            SELECT 
+                b.id, 
+                b.batch_number, 
+                b.work_order_id, 
+                b.created_at, 
+                b.created_by, 
+                b.is_deleted,
+                b.status,
+                w.wo_number, 
+                w.customer_name, 
+                w.model, 
+                w.quantity as "workOrderQty", 
+                w.selected_stages as "selectedStages",
+                COALESCE(p.scanned_qty, 0) as p_scanned,
+                COALESCE(p.accepted_qty, 0) as p_accepted,
+                COALESCE(p.rework_qty, 0) as p_rework,
+                COALESCE(p.debug_qty, 0) as p_debug
             FROM batches b
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
+            WHERE b.is_deleted = FALSE ${statusFilter} ${stageInRoutingFilter} ${searchFilter}
             ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         `;
-        
-        const result = await pool.query(query, [stageId, limit, offset, ...searchParams]);
-        
-        const countQuery = isReworkOrDebug ? `
-            SELECT COUNT(DISTINCT b.id || '_' || ps.id) as count
-            FROM batches b 
-            JOIN work_orders w ON b.work_order_id = w.id
-            JOIN units u ON u.batch_id = b.id
-            JOIN production_stages ps ON u.failed_stage_id = ps.id
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
-              AND u.current_status = '${stageCode}'
-              AND ($1::int IS NULL OR true)
-        ` : `
-            SELECT COUNT(*) as count FROM batches b 
-            JOIN work_orders w ON b.work_order_id = w.id
-            LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
-            WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
-        `;
-        
-        const countRes = await pool.query(countQuery, searchParams.length > 0 ? [stageId, searchParams[0]] : [stageId]);
 
-        return {
-            data: result.rows,
-            total: parseInt(countRes.rows[0].count)
-        };
+        const [result, countRes] = await Promise.all([
+            pool.query(query, [stageId, limit, offset, ...searchParams]),
+            pool.query(`
+                SELECT COUNT(*) as count FROM batches b 
+                JOIN work_orders w ON b.work_order_id = w.id
+                LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
+                WHERE b.is_deleted = FALSE ${statusFilter} ${stageInRoutingFilter} ${searchFilterCount}
+            `, searchParams.length > 0 ? [stageId, searchParams[0]] : [stageId])
+        ]);
+
+        const total = parseInt(countRes.rows[0]?.count || '0');
+        if (result.rows.length === 0) {
+            return { data: [], total };
+        }
+
+        const batchIds = result.rows.map(r => r.id);
+
+        // Fetch metrics for just the returned page of batches in parallel
+        const [scansRes, unitsRes, progressRes, unitsByStageRes] = await Promise.all([
+            pool.query(`
+                SELECT batch_id, COUNT(DISTINCT barcode) as scan_count
+                FROM scans
+                WHERE batch_id = ANY($1::int[]) AND stage_id = $2
+                GROUP BY batch_id
+            `, [batchIds, stageId]),
+
+            pool.query(`
+                SELECT batch_id,
+                       COUNT(*) FILTER (WHERE current_stage_id > $2 OR (current_stage_id = $2 AND current_status = 'ACCEPTED')) as passed_count,
+                       COUNT(*) FILTER (WHERE failed_stage_id = $2 AND (current_stage_id = $2 OR current_stage_id IN (10, 11)) AND current_status = 'REWORK') as rework_count,
+                       COUNT(*) FILTER (WHERE failed_stage_id = $2 AND (current_stage_id = $2 OR current_stage_id IN (10, 11)) AND current_status = 'DEBUG') as debug_count
+                FROM units
+                WHERE batch_id = ANY($1::int[])
+                GROUP BY batch_id
+            `, [batchIds, stageId]),
+
+            pool.query(`
+                SELECT batch_id, stage_id, accepted_qty, scanned_qty
+                FROM batch_stage_progress
+                WHERE batch_id = ANY($1::int[])
+            `, [batchIds]),
+
+            pool.query(`
+                SELECT batch_id, current_stage_id, current_status, COUNT(DISTINCT barcode) as cnt
+                FROM units
+                WHERE batch_id = ANY($1::int[])
+                GROUP BY batch_id, current_stage_id, current_status
+            `, [batchIds])
+        ]);
+
+        const scanMap = new Map<number, number>();
+        for (const r of scansRes.rows) {
+            scanMap.set(r.batch_id, parseInt(r.scan_count || '0'));
+        }
+
+        const unitsMap = new Map<number, any>();
+        for (const r of unitsRes.rows) {
+            unitsMap.set(r.batch_id, {
+                passed_count: parseInt(r.passed_count || '0'),
+                rework_count: parseInt(r.rework_count || '0'),
+                debug_count: parseInt(r.debug_count || '0'),
+            });
+        }
+
+        const progressMap = new Map<string, { accepted_qty: number; scanned_qty: number }>();
+        for (const r of progressRes.rows) {
+            progressMap.set(`${r.batch_id}_${r.stage_id}`, {
+                accepted_qty: parseInt(r.accepted_qty || '0'),
+                scanned_qty: parseInt(r.scanned_qty || '0')
+            });
+        }
+
+        // Format and calculate active-route previousStagePassed and pending
+        const data = await Promise.all(result.rows.map(async (row) => {
+            const batchId = row.id;
+            const workOrderQty = Number(row.workOrderQty) || 0;
+            const selectedStages = row.selectedStages;
+
+            const scannedCount = scanMap.get(batchId) || 0;
+            const scanned = Math.max(Number(row.p_scanned) || 0, scannedCount);
+
+            const uMetric = unitsMap.get(batchId);
+            const passedCount = uMetric ? Number(uMetric.passed_count) || 0 : 0;
+            const passed = Math.max(Number(row.p_accepted) || 0, passedCount);
+
+            const rework = uMetric ? Number(uMetric.rework_count) || 0 : (Number(row.p_rework) || 0);
+            const debug = uMetric ? Number(uMetric.debug_count) || 0 : (Number(row.p_debug) || 0);
+
+            // Dynamic route-aware previous stage resolution
+            const prevStage = await WorkflowEngineService.getPreviousStage(stageId, {
+                workOrderId: row.work_order_id,
+                selectedStages: selectedStages
+            });
+
+            let previousStagePassed = workOrderQty;
+            if (prevStage) {
+                const prevProg = progressMap.get(`${batchId}_${prevStage.id}`);
+                const prevProgAccepted = prevProg ? Number(prevProg.accepted_qty) || 0 : 0;
+
+                let prevUnitsPassed = 0;
+                for (const u of unitsByStageRes.rows) {
+                    if (u.batch_id === batchId) {
+                        if (u.current_stage_id > prevStage.id || (u.current_stage_id === prevStage.id && u.current_status === 'ACCEPTED')) {
+                            prevUnitsPassed += Number(u.cnt) || 0;
+                        }
+                    }
+                }
+                previousStagePassed = Math.max(prevProgAccepted, prevUnitsPassed);
+            }
+
+            const pending = Math.max(0, previousStagePassed - scanned);
+
+            return {
+                id: row.id,
+                batch_number: row.batch_number,
+                work_order_id: row.work_order_id,
+                created_at: row.created_at,
+                created_by: row.created_by,
+                is_deleted: row.is_deleted,
+                wo_number: row.wo_number,
+                customer_name: row.customer_name,
+                model: row.model,
+                workOrderQty,
+                selectedStages,
+                previousStagePassed,
+                scanned,
+                pending,
+                sourceStage: null,
+                failedStageId: null,
+                passed,
+                rework,
+                debug,
+                status: row.status
+            };
+        }));
+
+        return { data, total };
     }
 
     static async completeBatch(id: string) {

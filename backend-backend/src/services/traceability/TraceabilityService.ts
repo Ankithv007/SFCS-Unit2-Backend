@@ -10,10 +10,12 @@ export class TraceabilityService {
         stageId: number,
         status: string,
         updatedBy: string,
-        remarks?: string
+        remarks?: string,
+        dbClient?: any
     ): Promise<void> {
+        const db = dbClient || pool;
         try {
-            const checkResult = await pool.query(`SELECT id FROM units WHERE barcode = $1`, [barcode]);
+            const checkResult = await db.query(`SELECT id FROM units WHERE barcode = $1`, [barcode]);
             const isFailure = ['FAILED', 'REWORK', 'DEBUG'].includes(status.toUpperCase());
             const isRepairTransition = ['REWORK', 'DEBUG'].includes(status.toUpperCase());
             
@@ -23,7 +25,7 @@ export class TraceabilityService {
                     (barcode, batch_id, current_stage_id, current_status, failed_stage_id, repair_count, failure_remark, failed_at, last_scanned_at, last_scanned_by)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, ${isFailure ? 'NOW()' : 'NULL'}, NOW(), $8)
                 `;
-                await pool.query(insertQuery, [barcode, batchId, stageId, status, isFailure ? stageId : null, isRepairTransition ? 1 : 0, isFailure ? remarks : null, updatedBy]);
+                await db.query(insertQuery, [barcode, batchId, stageId, status, isFailure ? stageId : null, isRepairTransition ? 1 : 0, isFailure ? remarks : null, updatedBy]);
             } else {
                 // If it is a failure transition, we record failure_remark and failed_at.
                 // If the scanning stage is Rework/Debug and it's resolved, we record repair_remark.
@@ -51,7 +53,7 @@ export class TraceabilityService {
                     queryParams.push(remarks || null);
                 }
                 
-                await pool.query(updateQuery, queryParams);
+                await db.query(updateQuery, queryParams);
             }
 
         } catch (error: any) {

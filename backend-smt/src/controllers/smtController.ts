@@ -12,6 +12,24 @@ import { getUploadsDir } from '../utils/uploads';
 
 const logger = createLogger('SMT_CONTROLLER');
 
+const VALID_PRODUCTION_STAGES: { [key: string]: string } = {
+    'PTH': 'PTH',
+    'VI': 'VI',
+    'QA': 'QA',
+    'FLASHING': 'Flashing',
+    'PCBAFCT': 'PCBA-FCT',
+    'ASSEMBLY': 'Assembly',
+    'UNITTESTING': 'Unit Testing',
+    'QI': 'QI',
+    'PACKING': 'Packing'
+};
+
+function normalizeStageForSmt(stage: string): string | null {
+    if (!stage || typeof stage !== 'string') return null;
+    const clean = stage.trim().toUpperCase().replace(/[-_\s]/g, '');
+    return VALID_PRODUCTION_STAGES[clean] || null;
+}
+
 // === Work Orders ===
 export const createWorkOrder = async (req: Request, res: Response) => {
     const {
@@ -40,8 +58,32 @@ export const createWorkOrder = async (req: Request, res: Response) => {
 
     const finalCustomerName = (customer_name || customerName || '').toString().trim();
     const finalModelName = (model_name || modelName || model || '').toString().trim();
-    const stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
-    const finalStages = stagesArr ? JSON.stringify(stagesArr) : JSON.stringify(['PTH', 'VI', 'QA', 'Flashing', 'PCBA-FCT', 'Assembly', 'Unit Testing', 'QI']);
+    let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
+
+    if (stagesArr !== null) {
+        if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "At least one production stage must be selected."
+            });
+        }
+        const validatedStages: string[] = [];
+        for (const st of stagesArr) {
+            const canonical = normalizeStageForSmt(st);
+            if (!canonical) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                });
+            }
+            if (!validatedStages.includes(canonical)) {
+                validatedStages.push(canonical);
+            }
+        }
+        stagesArr = validatedStages;
+    }
+
+    const finalStages = stagesArr ? JSON.stringify(stagesArr) : JSON.stringify(['PTH', 'VI', 'QA', 'Flashing', 'PCBA-FCT', 'Assembly', 'Unit Testing', 'QI', 'Packing']);
 
     // 1. Input Normalization for Work Order ID
     const normalizedWorkOrderId = typeof work_order_id === 'string'
@@ -293,6 +335,44 @@ export const registerWorkOrder = async (req: Request, res: Response) => {
     }
 };
 
+export const getWorkOrderById = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+    const canAccessPo = sessionUserRole === 'super admin' || sessionUserRole === 'admin';
+
+    if (!id || id.trim() === '') {
+        return res.status(400).json({ success: false, error: 'Work Order ID is required' });
+    }
+
+    try {
+        const result = await pool.query(
+            'SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = UPPER($1) OR UPPER(TRIM(po_id)) = UPPER($1) LIMIT 1',
+            [id.trim()]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, error: 'Work order not found', code: 'WORK_ORDER_NOT_FOUND' });
+        }
+        const row = result.rows[0];
+        if (!canAccessPo) {
+            row.po_document_name = null;
+            row.po_document_path = null;
+            row.po_document_type = null;
+        }
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...row,
+                work_order_number: row.id,
+                selected_stages: row.selected_stages || null
+            }
+        });
+    } catch (err: any) {
+        logger.error(`Error fetching work order by ID ${id}:`, err);
+        return res.status(500).json({ success: false, error: 'Failed to fetch work order' });
+    }
+};
+
 export const deleteWorkOrder = async (req: Request, res: Response) => {
     const { id } = req.params;
     const userRole = (req as any).user?.role;
@@ -397,7 +477,31 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
 
     const finalCustomerName = (customer_name || customerName || '').toString().trim();
     const finalModelName = (model_name || modelName || model || '').toString().trim();
-    const stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
+    let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
+
+    if (stagesArr !== null) {
+        if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "At least one production stage must be selected."
+            });
+        }
+        const validatedStages: string[] = [];
+        for (const st of stagesArr) {
+            const canonical = normalizeStageForSmt(st);
+            if (!canonical) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                });
+            }
+            if (!validatedStages.includes(canonical)) {
+                validatedStages.push(canonical);
+            }
+        }
+        stagesArr = validatedStages;
+    }
+
     const finalStages = stagesArr ? JSON.stringify(stagesArr) : null;
 
     const normalizedPoId = typeof po_id === 'string' ? po_id.trim() : '';
@@ -438,7 +542,7 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
 
     try {
         const currentQuery = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type, uploaded_at FROM smt_work_orders WHERE id = $1',
+            'SELECT po_document_name, po_document_path, po_document_type, uploaded_at, selected_stages FROM smt_work_orders WHERE id = $1',
             [id]
         );
         if (currentQuery.rowCount === 0) {
@@ -448,12 +552,36 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
             });
         }
 
+        // Lock route modification if production scans have already started
+        if (stagesArr !== null) {
+            const existingStages = currentQuery.rows[0].selected_stages;
+            const existingCanonical: string[] = Array.isArray(existingStages)
+                ? existingStages.map((s: string) => normalizeStageForSmt(s)).filter((s): s is string => s !== null)
+                : [];
+            const isIdentical = existingCanonical.length === stagesArr.length &&
+                existingCanonical.every((s: string, i: number) => s === stagesArr[i]);
+
+            if (!isIdentical) {
+                const inspCheck = await pool.query('SELECT id FROM smt_inspections WHERE work_order_id = $1 LIMIT 1', [id]);
+                if (inspCheck.rows.length > 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Cannot modify process stages. Production scans have already started for this Work Order."
+                    });
+                }
+            }
+        }
+
         let poName = currentQuery.rows[0].po_document_name;
         let poPath = currentQuery.rows[0].po_document_path;
         let poType = currentQuery.rows[0].po_document_type;
         let uploadedAt = currentQuery.rows[0].uploaded_at;
 
         if (po_document && po_document.data) {
+            const sessionUserRole = ((req as any).user?.role || '').toString().trim().toLowerCase();
+            if (sessionUserRole !== 'super admin' && sessionUserRole !== 'admin') {
+                return res.status(403).json({ success: false, message: "Access Denied. Only Super Admin and Admin can update PO Documents." });
+            }
             logger.info(`Processing updated PO document upload for WO ${id}...`);
             if (poPath) {
                 await deletePoDocument(poPath).catch(err => logger.error("Failed to delete old file:", err));
@@ -532,7 +660,7 @@ export const viewPoDocumentFile = async (req: Request, res: Response) => {
 
     try {
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
             [id]
         );
         if (result.rowCount === 0) {
@@ -580,7 +708,7 @@ export const downloadPoDocument = async (req: Request, res: Response) => {
 
     try {
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
             [id]
         );
         if (result.rowCount === 0) {
@@ -628,7 +756,7 @@ export const previewPoDocument = async (req: Request, res: Response) => {
 
     try {
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1',
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
             [id]
         );
         if (result.rowCount === 0) {

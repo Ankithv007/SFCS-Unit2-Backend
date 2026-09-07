@@ -51,8 +51,11 @@ const initDB = async () => {
 
 // Mount routes (API Gateway strips /api/smt/ and forwards as /api/)
 app.use('/api', smtRoutes);
+app.use('/api/smt', smtRoutes);
 app.use('/api/track', smtTrackRoutes);
+app.use('/api/smt/track', smtTrackRoutes);
 app.use('/api/downtime-records', smtDowntimeRoutes);
+app.use('/api/smt/downtime-records', smtDowntimeRoutes);
 
 // Health Check
 app.get('/health', (req: Request, res: Response) => {

@@ -16,11 +16,14 @@ export const downloadBatchReport = async (req: Request, res: Response) => {
     try {
         // 1. Fetch stage info
         const stageRes = await pool.query(
-            'SELECT id, stage_name FROM production_stages WHERE stage_code = $1',
+            `SELECT id, stage_name FROM production_stages 
+             WHERE UPPER(REPLACE(REPLACE(stage_code, '-', '_'), ' ', '_')) = UPPER(REPLACE(REPLACE($1, '-', '_'), ' ', '_'))
+                OR UPPER(stage_name) = UPPER($1)
+             LIMIT 1`,
             [stageCode]
         );
         if (stageRes.rows.length === 0) {
-            return res.status(404).json({ error: `Stage with code "${stageCode}" not found.` });
+            return res.status(404).json({ error: `Stage with code "${stageCode}" not found.`, code: 'STAGE_NOT_FOUND' });
         }
         const stageId = stageRes.rows[0].id;
         const stageName = stageRes.rows[0].stage_name;
