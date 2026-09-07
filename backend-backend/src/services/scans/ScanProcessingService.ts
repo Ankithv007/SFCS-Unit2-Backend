@@ -8,6 +8,19 @@ import { ValidationError } from '../../utils/ValidationError';
 
 const logger = createLogger('ScanProcessingService');
 
+// Maps internal stage codes to the display names stored in work_orders.selected_stages
+const STAGE_CODE_TO_DISPLAY_NAME: Record<string, string> = {
+    'PTH': 'PTH',
+    'VI': 'VI',
+    'QA': 'QA',
+    'FLASHING': 'Flashing',
+    'PCBA-FCT': 'PCBA-FCT',
+    'ASSEMBLY': 'Assembly',
+    'UNIT_TESTING': 'Unit Testing',
+    'QI': 'QI',
+    'PACKING': 'Packing',
+};
+
 export class ScanProcessingService {
     /**
      * Unified entry point for processing any scan in any stage using pure centralized tables.
@@ -30,11 +43,11 @@ export class ScanProcessingService {
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
-            
+
             // Resolve USN to PCB Barcode if needed
             let scannedValue = payload.barcode.trim().toUpperCase();
             let resolvedBarcode = scannedValue;
-            
+
             // Check if it exists in units table
             const unitExistsRes = await client.query('SELECT 1 FROM units WHERE barcode = $1', [scannedValue]);
             if (unitExistsRes.rows.length === 0) {
@@ -48,10 +61,10 @@ export class ScanProcessingService {
                     logger.info(`Resolved scanned USN [${scannedValue}] to PCB Barcode [${resolvedBarcode}]`);
                 }
             }
-            
+
             payload.barcode = resolvedBarcode;
             logger.info(`Processing pure central scan for stage [${stageCode}] - Barcode [${payload.barcode}]`);
-            
+
             // Resolve batch number if only batch_id is provided
             let batchNumber = payload.batch_number;
             if (!batchNumber && payload.batch_id) {
@@ -63,7 +76,7 @@ export class ScanProcessingService {
                 }
             }
             if (!batchNumber) throw new Error("batch_number or batch_id is required");
-            
+
             // 1. Get Target Stage Info
             const stage = await WorkflowEngineService.getStageByCode(stageCode);
             if (!stage) {
@@ -76,6 +89,45 @@ export class ScanProcessingService {
             );
             if (!batchId) {
                 throw new Error(`Failed to create/resolve master batch for ${batchNumber}`);
+            }
+
+            // 2.5 Validate that this stage is in the Work Order's selected_stages routing
+            if (!['REWORK', 'DEBUG'].includes(stageCode.toUpperCase())) {
+                const woRes = await client.query(
+                    `SELECT w.selected_stages
+                     FROM batches b
+                     JOIN work_orders w ON b.work_order_id = w.id
+                     WHERE b.id = $1`,
+                    [batchId]
+                );
+                if (woRes.rows.length > 0) {
+                    const rawStages = woRes.rows[0].selected_stages;
+                    if (rawStages !== null && rawStages !== undefined) {
+                        let selectedStages: string[];
+                        if (Array.isArray(rawStages)) {
+                            selectedStages = rawStages;
+                        } else if (typeof rawStages === 'string') {
+                            try { selectedStages = JSON.parse(rawStages); } catch { selectedStages = []; }
+                        } else {
+                            selectedStages = [];
+                        }
+                        if (selectedStages.length > 0) {
+                            const displayName = STAGE_CODE_TO_DISPLAY_NAME[stageCode.toUpperCase()] || stageCode;
+                            const isIncluded = selectedStages.some(
+                                s => s.toLowerCase() === displayName.toLowerCase()
+                            );
+                            if (!isIncluded) {
+                                throw new ValidationError({
+                                    errorCode: 'STAGE_NOT_IN_ROUTING',
+                                    message: `Stage "${displayName}" is not part of this Work Order's process routing.`,
+                                    currentStage: displayName,
+                                    suggestedAction: 'This stage was not selected when the Work Order was created. Scanning is not allowed here.',
+                                    severity: 'error'
+                                });
+                            }
+                        }
+                    }
+                }
             }
 
             // 3. Fetch the Unit to validate transitions
@@ -126,7 +178,7 @@ export class ScanProcessingService {
             // Wait, TraceabilityService blindly sets current_stage_id to the scanning stage.
             // If we are at REWORK, and we PASS, we want current_stage_id to become the FAILED_STAGE_ID!
             // So we must intercept the status update logic.
-            
+
             // 6. Update Metrics
             await BatchManagementService.incrementBatchMetrics(batchId, stage.id, payload.status);
 
@@ -215,22 +267,48 @@ export class ScanProcessingService {
             );
             const scanRecord = scanRes.rows.length > 0 ? scanRes.rows[0] : null;
 
-            // Get previous stage ID to calculate total input for this stage
-            let prevStageIdQuery = 'SELECT id FROM production_stages WHERE stage_order = $1 - 1';
-            let prevStageIdRes = await client.query(prevStageIdQuery, [stage.stage_order]);
-            const prevStageId = prevStageIdRes.rows.length > 0 ? prevStageIdRes.rows[0].id : null;
+            // Get previous stage per-WO (respects selected_stages routing, skips unselected stages)
+            const STAGE_NAME_TO_CODE_SCAN: Record<string, string> = {
+                'PTH': 'PTH', 'VI': 'VI', 'QA': 'QA',
+                'Flashing': 'FLASHING', 'PCBA-FCT': 'PCBA_FCT',
+                'Assembly': 'ASSEMBLY', 'Unit Testing': 'UNIT_TESTING',
+                'QI': 'QI', 'Packing': 'PACKING'
+            };
+            const nameToCaseSqlScan = Object.entries(STAGE_NAME_TO_CODE_SCAN)
+                .map(([name, code]) => `WHEN '${name}' THEN '${code}'`)
+                .join(' ');
+            const prevStagePerWoSubqueryScan = `
+                (
+                    SELECT ps2.id
+                    FROM production_stages ps2
+                    WHERE ps2.stage_order < ${stage.stage_order}
+                      AND ps2.stage_code IN (
+                          SELECT CASE elem ${nameToCaseSqlScan} END
+                          FROM jsonb_array_elements_text(
+                              COALESCE(w.selected_stages, '[]'::jsonb)
+                          ) AS elem
+                          WHERE CASE elem ${nameToCaseSqlScan} END IS NOT NULL
+                      )
+                    ORDER BY ps2.stage_order DESC
+                    LIMIT 1
+                )
+            `;
 
             let previousStagePassedQuery = `
                 COALESCE(
                     (
-                        SELECT COUNT(DISTINCT u.barcode) 
-                        FROM units u 
-                        JOIN batches pb ON u.batch_id = pb.id 
-                        WHERE pb.work_order_id = w.id 
-                          AND ($3::int IS NULL OR u.current_stage_id >= $3::int)
+                        SELECT COUNT(DISTINCT u.barcode)
+                        FROM units u
+                        JOIN batches pb ON u.batch_id = pb.id
+                        WHERE pb.work_order_id = w.id
+                          AND (
+                              ${prevStagePerWoSubqueryScan} IS NULL
+                              OR u.current_stage_id >= (${prevStagePerWoSubqueryScan})
+                          )
                     ), w.quantity
                 )
             `;
+
 
             if (stageCode === 'REWORK') {
                 previousStagePassedQuery = `
@@ -240,7 +318,6 @@ export class ScanProcessingService {
                             FROM batch_stage_progress p2 
                             JOIN batches b2 ON p2.batch_id = b2.id 
                             WHERE b2.work_order_id = w.id
-                              AND ($3::int IS NULL OR true)
                         ), 0
                     )
                 `;
@@ -252,7 +329,6 @@ export class ScanProcessingService {
                             FROM batch_stage_progress p2 
                             JOIN batches b2 ON p2.batch_id = b2.id 
                             WHERE b2.work_order_id = w.id
-                              AND ($3::int IS NULL OR true)
                         ), 0
                     )
                 `;
@@ -317,7 +393,7 @@ export class ScanProcessingService {
                  JOIN batches b ON p.batch_id = b.id
                  JOIN work_orders w ON b.work_order_id = w.id
                  WHERE p.batch_id = $1 AND p.stage_id = $2`,
-                [batchId, stage.id, prevStageId]
+                [batchId, stage.id]
             );
 
             const counters = countersRes.rows.length > 0 ? countersRes.rows[0] : null;
@@ -345,8 +421,8 @@ export class ScanProcessingService {
             }
 
             await client.query('COMMIT');
-            return { 
-                success: true, 
+            return {
+                success: true,
                 message: "Scan processed successfully",
                 data: {
                     scan: scanRecord,
@@ -470,7 +546,7 @@ export class ScanProcessingService {
             if ((stageCode === 'REWORK' || stageCode === 'DEBUG') && payload.failed_stage_id) {
                 if (!unit || unit.failed_stage_id !== payload.failed_stage_id) {
                     const failedStageRes = await client.query('SELECT stage_name, stage_code FROM production_stages WHERE id = $1', [unit?.failed_stage_id]);
-                    const expectedQueueName = failedStageRes.rows.length > 0 
+                    const expectedQueueName = failedStageRes.rows.length > 0
                         ? `${failedStageRes.rows[0].stage_name} (${failedStageRes.rows[0].stage_code})`
                         : 'another';
                     const targetFailedRes = await client.query('SELECT stage_name FROM production_stages WHERE id = $1', [payload.failed_stage_id]);

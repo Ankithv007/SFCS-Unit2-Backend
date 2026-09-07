@@ -413,16 +413,17 @@ export const getMe = async (req: any, res: Response) => {
                     sp.module_name AS module,
                     sp.route_path AS page,
                     sp.permission_key,
-                    bool_or(dp.can_view) AS can_view,
-                    bool_or(dp.can_create) AS can_create,
-                    bool_or(dp.can_edit) AS can_edit,
-                    bool_or(dp.can_delete) AS can_delete,
-                    bool_or(dp.can_export) AS can_export
-                FROM department_users du
-                JOIN department_permissions dp ON dp.department_id = du.department_id
-                JOIN system_pages sp ON sp.id = dp.system_page_id
-                WHERE du.user_id = $1 AND sp.is_active = TRUE
+                    COALESCE(bool_or(dp.can_view), (sp.permission_key = 'smt_serial_number')) AS can_view,
+                    COALESCE(bool_or(dp.can_create), (sp.permission_key = 'smt_serial_number')) AS can_create,
+                    COALESCE(bool_or(dp.can_edit), (sp.permission_key = 'smt_serial_number')) AS can_edit,
+                    COALESCE(bool_or(dp.can_delete), FALSE) AS can_delete,
+                    COALESCE(bool_or(dp.can_export), (sp.permission_key = 'smt_serial_number')) AS can_export
+                FROM system_pages sp
+                LEFT JOIN department_permissions dp ON dp.system_page_id = sp.id
+                    AND dp.department_id IN (SELECT department_id FROM department_users WHERE user_id = $1)
+                WHERE sp.is_active = TRUE
                 GROUP BY sp.id, sp.module_name, sp.route_path, sp.permission_key
+                ORDER BY sp.id
             `;
             const permResult = await pool.query(permQuery, [userId]);
             permissions = permResult.rows;
@@ -528,15 +529,15 @@ export const verifyTokenPermissions = async (req: Request, res: Response) => {
                 SELECT 
                     sp.route_path AS page,
                     sp.permission_key,
-                    bool_or(dp.can_view) AS can_view,
-                    bool_or(dp.can_create) AS can_create,
-                    bool_or(dp.can_edit) AS can_edit,
-                    bool_or(dp.can_delete) AS can_delete,
-                    bool_or(dp.can_export) AS can_export
-                FROM department_users du
-                JOIN department_permissions dp ON dp.department_id = du.department_id
-                JOIN system_pages sp ON sp.id = dp.system_page_id
-                WHERE du.user_id = $1 AND sp.is_active = TRUE
+                    COALESCE(bool_or(dp.can_view), (sp.permission_key = 'smt_serial_number')) AS can_view,
+                    COALESCE(bool_or(dp.can_create), (sp.permission_key = 'smt_serial_number')) AS can_create,
+                    COALESCE(bool_or(dp.can_edit), (sp.permission_key = 'smt_serial_number')) AS can_edit,
+                    COALESCE(bool_or(dp.can_delete), FALSE) AS can_delete,
+                    COALESCE(bool_or(dp.can_export), (sp.permission_key = 'smt_serial_number')) AS can_export
+                FROM system_pages sp
+                LEFT JOIN department_permissions dp ON dp.system_page_id = sp.id
+                    AND dp.department_id IN (SELECT department_id FROM department_users WHERE user_id = $1)
+                WHERE sp.is_active = TRUE
                 GROUP BY sp.id, sp.route_path, sp.permission_key
             `;
             const permResult = await pool.query(permQuery, [decoded.id]);

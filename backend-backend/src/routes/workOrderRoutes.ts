@@ -4,7 +4,7 @@ import { authenticateToken, requirePermission } from '../middleware/authMiddlewa
 
 const router = express.Router();
 
-router.post('/', createWorkOrder);
+// router.post('/', createWorkOrder);
 router.get('/', getAllWorkOrders);
 router.delete('/:id', authenticateToken, requirePermission('backend_work_order', 'can_delete'), deleteWorkOrder);
 

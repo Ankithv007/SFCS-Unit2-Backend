@@ -28,8 +28,20 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         sides,
         created_by,
         barcode_source,
-        po_document
+        po_document,
+        customer_name,
+        customerName,
+        model_name,
+        modelName,
+        model,
+        selected_stages,
+        selectedStages
     } = req.body;
+
+    const finalCustomerName = (customer_name || customerName || '').toString().trim();
+    const finalModelName = (model_name || modelName || model || '').toString().trim();
+    const stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
+    const finalStages = stagesArr ? JSON.stringify(stagesArr) : JSON.stringify(['PTH', 'VI', 'QA', 'Flashing', 'PCBA-FCT', 'Assembly', 'Unit Testing', 'QI']);
 
     // 1. Input Normalization for Work Order ID
     const normalizedWorkOrderId = typeof work_order_id === 'string'
@@ -102,9 +114,9 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 id, area_id, line_id, priority, product_name, product_description, 
                 quantity, panel_quantity, sides, created_by, barcode_source,
                 po_document_name, po_document_path, po_document_type, uploaded_at,
-                po_id, remark
+                po_id, remark, customer_name, model_name, selected_stages
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) 
             RETURNING *`,
             [
                 normalizedWorkOrderId,
@@ -123,7 +135,10 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 poType,
                 poPath ? new Date() : null,
                 normalizedPoId,
-                remark || null
+                remark || null,
+                finalCustomerName || null,
+                finalModelName || null,
+                finalStages
             ]
         );
 
@@ -155,6 +170,7 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
         const query = `
             SELECT 
                 wo.*, 
+                wo.id as work_order_id,
                 COALESCE((
                     SELECT GREATEST(
                         (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status != 'Cancelled'),
@@ -369,8 +385,20 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
         quantity,
         panel_quantity,
         sides,
-        po_document
+        po_document,
+        customer_name,
+        customerName,
+        model_name,
+        modelName,
+        model,
+        selected_stages,
+        selectedStages
     } = req.body;
+
+    const finalCustomerName = (customer_name || customerName || '').toString().trim();
+    const finalModelName = (model_name || modelName || model || '').toString().trim();
+    const stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
+    const finalStages = stagesArr ? JSON.stringify(stagesArr) : null;
 
     const normalizedPoId = typeof po_id === 'string' ? po_id.trim() : '';
     if (!normalizedPoId) {
@@ -451,8 +479,11 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
              SET po_id = $1, remark = $2, line_id = $3, priority = $4, 
                  product_name = $5, product_description = $6, quantity = $7, 
                  panel_quantity = $8, sides = $9, po_document_name = $10, 
-                 po_document_path = $11, po_document_type = $12, uploaded_at = $13
-             WHERE id = $14
+                 po_document_path = $11, po_document_type = $12, uploaded_at = $13,
+                 customer_name = COALESCE($14, customer_name),
+                 model_name = COALESCE($15, model_name),
+                 selected_stages = COALESCE($16::jsonb, selected_stages)
+             WHERE id = $17
              RETURNING *`,
             [
                 normalizedPoId,
@@ -468,6 +499,9 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
                 poPath,
                 poType,
                 uploadedAt,
+                finalCustomerName || null,
+                finalModelName || null,
+                finalStages,
                 id
             ]
         );

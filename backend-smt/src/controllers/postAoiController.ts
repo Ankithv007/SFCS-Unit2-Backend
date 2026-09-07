@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
-import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted } from '../utils/smtHelper';
+import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted, ensureStencilLifecycleId } from '../utils/smtHelper';
 
 const logger = createLogger('PostAoiController');
 
@@ -69,11 +69,45 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
         }
         query += ` ORDER BY lc.created_at DESC LIMIT 1`;
 
-        const result = await pool.query(query, params);
+        let result = await pool.query(query, params);
+        if (result.rows.length === 0) {
+            let queryRack = `
+                SELECT 
+                    COALESCE(lc.id, srl.id) AS stencil_lifecycle_id,
+                    srl.id AS stencil_record_id,
+                    COALESCE(srl.stencil_name, srl.job_number, 'Stencil') AS stencil_name,
+                    srl.revision AS stencil_version,
+                    srl.status AS stencil_status,
+                    srl.job_number,
+                    srl.thickness_mills,
+                    COALESCE(lc.qty_life_cycle, 100000) AS qty_life_cycle,
+                    COALESCE(lc.balance_life_cycle, 100000) AS remaining_life,
+                    COALESCE(lc.current_used_life_cycle, 0) AS current_life_count,
+                    COALESCE(srl.checked_out_work_order_side, srl.side) AS stencil_side,
+                    srl.remarks AS stencil_remarks,
+                    srl.manufacturing_date AS stencil_manufacturing_date,
+                    NULL AS last_cleaning_date,
+                    NULL AS last_inspection_date
+                FROM stencil_rack_locations srl
+                LEFT JOIN smt_stencil_lifecycle lc ON (lc.stencil_record_id = srl.id AND lc.is_deleted = false AND lc.work_order_id = $1)
+                WHERE srl.checked_out_work_order_id = $1
+                  AND srl.status = 'CHECKED_OUT'
+            `;
+            const paramsRack: any[] = [woId];
+            if (side) {
+                queryRack += ` AND (LOWER(srl.checked_out_work_order_side) = $2 OR LOWER(srl.side) = $2 OR LOWER(srl.checked_out_work_order_side) IN ('top/bottom', 'top / bottom') OR LOWER(srl.side) IN ('top/bottom', 'top / bottom'))`;
+                paramsRack.push(side.toLowerCase().trim());
+            }
+            queryRack += ` ORDER BY srl.updated_at DESC LIMIT 1`;
+            result = await pool.query(queryRack, paramsRack);
+        }
+
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order.' });
         }
-        return res.status(200).json(result.rows[0]);
+        const row = result.rows[0];
+        row.stencil_lifecycle_id = await ensureStencilLifecycleId(pool, row.stencil_lifecycle_id, woId, side || row.stencil_side || 'Top');
+        return res.status(200).json(row);
     } catch (err: any) {
         logger.error('Error fetching stencil details:', err);
         return res.status(500).json({ message: 'Internal server error while fetching stencil details.' });
@@ -95,6 +129,14 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        const validStencilLifecycleId = await ensureStencilLifecycleId(
+            client,
+            stencil_lifecycle_id,
+            work_order_id,
+            side,
+            operator.name
+        );
 
         // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
@@ -216,7 +258,7 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
             RETURNING *
         `;
         const result = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
+            work_order_id, validStencilLifecycleId, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
         ]);
         const session = result.rows[0];
 

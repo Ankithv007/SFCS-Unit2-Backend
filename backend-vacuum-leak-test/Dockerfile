@@ -8,8 +8,8 @@ RUN npm install
 COPY . .
 RUN npm run build
 
-# Ensure schema.sql is copied to the dist folder after build
-RUN mkdir -p dist/db && cp src/db/schema.sql dist/db/
+# Ensure schema.sql and migrations are copied to the dist folder after build
+RUN mkdir -p dist/db/migrations && cp src/db/*.sql dist/db/ && (cp -r src/db/migrations/* dist/db/migrations/ 2>/dev/null || true)
 
 EXPOSE 5004
 

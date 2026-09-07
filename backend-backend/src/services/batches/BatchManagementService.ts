@@ -1,5 +1,6 @@
 import pool from '../../config/db';
 import { createLogger } from '../../utils/logger';
+import { syncSmtWorkOrders } from '../workOrderSyncService';
 
 const logger = createLogger('BatchManagementService');
 
@@ -67,8 +68,10 @@ export class BatchManagementService {
     }
 
     static async getBatchesByStage(stageCode: string, limit: number, offset: number, status?: string, search?: string) {
+        await syncSmtWorkOrders();
         // Find the stage and previous stage
         const stageRes = await pool.query('SELECT id, stage_order FROM production_stages WHERE stage_code = $1', [stageCode]);
+
         if (stageRes.rows.length === 0) return { data: [], total: 0 };
         const stageId = stageRes.rows[0].id;
         const stageOrder = stageRes.rows[0].stage_order;
@@ -76,6 +79,39 @@ export class BatchManagementService {
         let prevStageIdQuery = 'SELECT id FROM production_stages WHERE stage_order = $1 - 1';
         let prevStageIdRes = await pool.query(prevStageIdQuery, [stageOrder]);
         const prevStageId = prevStageIdRes.rows.length > 0 ? prevStageIdRes.rows[0].id : null;
+
+        // Stage name -> stage_code mapping for selected_stages lookup
+        // (selected_stages stores display names; production_stages uses stage_code)
+        const STAGE_NAME_TO_CODE: Record<string, string> = {
+            'PTH': 'PTH', 'VI': 'VI', 'QA': 'QA',
+            'Flashing': 'FLASHING', 'PCBA-FCT': 'PCBA_FCT',
+            'Assembly': 'ASSEMBLY', 'Unit Testing': 'UNIT_TESTING',
+            'QI': 'QI', 'Packing': 'PACKING'
+        };
+        // Build a SQL CASE expression mapping display name -> stage_code
+        const nameToCaseSql = Object.entries(STAGE_NAME_TO_CODE)
+            .map(([name, code]: [string, string]) => `WHEN '${name}' THEN '${code}'`)
+            .join(' ');
+        // Per-WO subquery: finds the stage_id of the nearest preceding stage
+        // that is in this WO's selected_stages, with stage_order < current stage.
+        // Falls back to null (= first stage, no prior check needed) if none found.
+        const prevStagePerWoSubquery = `
+            (
+                SELECT ps2.id
+                FROM production_stages ps2
+                WHERE ps2.stage_order < ${stageOrder}
+                  AND ps2.stage_code IN (
+                      SELECT CASE elem ${nameToCaseSql} END
+                      FROM jsonb_array_elements_text(
+                          COALESCE(w.selected_stages, '[]'::jsonb)
+                      ) AS elem
+                      WHERE CASE elem ${nameToCaseSql} END IS NOT NULL
+                  )
+                ORDER BY ps2.stage_order DESC
+                LIMIT 1
+            )
+        `;
+
 
         let statusFilter = '';
         if (stageCode !== 'REWORK' && stageCode !== 'DEBUG') {
@@ -98,14 +134,19 @@ export class BatchManagementService {
         let previousStagePassedQuery = `
             COALESCE(
                 (
-                    SELECT COUNT(DISTINCT u.barcode) 
-                    FROM units u 
-                    JOIN batches pb ON u.batch_id = pb.id 
-                    WHERE pb.work_order_id = w.id 
-                      AND ($4::int IS NULL OR u.current_stage_id > $4::int OR (u.current_stage_id = $4::int AND u.current_status = 'ACCEPTED'))
+                    SELECT COUNT(DISTINCT u.barcode)
+                    FROM units u
+                    JOIN batches pb ON u.batch_id = pb.id
+                    WHERE pb.work_order_id = w.id
+                      AND (
+                          ${prevStagePerWoSubquery} IS NULL
+                          OR u.current_stage_id > (${prevStagePerWoSubquery})
+                          OR (u.current_stage_id = (${prevStagePerWoSubquery}) AND u.current_status = 'ACCEPTED')
+                      )
                 ), w.quantity
             )
         `;
+
 
         if (stageCode === 'REWORK') {
             previousStagePassedQuery = `
@@ -147,6 +188,7 @@ export class BatchManagementService {
                 w.customer_name,
                 w.model,
                 w.quantity as "workOrderQty",
+                w.selected_stages as "selectedStages",
                 
                 (
                     SELECT COUNT(DISTINCT s.barcode)
@@ -192,7 +234,7 @@ export class BatchManagementService {
             WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
               AND u.current_status = '${stageCode}'
               AND ($1::int IS NULL OR true)
-              AND ($4::int IS NULL OR true)
+              AND (true)
             GROUP BY b.id, w.id, ps.id, ps.stage_name
             ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         ` : `
@@ -207,6 +249,7 @@ export class BatchManagementService {
                 w.customer_name,
                 w.model,
                 w.quantity as "workOrderQty",
+                w.selected_stages as "selectedStages",
                 
                 -- Previous Stage Passed calculation
                 ${previousStagePassedQuery} as "previousStagePassed",
@@ -217,7 +260,7 @@ export class BatchManagementService {
                     WHERE s.batch_id = b.id AND s.stage_id = $1
                 ) as scanned,
                 
-                CASE WHEN $4::int IS NULL THEN
+                CASE WHEN (${prevStagePerWoSubquery}) IS NULL THEN
                     GREATEST(0, w.quantity - (
                         SELECT COUNT(DISTINCT s.barcode)
                         FROM scans s
@@ -284,7 +327,7 @@ export class BatchManagementService {
             ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         `;
         
-        const result = await pool.query(query, [stageId, limit, offset, prevStageId, ...searchParams]);
+        const result = await pool.query(query, [stageId, limit, offset, ...searchParams]);
         
         const countQuery = isReworkOrDebug ? `
             SELECT COUNT(DISTINCT b.id || '_' || ps.id) as count

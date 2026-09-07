@@ -32,26 +32,28 @@ CREATE INDEX IF NOT EXISTS idx_items_mpn ON master_items(mpn);
 CREATE TABLE IF NOT EXISTS purchase_orders (
     id SERIAL PRIMARY KEY,
     po_number VARCHAR(50) UNIQUE NOT NULL,
+    organization VARCHAR(50),
     date DATE NOT NULL,
-    item_id INTEGER REFERENCES master_items(id),
-    
-    -- Snapshot of item details
-    item_name VARCHAR(255), 
-    description TEXT,
-    
-    -- Quantities
-    ordered_qty DECIMAL(10, 2) NOT NULL,
-    received_qty DECIMAL(10, 2) DEFAULT 0,
-    rejected_qty DECIMAL(10, 2) DEFAULT 0,
-    
-    -- Financials
-    unit_price DECIMAL(10, 2) NOT NULL,
-    tax_rate DECIMAL(5, 2) DEFAULT 0,
-    location VARCHAR(100),
-    
-    -- Generated columns for automatic calculation
-    tax_amount DECIMAL(10, 2) GENERATED ALWAYS AS ((ordered_qty * unit_price) * (tax_rate / 100)) STORED,
-    total_amount DECIMAL(12, 2) GENERATED ALWAYS AS ((ordered_qty * unit_price) + ((ordered_qty * unit_price) * (tax_rate / 100))) STORED
+    vendor_id INTEGER REFERENCES vendors(id),
+    status VARCHAR(50) DEFAULT 'Draft',
+    total_amount NUMERIC(12, 2) DEFAULT 0,
+    tax_amount NUMERIC(12, 2) DEFAULT 0,
+    grand_total NUMERIC(12, 2) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-
+-- Purchase Order Items Table
+CREATE TABLE IF NOT EXISTS purchase_order_items (
+    id SERIAL PRIMARY KEY,
+    po_id INTEGER REFERENCES purchase_orders(id) ON DELETE CASCADE,
+    item_id INTEGER REFERENCES master_items(id),
+    item_name VARCHAR(255),
+    description TEXT,
+    ordered_qty NUMERIC(10, 2) NOT NULL,
+    received_qty NUMERIC(10, 2) DEFAULT 0,
+    rejected_qty NUMERIC(10, 2) DEFAULT 0,
+    unit_price NUMERIC(10, 2) NOT NULL,
+    tax_rate NUMERIC(5, 2) DEFAULT 0,
+    location VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

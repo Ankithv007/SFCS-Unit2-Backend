@@ -103,7 +103,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     });
 });
 
-// import { runMigrations } from './db/runMigrations';
+import { syncSmtWorkOrders } from './services/workOrderSyncService';
 
 const setupDatabase = async () => {
     try {
@@ -114,8 +114,8 @@ const setupDatabase = async () => {
 
         logger.info('[Database] Schema initialized successfully.');
         
-        // Run enterprise migrations (DISABLED for Pure Centralized Architecture)
-        // await runMigrations();
+        // Initial sync of SMT work orders
+        await syncSmtWorkOrders();
         
         logger.info('[Database] Ready.');
     } catch (error: any) {
@@ -123,6 +123,7 @@ const setupDatabase = async () => {
         throw error;
     }
 };
+
 
 const startServer = async () => {
     try {

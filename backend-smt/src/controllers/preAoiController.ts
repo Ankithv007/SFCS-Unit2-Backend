@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
-import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted, isBarcodeBottomCompleted } from '../utils/smtHelper';
+import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted, isBarcodeBottomCompleted, ensureStencilLifecycleId } from '../utils/smtHelper';
 
 const logger = createLogger('PreAoiController');
 
@@ -73,7 +73,9 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order.' });
         }
-        return res.status(200).json(result.rows[0]);
+        const row = result.rows[0];
+        row.stencil_lifecycle_id = await ensureStencilLifecycleId(pool, row.stencil_lifecycle_id, woId, side || row.stencil_side || 'Top');
+        return res.status(200).json(row);
     } catch (err: any) {
         logger.error('Error fetching stencil details:', err);
         return res.status(500).json({ message: 'Internal server error while fetching stencil details.' });
@@ -95,6 +97,14 @@ export const createPreAoiSession = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        const validStencilLifecycleId = await ensureStencilLifecycleId(
+            client,
+            stencil_lifecycle_id,
+            work_order_id,
+            side,
+            operator.name
+        );
 
         // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
@@ -216,7 +226,7 @@ export const createPreAoiSession = async (req: Request, res: Response) => {
             RETURNING *
         `;
         const result = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
+            work_order_id, validStencilLifecycleId, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.name, operator.name
         ]);
         const session = result.rows[0];
 

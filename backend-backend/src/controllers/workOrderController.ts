@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import pool from '../config/db';
+import pool, { smtPool } from '../config/db';
+import { syncSmtWorkOrders } from '../services/workOrderSyncService';
 
 export const createWorkOrder = async (req: Request, res: Response) => {
     const { wo_number, quantity, customer_name, model, created_by } = req.body;
@@ -67,6 +68,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
 
 export const getAllWorkOrders = async (req: Request, res: Response) => {
     try {
+        await syncSmtWorkOrders();
         const result = await pool.query('SELECT * FROM work_orders ORDER BY created_at DESC');
         res.status(200).json(result.rows);
     } catch (err) {
@@ -88,6 +90,10 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        // Fetch wo_number before deleting
+        const woFind = await client.query('SELECT wo_number FROM work_orders WHERE id = $1', [id]);
+        const woNumber = woFind.rows.length > 0 ? woFind.rows[0].wo_number : null;
 
         // Find all batch IDs for this work order
         const batchRes = await client.query('SELECT id FROM batches WHERE work_order_id = $1', [id]);
@@ -120,6 +126,14 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
 
         const result = await client.query('DELETE FROM work_orders WHERE id = $1 RETURNING *', [id]);
 
+        if (woNumber) {
+            try {
+                await smtPool.query('DELETE FROM smt_work_orders WHERE id = $1', [woNumber]);
+            } catch (smtErr) {
+                console.error('Failed to delete SMT work order:', smtErr);
+            }
+        }
+
         await client.query('COMMIT');
 
         if (result.rowCount === 0) {
@@ -134,3 +148,4 @@ export const deleteWorkOrder = async (req: any, res: Response) => {
         client.release();
     }
 };
+

@@ -1,5 +1,12 @@
 import express from 'express';
 import {
+    getLiveWorkOrders,
+    searchWorkOrders,
+    getWorkOrderDashboard,
+    exportWorkOrderDayExcel,
+    exportWorkOrderDayPdfData
+} from '../controllers/adminDashboardController';
+import {
     createWorkOrder,
     updateWorkOrder,
     getWorkOrders,
@@ -229,6 +236,13 @@ import {
 const router = express.Router();
 
 
+// Admin Production Dashboard APIs
+router.get('/admin/dashboard/live-work-orders', authenticateToken, getLiveWorkOrders);
+router.get('/admin/work-orders/search', authenticateToken, searchWorkOrders);
+router.get('/admin/work-orders/:workOrderId/dashboard', authenticateToken, getWorkOrderDashboard);
+router.get('/admin/work-orders/:workOrderId/export/excel', authenticateToken, exportWorkOrderDayExcel);
+router.get('/admin/work-orders/:workOrderId/export/pdf-data', authenticateToken, exportWorkOrderDayPdfData);
+
 // Work Orders
 const workOrderView = [authenticateToken, requirePermission('smt_work_order', 'can_view')];
 const workOrderCreate = [authenticateToken, requirePermission('smt_work_order', 'can_create')];
@@ -243,17 +257,17 @@ router.get('/work-orders', workOrderView, getWorkOrders);
 router.get('/workorders/pending', authenticateToken, getPendingWorkOrders);
 router.post('/work-orders/:id/register', workOrderCreate, registerWorkOrder);
 router.get('/work-orders/registered', workOrderView, getRegisteredWorkOrders);
-router.get('/workorder-history', authenticateToken, getWorkOrderHistory);
+router.get('/workorder-history', workOrderView, getWorkOrderHistory);
 router.delete('/work-orders/:id', workOrderDelete, deleteWorkOrder);
 router.get('/work-orders/:id/preview-po', poDocumentAccess, previewPoDocument);
 router.get('/work-orders/:id/view-po-file', poDocumentAccess, viewPoDocumentFile);
 router.get('/work-orders/:id/download-po', poDocumentAccess, downloadPoDocument);
 
 // Serial Numbers
-router.post('/serial-numbers', generateSerials);
-router.get('/serial-numbers', getSerials);
+router.post('/serial-numbers', authenticateToken, generateSerials);
+router.get('/serial-numbers', authenticateToken, getSerials);
 router.delete('/serial-numbers', [authenticateToken, requirePermission('smt_serial_number', 'can_delete')], deleteSerials);
-router.patch('/serial-numbers/:id/status', updateSerialNumberStatus);
+router.patch('/serial-numbers/:id/status', authenticateToken, updateSerialNumberStatus);
 
 // Inspections
 router.post('/inspections', createInspection);

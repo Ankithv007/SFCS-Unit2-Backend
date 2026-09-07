@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
-import { resolveWorkOrderSide, getEligibleWorkOrdersHelper, isBarcodeBottomCompleted, hasAnyBarcodeBottomCompleted } from '../utils/smtHelper';
+import { resolveWorkOrderSide, getEligibleWorkOrdersHelper, isBarcodeBottomCompleted, hasAnyBarcodeBottomCompleted, ensureStencilLifecycleId } from '../utils/smtHelper';
 
 const logger = createLogger('PrintingController');
 
@@ -92,7 +92,7 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
                     NULL AS last_cleaning_date,
                     NULL AS last_inspection_date
                 FROM stencil_rack_locations srl
-                LEFT JOIN smt_stencil_lifecycle lc ON (lc.stencil_record_id = srl.id AND lc.is_deleted = false)
+                LEFT JOIN smt_stencil_lifecycle lc ON (lc.stencil_record_id = srl.id AND lc.is_deleted = false AND lc.work_order_id = $1)
                 WHERE srl.checked_out_work_order_id = $1
                   AND srl.status = 'CHECKED_OUT'
             `;
@@ -108,7 +108,9 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order and Side.' });
         }
-        return res.status(200).json(result.rows[0]);
+        const row = result.rows[0];
+        row.stencil_lifecycle_id = await ensureStencilLifecycleId(pool, row.stencil_lifecycle_id, woId, side || row.stencil_side || 'Top');
+        return res.status(200).json(row);
     } catch (err: any) {
         logger.error('Error fetching stencil details:', err);
         return res.status(500).json({ message: 'Internal server error while fetching stencil details.' });
@@ -130,6 +132,14 @@ export const createPrintingSession = async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+
+        const validStencilLifecycleId = await ensureStencilLifecycleId(
+            client,
+            stencil_lifecycle_id,
+            work_order_id,
+            side,
+            operator.name
+        );
 
         // Check if there is already an active session for this Work Order and side
         const activeCheck = await client.query(
@@ -216,7 +226,7 @@ export const createPrintingSession = async (req: Request, res: Response) => {
             RETURNING *
         `;
         const insertRes = await client.query(insertQuery, [
-            work_order_id, stencil_lifecycle_id, squeegee_front_number, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.username, operator.name
+            work_order_id, validStencilLifecycleId, squeegee_front_number, squeegee_front_number, squeegee_rear_number, solder_paste_barcode, side, operator.username, operator.name
         ]);
         const session = insertRes.rows[0];
 

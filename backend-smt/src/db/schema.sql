@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS smt_work_orders (
     po_document_type VARCHAR(100),
     uploaded_at TIMESTAMP,
     po_id VARCHAR(255),
-    remark TEXT
+    remark TEXT,
+    customer_name VARCHAR(255),
+    model_name VARCHAR(255),
+    selected_stages JSONB DEFAULT '["PTH", "VI", "QA", "Flashing", "PCBA-FCT", "Assembly", "Unit Testing", "QI"]'::jsonb
 );
 
 -- SMT Serial Numbers Table

@@ -605,5 +605,95 @@ export const getEligibleWorkOrdersHelper = async (
 
     logger.info(`[Eligibility Debug] Returning ${eligibleList.length} eligible Work Orders for stage ${stage}`);
     return eligibleList;
-};;
+};
+
+/**
+ * Ensures that a valid smt_stencil_lifecycle ID exists for a given input ID, Work Order, and side.
+ * If inputId is already a valid UUID in smt_stencil_lifecycle, returns inputId.
+ * If inputId is a stencil_rack_locations ID (or missing in smt_stencil_lifecycle), auto-creates or finds the smt_stencil_lifecycle record.
+ */
+export const ensureStencilLifecycleId = async (
+    client: any,
+    inputId: string,
+    workOrderId: string,
+    side: string,
+    operatorName = 'System'
+): Promise<string> => {
+    if (!inputId || !workOrderId) {
+        throw new Error('Input stencil lifecycle ID and Work Order ID are required.');
+    }
+
+    // 1. Direct check in smt_stencil_lifecycle
+    const directCheck = await client.query(
+        `SELECT id FROM smt_stencil_lifecycle WHERE id = $1 AND is_deleted = false`,
+        [inputId]
+    );
+    if (directCheck.rows.length > 0) {
+        return directCheck.rows[0].id;
+    }
+
+    // 2. Check if a lifecycle record exists by stencil_record_id or work_order_id & side
+    const secondaryCheck = await client.query(
+        `SELECT id FROM smt_stencil_lifecycle 
+         WHERE (stencil_record_id = $1 OR (work_order_id = $2 AND LOWER(sides) = LOWER($3)))
+           AND is_deleted = false
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [inputId, workOrderId, side]
+    );
+    if (secondaryCheck.rows.length > 0) {
+        return secondaryCheck.rows[0].id;
+    }
+
+    // 3. Fallback: Find stencil from stencil_rack_locations and work order from smt_work_orders
+    const stencilRes = await client.query(
+        `SELECT * FROM stencil_rack_locations WHERE id = $1 OR checked_out_work_order_id = $2 ORDER BY updated_at DESC LIMIT 1`,
+        [inputId, workOrderId]
+    );
+    const woRes = await client.query(
+        `SELECT * FROM smt_work_orders WHERE id = $1`,
+        [workOrderId]
+    );
+
+    if (stencilRes.rows.length === 0 || woRes.rows.length === 0) {
+        throw new Error(`Cannot resolve stencil lifecycle for ID ${inputId} and Work Order ${workOrderId}.`);
+    }
+
+    const stencil = stencilRes.rows[0];
+    const wo = woRes.rows[0];
+
+    const stencilName = stencil.stencil_name || stencil.job_number || 'Stencil';
+    const stencilIdCode = stencil.stencil_rack_number || stencil.job_number || stencilName;
+    const qty = wo.quantity || 0;
+
+    const insertRes = await client.query(
+        `INSERT INTO smt_stencil_lifecycle (
+            stencil_record_id, stencil_id, stencil_name,
+            work_order_id, work_order_number, product_name, product_description,
+            sides, quantity, target_life_cycle, qty_life_cycle, balance_life_cycle,
+            current_used_life_cycle, status, created_by, created_by_name
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        RETURNING id`,
+        [
+            stencil.id,
+            stencilIdCode,
+            stencilName,
+            wo.id,
+            wo.id,
+            wo.product_name || 'N/A',
+            wo.product_description || wo.product_name || 'N/A',
+            side || 'Top',
+            qty,
+            100000,
+            qty,
+            100000,
+            0,
+            'Running',
+            operatorName,
+            operatorName
+        ]
+    );
+
+    return insertRes.rows[0].id;
+};
 
