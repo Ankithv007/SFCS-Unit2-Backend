@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
+import { dashboardEvents } from '../utils/dashboardEmitter';
 
 const logger = createLogger('ADMIN_DASHBOARD_CONTROLLER');
 
@@ -11,6 +12,166 @@ const logger = createLogger('ADMIN_DASHBOARD_CONTROLLER');
 const safeNumber = (val: any): number => {
     const num = Number(val);
     return isNaN(num) || !isFinite(num) ? 0 : num;
+};
+
+export interface SmtStageMetrics {
+    stage: string;
+    passed: number;
+    failed: number;
+    pending: number;
+    percentage: number;
+}
+
+export interface SmtMetricsSummary {
+    printing: SmtStageMetrics & { labelled: number };
+    preAOI: SmtStageMetrics;
+    postAOI: SmtStageMetrics & { eligible: number };
+    smtFG: SmtStageMetrics & { eligible: number };
+    yieldSPI: number;
+    overallStatus: string;
+}
+
+/**
+ * Authoritative SMT stage metrics calculation:
+ * - Genuine Failures only: status = 'FAIL' (excludes INVALID, REJECTED, and system errors).
+ * - Latest Valid State: Uses DISTINCT ON per physical unit to ensure each unit is counted exactly once.
+ * - Handles FAIL -> PASS: When a unit is repaired or passes rework, it is counted as PASS and not FAIL.
+ * - Pending: Math.max(0, stageTotal - passed - failed).
+ * - Yield: (passed / totalQuantity) * 100 adhering to existing application formula.
+ */
+export const calculateSmtStageMetrics = async (
+    dbPool: any,
+    workOrderId: string,
+    totalQuantity: number,
+    dateParam: string | null
+): Promise<SmtMetricsSummary> => {
+    let query = `
+        WITH stage_latest AS (
+            SELECT DISTINCT ON (i.process_step, COALESCE(i.serial_id::text, i.scanned_barcode))
+                i.process_step,
+                COALESCE(i.serial_id::text, i.scanned_barcode) AS unit_key,
+                i.status
+            FROM smt_inspections i
+            WHERE (i.work_order_id = $1 OR i.serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
+              AND i.process_step IN ('Printing', 'Pre AOI', 'Post AOI', 'SMT FG')
+              AND i.status IN ('PASS', 'FAIL')
+    `;
+    const params: any[] = [workOrderId];
+
+    if (dateParam) {
+        query += ` AND TO_CHAR(i.scanned_at, 'YYYY-MM-DD') = $2`;
+        params.push(dateParam);
+    }
+
+    query += `
+            ORDER BY i.process_step, COALESCE(i.serial_id::text, i.scanned_barcode), i.scanned_at DESC, i.id DESC
+        )
+        SELECT 
+            process_step,
+            COUNT(*) FILTER (WHERE status = 'PASS') AS pass_cnt,
+            COUNT(*) FILTER (WHERE status = 'FAIL') AS fail_cnt
+        FROM stage_latest
+        GROUP BY process_step
+    `;
+
+    const res = await dbPool.query(query, params);
+
+    const counts: Record<string, { passed: number; failed: number }> = {
+        'Printing': { passed: 0, failed: 0 },
+        'Pre AOI': { passed: 0, failed: 0 },
+        'Post AOI': { passed: 0, failed: 0 },
+        'SMT FG': { passed: 0, failed: 0 }
+    };
+
+    for (const r of res.rows) {
+        if (counts[r.process_step]) {
+            counts[r.process_step] = {
+                passed: safeNumber(r.pass_cnt),
+                failed: safeNumber(r.fail_cnt)
+            };
+        }
+    }
+
+    // 1. Printing Stage
+    const printingPassed = counts['Printing'].passed;
+    const printingFailed = counts['Printing'].failed;
+    const labelled = printingPassed;
+    const actualPending = Math.max(0, totalQuantity - printingPassed - printingFailed);
+    const actualPercentage = totalQuantity > 0 ? safeNumber(((printingPassed / totalQuantity) * 100).toFixed(1)) : 0;
+    const yieldSPI = actualPercentage;
+
+    // 2. Pre AOI Stage
+    const preAoiPassed = counts['Pre AOI'].passed;
+    const preAoiFailed = counts['Pre AOI'].failed;
+    const preAoiPending = Math.max(0, (dateParam ? labelled : totalQuantity) - preAoiPassed - preAoiFailed);
+    const preAoiPercentage = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
+
+    // 3. Post AOI Stage
+    const postAoiEligible = preAoiPassed;
+    const postAoiPassed = counts['Post AOI'].passed;
+    const postAoiFailed = counts['Post AOI'].failed;
+    const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
+    const postAoiPercentage = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
+
+    // 4. SMT FG Stage
+    const smtFgEligible = postAoiPassed;
+    const smtFgPassed = counts['SMT FG'].passed;
+    const smtFgFailed = counts['SMT FG'].failed;
+    const smtFgPending = Math.max(0, (dateParam ? postAoiPassed : totalQuantity) - smtFgPassed - smtFgFailed);
+    const smtFgPercentage = totalQuantity > 0 ? safeNumber(((smtFgPassed / totalQuantity) * 100).toFixed(1)) : 0;
+
+    // Overall Status calculation (all-time SMT FG pass vs totalQuantity)
+    const overallFgPassRes = await dbPool.query(
+        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS pass_cnt
+         FROM smt_inspections 
+         WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
+           AND process_step = 'SMT FG' AND status = 'PASS'`,
+        [workOrderId]
+    );
+    const overallSmtFgPassed = safeNumber(overallFgPassRes.rows[0]?.pass_cnt);
+
+    let overallStatus = 'NOT STARTED';
+    if (totalQuantity > 0 && overallSmtFgPassed >= totalQuantity) {
+        overallStatus = 'COMPLETED';
+    } else if (labelled > 0 || overallSmtFgPassed > 0 || preAoiPassed > 0 || postAoiPassed > 0) {
+        overallStatus = 'IN PROGRESS';
+    }
+
+    return {
+        printing: {
+            stage: 'Printing',
+            labelled,
+            passed: printingPassed,
+            failed: printingFailed,
+            pending: actualPending,
+            percentage: actualPercentage
+        },
+        yieldSPI,
+        preAOI: {
+            stage: 'Pre AOI',
+            passed: preAoiPassed,
+            failed: preAoiFailed,
+            pending: preAoiPending,
+            percentage: preAoiPercentage
+        },
+        postAOI: {
+            stage: 'Post AOI',
+            eligible: postAoiEligible,
+            passed: postAoiPassed,
+            failed: postAoiFailed,
+            pending: postAoiPending,
+            percentage: postAoiPercentage
+        },
+        smtFG: {
+            stage: 'SMT FG',
+            eligible: smtFgEligible,
+            passed: smtFgPassed,
+            failed: smtFgFailed,
+            pending: smtFgPending,
+            percentage: smtFgPercentage
+        },
+        overallStatus
+    };
 };
 
 /**
@@ -176,197 +337,24 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
         const rawStartDate = startDateRes.rows[0]?.first_ts;
         const startDate = rawStartDate ? formatTimestamp(rawStartDate) : (dateParam ? `No activity on ${dateParam}` : 'Not Started');
 
-        // 3. Labelled Quantity (Actual Status)
-        // 3. Printing Stage Inspections (Passed, Failed, Pending)
-        let printPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status = 'PASS'`;
-        let printFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Printing' AND status = 'PASS'
-               )`;
-        let countParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            printPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            printFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            countParams.push(dateParam);
-        }
-
-        const printPassRes = await pool.query(printPassQuery, countParams);
-        const printFailRes = await pool.query(printFailQuery, countParams);
-
-        const printingPassed = safeNumber(printPassRes.rows[0]?.pass_cnt);
-        const printingFailed = safeNumber(printFailRes.rows[0]?.fail_cnt);
-        const labelled = printingPassed;
-        const actualPending = Math.max(0, totalQuantity - printingPassed - printingFailed);
-        const actualPercentage = totalQuantity > 0 ? safeNumber(((printingPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // 4. Yield SPI (Actual Status / Total Quantity * 100)
-        const yieldSPI = actualPercentage;
-
-        // 5. Pre-AOI Inspections
-        let prePassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status = 'PASS'`;
-        let preFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Pre AOI' AND status = 'PASS'
-               )`;
-        let preParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            prePassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preParams.push(dateParam);
-        }
-
-        const preAoiPassRes = await pool.query(prePassQuery, preParams);
-        const preAoiFailRes = await pool.query(preFailQuery, preParams);
-
-        const preAoiPassed = safeNumber(preAoiPassRes.rows[0]?.pass_cnt);
-        const preAoiFailed = safeNumber(preAoiFailRes.rows[0]?.fail_cnt);
-        // Pre-AOI Pending = Total WO Quantity (or day's labelled) - Pre-AOI Passed - Pre-AOI Failed (clamped >= 0)
-        const preAoiPending = Math.max(0, (dateParam ? labelled : totalQuantity) - preAoiPassed - preAoiFailed);
-        const preAoiPercentage = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // 6. Post-AOI Inspections
-        const postAoiEligible = preAoiPassed;
-
-        let postPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status = 'PASS'`;
-        let postFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Post AOI' AND status = 'PASS'
-               )`;
-        let postParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            postPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postParams.push(dateParam);
-        }
-
-        const postAoiPassRes = await pool.query(postPassQuery, postParams);
-        const postAoiFailRes = await pool.query(postFailQuery, postParams);
-
-        const postAoiPassed = safeNumber(postAoiPassRes.rows[0]?.pass_cnt);
-        const postAoiFailed = safeNumber(postAoiFailRes.rows[0]?.fail_cnt);
-        const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
-        const postAoiPercentage = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // 6.5 SMT FG Inspections
-        const smtFgEligible = postAoiPassed;
-
-        let fgPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`;
-        let fgFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'SMT FG' AND status = 'PASS'
-               )`;
-        let fgParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            fgPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgParams.push(dateParam);
-        }
-
-        const smtFgPassRes = await pool.query(fgPassQuery, fgParams);
-        const smtFgFailRes = await pool.query(fgFailQuery, fgParams);
-
-        const smtFgPassed = safeNumber(smtFgPassRes.rows[0]?.pass_cnt);
-        const smtFgFailed = safeNumber(smtFgFailRes.rows[0]?.fail_cnt);
-        const smtFgPending = Math.max(0, (dateParam ? postAoiPassed : totalQuantity) - smtFgPassed - smtFgFailed);
-        const smtFgPercentage = totalQuantity > 0 ? safeNumber(((smtFgPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Total SMT FG Passed across the entire Work Order (without date filter) for overall status
-        const overallFgPassRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`,
-            [workOrderId]
-        );
-        const overallSmtFgPassed = safeNumber(overallFgPassRes.rows[0]?.pass_cnt);
-
-        // 7. Overall Work Order Status Logic:
-        // Show IN PROGRESS for any work order until SMT FG stage is passed for all quantity, then COMPLETED.
-        let overallStatus = 'NOT STARTED';
-        if (totalQuantity > 0 && overallSmtFgPassed >= totalQuantity) {
-            overallStatus = 'COMPLETED';
-        } else if (labelled > 0 || overallSmtFgPassed > 0 || preAoiPassed > 0 || postAoiPassed > 0) {
-            overallStatus = 'IN PROGRESS';
-        }
+        // 3. Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
 
         res.status(200).json({
             success: true,
             workOrderId: wo.id,
             totalQuantity,
             startDate,
-            overallStatus,
+            overallStatus: metrics.overallStatus,
             productName: wo.product_name,
             modelName: wo.model_name,
             selectedDate: dateParam || 'all',
             availableDates,
-            actualStatus: {
-                labelled,
-                passed: printingPassed,
-                failed: printingFailed,
-                pending: actualPending,
-                percentage: actualPercentage
-            },
-            yieldSPI,
-            preAOI: {
-                passed: preAoiPassed,
-                failed: preAoiFailed,
-                pending: preAoiPending,
-                percentage: preAoiPercentage
-            },
-            postAOI: {
-                eligible: postAoiEligible,
-                passed: postAoiPassed,
-                failed: postAoiFailed,
-                pending: postAoiPending,
-                percentage: postAoiPercentage
-            },
-            smtFG: {
-                eligible: smtFgEligible,
-                passed: smtFgPassed,
-                failed: smtFgFailed,
-                pending: smtFgPending,
-                percentage: smtFgPercentage
-            }
+            actualStatus: metrics.printing,
+            yieldSPI: metrics.yieldSPI,
+            preAOI: metrics.preAOI,
+            postAOI: metrics.postAOI,
+            smtFG: metrics.smtFG
         });
     } catch (err: any) {
         logger.error('Error in getWorkOrderDashboard:', err);
@@ -395,7 +383,7 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
 
         // Fetch Work Order Details
         const woRes = await pool.query(
-            `SELECT id, quantity, created_at, status, product_name, model_name FROM smt_work_orders WHERE id = $1`,
+            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status FROM smt_work_orders WHERE id = $1`,
             [workOrderId]
         );
 
@@ -405,150 +393,30 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
 
         const wo = woRes.rows[0];
         const totalQuantity = safeNumber(wo.quantity);
+        const overallStatus = wo.smt_production_status || wo.status || 'Pending';
 
-        // Fetch Printing Stage Inspections (Passed, Failed, Pending)
-        let printPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status = 'PASS'`;
-        let printFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Printing' AND status = 'PASS'
-               )`;
-        let countParams: any[] = [workOrderId];
+        // Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
+        const labelled = metrics.printing.labelled;
+        const printingPassed = metrics.printing.passed;
+        const printingFailed = metrics.printing.failed;
+        const actualPending = metrics.printing.pending;
+        const actualPercentage = metrics.printing.percentage;
 
-        if (dateParam) {
-            printPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            printFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            countParams.push(dateParam);
-        }
+        const preAoiPassed = metrics.preAOI.passed;
+        const preAoiFailed = metrics.preAOI.failed;
+        const preAoiPending = metrics.preAOI.pending;
+        const preAoiPercentage = metrics.preAOI.percentage;
 
-        const printPassRes = await pool.query(printPassQuery, countParams);
-        const printFailRes = await pool.query(printFailQuery, countParams);
+        const postAoiPassed = metrics.postAOI.passed;
+        const postAoiFailed = metrics.postAOI.failed;
+        const postAoiPending = metrics.postAOI.pending;
+        const postAoiPercentage = metrics.postAOI.percentage;
 
-        const printingPassed = safeNumber(printPassRes.rows[0]?.pass_cnt);
-        const printingFailed = safeNumber(printFailRes.rows[0]?.fail_cnt);
-        const labelled = printingPassed;
-        const actualPending = Math.max(0, totalQuantity - printingPassed - printingFailed);
-        const actualPercentage = totalQuantity > 0 ? safeNumber(((printingPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Pre-AOI
-        let prePassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status = 'PASS'`;
-        let preFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Pre AOI' AND status = 'PASS'
-               )`;
-        let preParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            prePassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preParams.push(dateParam);
-        }
-
-        const preAoiPassRes = await pool.query(prePassQuery, preParams);
-        const preAoiFailRes = await pool.query(preFailQuery, preParams);
-
-        const preAoiPassed = safeNumber(preAoiPassRes.rows[0]?.pass_cnt);
-        const preAoiFailed = safeNumber(preAoiFailRes.rows[0]?.fail_cnt);
-        const preAoiPending = Math.max(0, (dateParam ? labelled : totalQuantity) - preAoiPassed - preAoiFailed);
-        const preAoiPercentage = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Post-AOI
-        const postAoiEligible = preAoiPassed;
-        let postPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status = 'PASS'`;
-        let postFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Post AOI' AND status = 'PASS'
-               )`;
-        let postParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            postPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postParams.push(dateParam);
-        }
-
-        const postAoiPassRes = await pool.query(postPassQuery, postParams);
-        const postAoiFailRes = await pool.query(postFailQuery, postParams);
-
-        const postAoiPassed = safeNumber(postAoiPassRes.rows[0]?.pass_cnt);
-        const postAoiFailed = safeNumber(postAoiFailRes.rows[0]?.fail_cnt);
-        const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
-        const postAoiPercentage = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // SMT FG
-        const smtFgEligible = postAoiPassed;
-        let fgPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`;
-        let fgFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'SMT FG' AND status = 'PASS'
-               )`;
-        let fgParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            fgPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgParams.push(dateParam);
-        }
-
-        const smtFgPassRes = await pool.query(fgPassQuery, fgParams);
-        const smtFgFailRes = await pool.query(fgFailQuery, fgParams);
-
-        const smtFgPassed = safeNumber(smtFgPassRes.rows[0]?.pass_cnt);
-        const smtFgFailed = safeNumber(smtFgFailRes.rows[0]?.fail_cnt);
-        const smtFgPending = Math.max(0, (dateParam ? postAoiPassed : totalQuantity) - smtFgPassed - smtFgFailed);
-        const smtFgPercentage = totalQuantity > 0 ? safeNumber(((smtFgPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Overall status calculation
-        const overallFgPassRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`,
-            [workOrderId]
-        );
-        const overallSmtFgPassed = safeNumber(overallFgPassRes.rows[0]?.pass_cnt);
-
-        let overallStatus = 'NOT STARTED';
-        if (totalQuantity > 0 && overallSmtFgPassed >= totalQuantity) {
-            overallStatus = 'COMPLETED';
-        } else if (labelled > 0 || overallSmtFgPassed > 0 || preAoiPassed > 0 || postAoiPassed > 0) {
-            overallStatus = 'IN PROGRESS';
-        }
+        const smtFgPassed = metrics.smtFG.passed;
+        const smtFgFailed = metrics.smtFG.failed;
+        const smtFgPending = metrics.smtFG.pending;
+        const smtFgPercentage = metrics.smtFG.percentage;
 
         // Detailed Inspections Query for the selected date
         let logsQuery = `
@@ -733,7 +601,7 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
 
         // Fetch Work Order Details
         const woRes = await pool.query(
-            `SELECT id, quantity, created_at, status, product_name, model_name FROM smt_work_orders WHERE id = $1`,
+            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status FROM smt_work_orders WHERE id = $1`,
             [workOrderId]
         );
 
@@ -743,150 +611,30 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
 
         const wo = woRes.rows[0];
         const totalQuantity = safeNumber(wo.quantity);
+        const overallStatus = wo.smt_production_status || wo.status || 'Pending';
 
-        // Fetch Printing Stage Inspections (Passed, Failed, Pending)
-        let printPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status = 'PASS'`;
-        let printFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Printing' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Printing' AND status = 'PASS'
-               )`;
-        let countParams: any[] = [workOrderId];
+        // Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
+        const labelled = metrics.printing.labelled;
+        const printingPassed = metrics.printing.passed;
+        const printingFailed = metrics.printing.failed;
+        const actualPending = metrics.printing.pending;
+        const actualPercentage = metrics.printing.percentage;
 
-        if (dateParam) {
-            printPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            printFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            countParams.push(dateParam);
-        }
+        const preAoiPassed = metrics.preAOI.passed;
+        const preAoiFailed = metrics.preAOI.failed;
+        const preAoiPending = metrics.preAOI.pending;
+        const preAoiPercentage = metrics.preAOI.percentage;
 
-        const printPassRes = await pool.query(printPassQuery, countParams);
-        const printFailRes = await pool.query(printFailQuery, countParams);
+        const postAoiPassed = metrics.postAOI.passed;
+        const postAoiFailed = metrics.postAOI.failed;
+        const postAoiPending = metrics.postAOI.pending;
+        const postAoiPercentage = metrics.postAOI.percentage;
 
-        const printingPassed = safeNumber(printPassRes.rows[0]?.pass_cnt);
-        const printingFailed = safeNumber(printFailRes.rows[0]?.fail_cnt);
-        const labelled = printingPassed;
-        const actualPending = Math.max(0, totalQuantity - printingPassed - printingFailed);
-        const actualPercentage = totalQuantity > 0 ? safeNumber(((printingPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Pre-AOI
-        let prePassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status = 'PASS'`;
-        let preFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Pre AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Pre AOI' AND status = 'PASS'
-               )`;
-        let preParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            prePassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            preParams.push(dateParam);
-        }
-
-        const preAoiPassRes = await pool.query(prePassQuery, preParams);
-        const preAoiFailRes = await pool.query(preFailQuery, preParams);
-
-        const preAoiPassed = safeNumber(preAoiPassRes.rows[0]?.pass_cnt);
-        const preAoiFailed = safeNumber(preAoiFailRes.rows[0]?.fail_cnt);
-        const preAoiPending = Math.max(0, (dateParam ? labelled : totalQuantity) - preAoiPassed - preAoiFailed);
-        const preAoiPercentage = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Post-AOI
-        const postAoiEligible = preAoiPassed;
-        let postPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status = 'PASS'`;
-        let postFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'Post AOI' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'Post AOI' AND status = 'PASS'
-               )`;
-        let postParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            postPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            postParams.push(dateParam);
-        }
-
-        const postAoiPassRes = await pool.query(postPassQuery, postParams);
-        const postAoiFailRes = await pool.query(postFailQuery, postParams);
-
-        const postAoiPassed = safeNumber(postAoiPassRes.rows[0]?.pass_cnt);
-        const postAoiFailed = safeNumber(postAoiFailRes.rows[0]?.fail_cnt);
-        const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
-        const postAoiPercentage = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // SMT FG
-        const smtFgEligible = postAoiPassed;
-        let fgPassQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`;
-        let fgFailQuery = `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS fail_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status IN ('FAIL', 'REJECTED', 'INVALID')
-               AND COALESCE(scanned_barcode, serial_id::text) NOT IN (
-                   SELECT COALESCE(scanned_barcode, serial_id::text)
-                   FROM smt_inspections
-                   WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-                     AND process_step = 'SMT FG' AND status = 'PASS'
-               )`;
-        let fgParams: any[] = [workOrderId];
-
-        if (dateParam) {
-            fgPassQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgFailQuery += ` AND TO_CHAR(scanned_at, 'YYYY-MM-DD') = $2`;
-            fgParams.push(dateParam);
-        }
-
-        const smtFgPassRes = await pool.query(fgPassQuery, fgParams);
-        const smtFgFailRes = await pool.query(fgFailQuery, fgParams);
-
-        const smtFgPassed = safeNumber(smtFgPassRes.rows[0]?.pass_cnt);
-        const smtFgFailed = safeNumber(smtFgFailRes.rows[0]?.fail_cnt);
-        const smtFgPending = Math.max(0, (dateParam ? postAoiPassed : totalQuantity) - smtFgPassed - smtFgFailed);
-        const smtFgPercentage = totalQuantity > 0 ? safeNumber(((smtFgPassed / totalQuantity) * 100).toFixed(1)) : 0;
-
-        // Overall status calculation
-        const overallFgPassRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(scanned_barcode, serial_id::text)) AS pass_cnt
-             FROM smt_inspections 
-             WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-               AND process_step = 'SMT FG' AND status = 'PASS'`,
-            [workOrderId]
-        );
-        const overallSmtFgPassed = safeNumber(overallFgPassRes.rows[0]?.pass_cnt);
-
-        let overallStatus = 'NOT STARTED';
-        if (totalQuantity > 0 && overallSmtFgPassed >= totalQuantity) {
-            overallStatus = 'COMPLETED';
-        } else if (labelled > 0 || overallSmtFgPassed > 0 || preAoiPassed > 0 || postAoiPassed > 0) {
-            overallStatus = 'IN PROGRESS';
-        }
+        const smtFgPassed = metrics.smtFG.passed;
+        const smtFgFailed = metrics.smtFG.failed;
+        const smtFgPending = metrics.smtFG.pending;
+        const smtFgPercentage = metrics.smtFG.percentage;
 
         // Detailed Inspections Query for the selected date
         let logsQuery = `
@@ -949,3 +697,54 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
         });
     }
 };
+
+/**
+ * GET /api/smt/admin/dashboard/events
+ * Real-time Server-Sent Events (SSE) stream for SMT Dashboard updates.
+ * Pushes events immediately when a genuine production state change occurs.
+ */
+export const streamDashboardEvents = async (req: Request, res: Response) => {
+    try {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        if (typeof (res as any).flushHeaders === 'function') {
+            (res as any).flushHeaders();
+        }
+
+        // Initial connection greeting
+        res.write(': connected\n\n');
+
+        const onUpdate = (eventData: any) => {
+            try {
+                res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+            } catch (err: any) {
+                logger.error(`Error writing SSE data: ${err.message}`);
+            }
+        };
+
+        dashboardEvents.on('smt-dashboard-update', onUpdate);
+
+        // Keep-alive heartbeat every 20 seconds to prevent proxy timeouts
+        const keepAliveInterval = setInterval(() => {
+            try {
+                res.write(': keepalive\n\n');
+            } catch (err) {
+                clearInterval(keepAliveInterval);
+            }
+        }, 20000);
+
+        req.on('close', () => {
+            clearInterval(keepAliveInterval);
+            dashboardEvents.off('smt-dashboard-update', onUpdate);
+            res.end();
+        });
+    } catch (err: any) {
+        logger.error('Error establishing SSE stream:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: 'Failed to establish event stream' });
+        }
+    }
+};
+

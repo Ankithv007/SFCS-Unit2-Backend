@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import * as ExcelJS from 'exceljs';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
+import { notifySmtDashboardUpdate } from '../utils/dashboardEmitter';
 import {
     savePoDocument,
     deletePoDocument,
@@ -1390,10 +1391,13 @@ export const createInspection = async (req: Request, res: Response) => {
 
                 // Also update the main status in serial_numbers
                 const serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
-                await pool.query(
-                    'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
+                const snUpdate = await pool.query(
+                    'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2 RETURNING work_order_id',
                     [serialStatus, serial_id]
                 );
+                if (snUpdate.rows.length > 0 && snUpdate.rows[0].work_order_id) {
+                    notifySmtDashboardUpdate(snUpdate.rows[0].work_order_id);
+                }
 
                 return res.status(200).json(result.rows[0]);
             }
@@ -1414,10 +1418,13 @@ export const createInspection = async (req: Request, res: Response) => {
             serialStatus = 'COMPLETED';
         }
 
-        await pool.query(
-            'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2',
+        const snUpdate = await pool.query(
+            'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2 RETURNING work_order_id',
             [serialStatus, serial_id]
         );
+        if (snUpdate.rows.length > 0 && snUpdate.rows[0].work_order_id) {
+            notifySmtDashboardUpdate(snUpdate.rows[0].work_order_id);
+        }
 
         res.status(201).json(result.rows[0]);
     } catch (err) {

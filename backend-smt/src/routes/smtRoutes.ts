@@ -4,7 +4,8 @@ import {
     searchWorkOrders,
     getWorkOrderDashboard,
     exportWorkOrderDayExcel,
-    exportWorkOrderDayPdfData
+    exportWorkOrderDayPdfData,
+    streamDashboardEvents
 } from '../controllers/adminDashboardController';
 import {
     createWorkOrder,
@@ -238,6 +239,7 @@ const router = express.Router();
 
 
 // Admin Production Dashboard APIs
+router.get('/admin/dashboard/events', authenticateToken, streamDashboardEvents);
 router.get('/admin/dashboard/live-work-orders', authenticateToken, getLiveWorkOrders);
 router.get('/admin/work-orders/search', authenticateToken, searchWorkOrders);
 router.get('/admin/work-orders/:workOrderId/dashboard', authenticateToken, getWorkOrderDashboard);

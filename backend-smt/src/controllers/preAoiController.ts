@@ -3,6 +3,7 @@ import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
 import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted, isBarcodeBottomCompleted, ensureStencilLifecycleId } from '../utils/smtHelper';
+import { notifySmtDashboardUpdate } from '../utils/dashboardEmitter';
 
 const logger = createLogger('PreAoiController');
 
@@ -672,6 +673,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
                 const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
                 await client.query('COMMIT');
+                notifySmtDashboardUpdate(session.work_order_id);
                 return res.status(200).json({
                     success: true,
                     isValid: true,
@@ -841,6 +843,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
+        notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({
             success: true,
             isValid: true,
@@ -999,6 +1002,7 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         }
 
         await client.query('COMMIT');
+        notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({ message: 'Scanned barcode updated successfully.' });
     } catch (err: any) {
         await client.query('ROLLBACK');
@@ -1087,6 +1091,7 @@ export const failScanRow = async (req: Request, res: Response) => {
         );
 
         await client.query('COMMIT');
+        notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({ message: 'Scan result changed to FAIL successfully.' });
     } catch (err: any) {
         await client.query('ROLLBACK');

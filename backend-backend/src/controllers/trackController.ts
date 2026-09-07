@@ -53,6 +53,7 @@ export const trackBarcode = async (req: Request, res: Response) => {
                 wo.customer_name,
                 wo.model,
                 wo.quantity,
+                wo.selected_stages,
                 ps.stage_name AS current_stage,
                 fps.stage_name AS failed_stage
             FROM units u
@@ -76,7 +77,13 @@ export const trackBarcode = async (req: Request, res: Response) => {
 
                 if (smtSerialRes.rowCount && smtSerialRes.rowCount > 0) {
                     const smtSn = smtSerialRes.rows[0];
-                    const activeRoute = await WorkflowEngineService.resolveActiveRoute({ stagesList: smtSn.selected_stages });
+                    let activeRoute: any[] = [];
+                    try {
+                        activeRoute = await WorkflowEngineService.resolveActiveRoute({ stagesList: smtSn.selected_stages });
+                    } catch (routeErr: any) {
+                        console.warn('Failed to resolve active route for smt serial:', routeErr);
+                        activeRoute = [];
+                    }
                     const firstStage = activeRoute.length > 0 ? activeRoute[0].stage_name : 'Pre-Soldering';
                     return res.status(200).json({
                         barcode: smtSn.serial_number,
@@ -99,6 +106,13 @@ export const trackBarcode = async (req: Request, res: Response) => {
                         total_reworks: 0,
                         total_debugs: 0,
                         scan_history: [],
+                        selected_stages: smtSn.selected_stages,
+                        active_route: activeRoute.map((s: any) => ({
+                            id: s.id,
+                            stage_code: s.stage_code,
+                            stage_name: s.stage_name,
+                            stage_order: s.stage_order
+                        })),
                     });
                 }
             } catch (smtErr) {
@@ -187,15 +201,30 @@ export const trackBarcode = async (req: Request, res: Response) => {
         // 5. Compute "final status" label dynamically based on active work order route
         const status = (tracking.current_status || '').toUpperCase();
         let finalStatusLabel = 'IN PRODUCTION';
-        const lastStage = await WorkflowEngineService.getLastStage({
-            workOrderId: tracking.work_order_id,
-            batchId: tracking.batch_id
-        });
+        let activeRoute: any[] = [];
+        try {
+            activeRoute = await WorkflowEngineService.resolveActiveRoute({
+                workOrderId: tracking.work_order_id,
+                batchId: tracking.batch_id,
+                woNumber: tracking.wo_number,
+                selectedStages: tracking.selected_stages
+            });
+        } catch (routeErr: any) {
+            console.warn(`Failed to resolve active route for WO [${tracking.wo_number}]:`, routeErr.message);
+            activeRoute = [];
+        }
+
+        const lastStage = activeRoute.length > 0
+            ? activeRoute[activeRoute.length - 1]
+            : await WorkflowEngineService.getLastStage({
+                workOrderId: tracking.work_order_id,
+                batchId: tracking.batch_id
+            });
         const isFinalStage = lastStage 
             ? (tracking.current_stage === lastStage.stage_name || tracking.current_stage === lastStage.stage_code)
             : tracking.current_stage === 'Packing';
 
-        if (status === 'ACCEPTED' && isFinalStage) {
+        if ((status === 'ACCEPTED' || status === 'COMPLETED') && isFinalStage) {
             finalStatusLabel = 'COMPLETED';
         } else if (status === 'ACCEPTED') {
             finalStatusLabel = 'IN PRODUCTION';
@@ -228,6 +257,13 @@ export const trackBarcode = async (req: Request, res: Response) => {
             total_reworks: totalReworks,
             total_debugs: totalDebugs,
             scan_history: history,
+            selected_stages: tracking.selected_stages,
+            active_route: activeRoute.map((s: any) => ({
+                id: s.id,
+                stage_code: s.stage_code,
+                stage_name: s.stage_name,
+                stage_order: s.stage_order
+            })),
         });
 
     } catch (err: any) {
@@ -346,7 +382,13 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             historyBySerial[row.barcode].push(row);
         });
 
-        const activeRoute = await WorkflowEngineService.resolveActiveRoute({ workOrderId: wo.id });
+        let activeRoute: any[] = [];
+        try {
+            activeRoute = await WorkflowEngineService.resolveActiveRoute({ workOrderId: wo.id });
+        } catch (routeErr: any) {
+            console.warn(`Failed to resolve active route for WO [${wo.wo_number}]:`, routeErr.message);
+            activeRoute = [];
+        }
         const stepNames = activeRoute.length > 0
             ? activeRoute.map(s => s.stage_name)
             : [
@@ -413,6 +455,13 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             quantity: wo.quantity,
             line_id: '-',
             total_serials: serials.length,
+            selected_stages: wo.selected_stages,
+            active_route: activeRoute.map((s: any) => ({
+                id: s.id,
+                stage_code: s.stage_code,
+                stage_name: s.stage_name,
+                stage_order: s.stage_order
+            })),
             serials: mappedSerials
         });
 

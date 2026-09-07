@@ -3,6 +3,7 @@ import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
 import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper } from '../utils/smtHelper';
+import { notifySmtDashboardUpdate } from '../utils/dashboardEmitter';
 
 const logger = createLogger('FgController');
 
@@ -768,6 +769,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         const stats = await fetchFgSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
+        notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({
             success: true,
             isValid: true,
