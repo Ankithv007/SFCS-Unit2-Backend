@@ -16,26 +16,42 @@ const safeNumber = (val: any): number => {
 
 export interface SmtStageMetrics {
     stage: string;
+    pass: number;
+    fail: number;
+    pending: number;
+    yield: number;
+    // Backward compatibility aliases
     passed: number;
     failed: number;
-    pending: number;
     percentage: number;
 }
 
-export interface SmtMetricsSummary {
+export interface SmtSideMetrics {
     printing: SmtStageMetrics & { labelled: number };
     preAOI: SmtStageMetrics;
-    postAOI: SmtStageMetrics & { eligible: number };
-    smtFG: SmtStageMetrics & { eligible: number };
+    postAOI: SmtStageMetrics;
+    yieldSPI: number;
+}
+
+export interface SmtMetricsSummary {
+    isDoubleSided: boolean;
+    sides: string;
+    printing: SmtStageMetrics & { labelled: number };
+    preAOI: SmtStageMetrics;
+    postAOI: SmtStageMetrics;
+    smtFG: SmtStageMetrics;
     yieldSPI: number;
     overallStatus: string;
+    top?: SmtSideMetrics;
+    bottom?: SmtSideMetrics;
 }
 
 /**
  * Authoritative SMT stage metrics calculation:
  * - Genuine Failures only: status = 'FAIL' (excludes INVALID, REJECTED, and system errors).
- * - Latest Valid State: Uses DISTINCT ON per physical unit to ensure each unit is counted exactly once.
+ * - Latest Valid State: Uses DISTINCT ON per physical unit to ensure each unit is counted exactly once per side.
  * - Handles FAIL -> PASS: When a unit is repaired or passes rework, it is counted as PASS and not FAIL.
+ * - Double-Sided Support: Computes independent metrics for TOP and BOTTOM flows, with a single shared SMT FG final release stage.
  * - Pending: Math.max(0, stageTotal - passed - failed).
  * - Yield: (passed / totalQuantity) * 100 adhering to existing application formula.
  */
@@ -43,16 +59,63 @@ export const calculateSmtStageMetrics = async (
     dbPool: any,
     workOrderId: string,
     totalQuantity: number,
-    dateParam: string | null
+    dateParam: string | null,
+    isDoubleSided: boolean = false,
+    sides: string = 'Top'
 ): Promise<SmtMetricsSummary> => {
+    let detectedSides = sides;
+    let detectedDoubleSided = isDoubleSided;
+
+    if (!detectedDoubleSided && detectedSides === 'Top') {
+        try {
+            const woSideRes = await dbPool.query(`SELECT sides FROM smt_work_orders WHERE id = $1`, [workOrderId]);
+            if (woSideRes.rows.length > 0 && woSideRes.rows[0].sides) {
+                detectedSides = woSideRes.rows[0].sides.trim();
+                detectedDoubleSided = detectedSides.toLowerCase() === 'top / bottom' || detectedSides.includes('/');
+            }
+        } catch {
+            // fallback to default
+        }
+    }
+
     let query = `
         WITH stage_latest AS (
-            SELECT DISTINCT ON (i.process_step, COALESCE(i.serial_id::text, i.scanned_barcode))
+            SELECT DISTINCT ON (
                 i.process_step,
-                COALESCE(i.serial_id::text, i.scanned_barcode) AS unit_key,
+                CASE 
+                    WHEN i.process_step = 'SMT FG' THEN 'SHARED'
+                    WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
+                    WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
+                    WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
+                    WHEN fgs.side IS NOT NULL THEN UPPER(TRIM(fgs.side))
+                    WHEN wo.sides IS NOT NULL AND LOWER(wo.sides) = 'bottom' THEN 'BOTTOM'
+                    ELSE 'TOP'
+                END,
+                UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text)))
+            )
+                i.process_step,
+                CASE 
+                    WHEN i.process_step = 'SMT FG' THEN 'SHARED'
+                    WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
+                    WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
+                    WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
+                    WHEN fgs.side IS NOT NULL THEN UPPER(TRIM(fgs.side))
+                    WHEN wo.sides IS NOT NULL AND LOWER(wo.sides) = 'bottom' THEN 'BOTTOM'
+                    ELSE 'TOP'
+                END AS production_side,
+                UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))) AS unit_key,
                 i.status
             FROM smt_inspections i
-            WHERE (i.work_order_id = $1 OR i.serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
+            LEFT JOIN smt_work_orders wo ON i.work_order_id = wo.id
+            LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+            LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+            LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
+            LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
+            LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
+            LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+            WHERE (i.work_order_id = $1 OR sn.work_order_id = $1)
               AND i.process_step IN ('Printing', 'Pre AOI', 'Post AOI', 'SMT FG')
               AND i.status IN ('PASS', 'FAIL')
     `;
@@ -64,68 +127,137 @@ export const calculateSmtStageMetrics = async (
     }
 
     query += `
-            ORDER BY i.process_step, COALESCE(i.serial_id::text, i.scanned_barcode), i.scanned_at DESC, i.id DESC
+            ORDER BY 
+                i.process_step,
+                CASE 
+                    WHEN i.process_step = 'SMT FG' THEN 'SHARED'
+                    WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
+                    WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
+                    WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
+                    WHEN fgs.side IS NOT NULL THEN UPPER(TRIM(fgs.side))
+                    WHEN wo.sides IS NOT NULL AND LOWER(wo.sides) = 'bottom' THEN 'BOTTOM'
+                    ELSE 'TOP'
+                END,
+                UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))),
+                i.scanned_at DESC,
+                i.id DESC
         )
         SELECT 
             process_step,
+            production_side,
             COUNT(*) FILTER (WHERE status = 'PASS') AS pass_cnt,
             COUNT(*) FILTER (WHERE status = 'FAIL') AS fail_cnt
         FROM stage_latest
-        GROUP BY process_step
+        GROUP BY process_step, production_side
     `;
 
     const res = await dbPool.query(query, params);
 
-    const counts: Record<string, { passed: number; failed: number }> = {
-        'Printing': { passed: 0, failed: 0 },
-        'Pre AOI': { passed: 0, failed: 0 },
-        'Post AOI': { passed: 0, failed: 0 },
-        'SMT FG': { passed: 0, failed: 0 }
+    const sideCounts: Record<string, Record<string, { passed: number; failed: number }>> = {
+        'Printing': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
+        'Pre AOI': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
+        'Post AOI': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
+        'SMT FG': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } }
     };
+    let smtFgPassed = 0;
+    let smtFgFailed = 0;
 
     for (const r of res.rows) {
-        if (counts[r.process_step]) {
-            counts[r.process_step] = {
+        const step = r.process_step;
+        if (step === 'SMT FG') {
+            smtFgPassed = safeNumber(r.pass_cnt);
+            smtFgFailed = safeNumber(r.fail_cnt);
+            sideCounts['SMT FG']['TOP'] = { passed: smtFgPassed, failed: smtFgFailed };
+        } else if (sideCounts[step]) {
+            const side = r.production_side === 'BOTTOM' ? 'BOTTOM' : 'TOP';
+            sideCounts[step][side] = {
                 passed: safeNumber(r.pass_cnt),
                 failed: safeNumber(r.fail_cnt)
             };
         }
     }
 
-    // 1. Printing Stage
-    const printingPassed = counts['Printing'].passed;
-    const printingFailed = counts['Printing'].failed;
-    const labelled = printingPassed;
-    const actualPending = Math.max(0, totalQuantity - printingPassed - printingFailed);
-    const actualPercentage = totalQuantity > 0 ? safeNumber(((printingPassed / totalQuantity) * 100).toFixed(1)) : 0;
-    const yieldSPI = actualPercentage;
+    const buildSideMetrics = (sideKey: 'TOP' | 'BOTTOM'): SmtSideMetrics => {
+        const printPassed = sideCounts['Printing'][sideKey].passed;
+        const printFailed = sideCounts['Printing'][sideKey].failed;
+        const printPending = Math.max(0, totalQuantity - printPassed - printFailed);
+        const printYield = totalQuantity > 0 ? safeNumber(((printPassed / totalQuantity) * 100).toFixed(1)) : 0;
 
-    // 2. Pre AOI Stage
-    const preAoiPassed = counts['Pre AOI'].passed;
-    const preAoiFailed = counts['Pre AOI'].failed;
-    const preAoiPending = Math.max(0, (dateParam ? labelled : totalQuantity) - preAoiPassed - preAoiFailed);
-    const preAoiPercentage = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
+        const preAoiPassed = sideCounts['Pre AOI'][sideKey].passed;
+        const preAoiFailed = sideCounts['Pre AOI'][sideKey].failed;
+        const preAoiPending = Math.max(0, (dateParam ? printPassed : totalQuantity) - preAoiPassed - preAoiFailed);
+        const preAoiYield = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
 
-    // 3. Post AOI Stage
-    const postAoiEligible = preAoiPassed;
-    const postAoiPassed = counts['Post AOI'].passed;
-    const postAoiFailed = counts['Post AOI'].failed;
-    const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
-    const postAoiPercentage = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
+        const postAoiPassed = sideCounts['Post AOI'][sideKey].passed;
+        const postAoiFailed = sideCounts['Post AOI'][sideKey].failed;
+        const postAoiPending = Math.max(0, (dateParam ? preAoiPassed : totalQuantity) - postAoiPassed - postAoiFailed);
+        const postAoiYield = totalQuantity > 0 ? safeNumber(((postAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
 
-    // 4. SMT FG Stage
-    const smtFgEligible = postAoiPassed;
-    const smtFgPassed = counts['SMT FG'].passed;
-    const smtFgFailed = counts['SMT FG'].failed;
-    const smtFgPending = Math.max(0, (dateParam ? postAoiPassed : totalQuantity) - smtFgPassed - smtFgFailed);
+        return {
+            printing: {
+                stage: 'Printing',
+                pass: printPassed,
+                fail: printFailed,
+                pending: printPending,
+                yield: printYield,
+                labelled: printPassed,
+                passed: printPassed,
+                failed: printFailed,
+                percentage: printYield
+            },
+            preAOI: {
+                stage: 'Pre AOI',
+                pass: preAoiPassed,
+                fail: preAoiFailed,
+                pending: preAoiPending,
+                yield: preAoiYield,
+                passed: preAoiPassed,
+                failed: preAoiFailed,
+                percentage: preAoiYield
+            },
+            postAOI: {
+                stage: 'Post AOI',
+                pass: postAoiPassed,
+                fail: postAoiFailed,
+                pending: postAoiPending,
+                yield: postAoiYield,
+                passed: postAoiPassed,
+                failed: postAoiFailed,
+                percentage: postAoiYield
+            },
+            yieldSPI: printYield
+        };
+    };
+
+    const topMetrics = buildSideMetrics('TOP');
+    const bottomMetrics = buildSideMetrics('BOTTOM');
+
+    // SMT FG is the single shared final release stage
+    const priorStagePassed = detectedDoubleSided
+        ? Math.min(topMetrics.postAOI.passed, bottomMetrics.postAOI.passed)
+        : (detectedSides.toLowerCase() === 'bottom' ? bottomMetrics.postAOI.passed : topMetrics.postAOI.passed);
+    const smtFgPending = Math.max(0, (dateParam ? priorStagePassed : totalQuantity) - smtFgPassed - smtFgFailed);
     const smtFgPercentage = totalQuantity > 0 ? safeNumber(((smtFgPassed / totalQuantity) * 100).toFixed(1)) : 0;
+
+    const smtFgMetrics: SmtStageMetrics = {
+        stage: 'SMT FG',
+        pass: smtFgPassed,
+        fail: smtFgFailed,
+        pending: smtFgPending,
+        yield: smtFgPercentage,
+        passed: smtFgPassed,
+        failed: smtFgFailed,
+        percentage: smtFgPercentage
+    };
 
     // Overall Status calculation (all-time SMT FG pass vs totalQuantity)
     const overallFgPassRes = await dbPool.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS pass_cnt
-         FROM smt_inspections 
-         WHERE (work_order_id = $1 OR serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1))
-           AND process_step = 'SMT FG' AND status = 'PASS'`,
+        `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text)))) AS pass_cnt
+         FROM smt_inspections i
+         LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+         WHERE (i.work_order_id = $1 OR sn.work_order_id = $1)
+           AND i.process_step = 'SMT FG' AND i.status = 'PASS'`,
         [workOrderId]
     );
     const overallSmtFgPassed = safeNumber(overallFgPassRes.rows[0]?.pass_cnt);
@@ -133,44 +265,28 @@ export const calculateSmtStageMetrics = async (
     let overallStatus = 'NOT STARTED';
     if (totalQuantity > 0 && overallSmtFgPassed >= totalQuantity) {
         overallStatus = 'COMPLETED';
-    } else if (labelled > 0 || overallSmtFgPassed > 0 || preAoiPassed > 0 || postAoiPassed > 0) {
+    } else if (
+        topMetrics.printing.passed > 0 || bottomMetrics.printing.passed > 0 ||
+        overallSmtFgPassed > 0 ||
+        topMetrics.preAOI.passed > 0 || bottomMetrics.preAOI.passed > 0 ||
+        topMetrics.postAOI.passed > 0 || bottomMetrics.postAOI.passed > 0
+    ) {
         overallStatus = 'IN PROGRESS';
     }
 
+    const primaryMetrics = (detectedSides.toLowerCase() === 'bottom') ? bottomMetrics : topMetrics;
+
     return {
-        printing: {
-            stage: 'Printing',
-            labelled,
-            passed: printingPassed,
-            failed: printingFailed,
-            pending: actualPending,
-            percentage: actualPercentage
-        },
-        yieldSPI,
-        preAOI: {
-            stage: 'Pre AOI',
-            passed: preAoiPassed,
-            failed: preAoiFailed,
-            pending: preAoiPending,
-            percentage: preAoiPercentage
-        },
-        postAOI: {
-            stage: 'Post AOI',
-            eligible: postAoiEligible,
-            passed: postAoiPassed,
-            failed: postAoiFailed,
-            pending: postAoiPending,
-            percentage: postAoiPercentage
-        },
-        smtFG: {
-            stage: 'SMT FG',
-            eligible: smtFgEligible,
-            passed: smtFgPassed,
-            failed: smtFgFailed,
-            pending: smtFgPending,
-            percentage: smtFgPercentage
-        },
-        overallStatus
+        isDoubleSided: detectedDoubleSided,
+        sides: detectedSides,
+        printing: primaryMetrics.printing,
+        preAOI: primaryMetrics.preAOI,
+        postAOI: primaryMetrics.postAOI,
+        smtFG: smtFgMetrics,
+        yieldSPI: primaryMetrics.yieldSPI,
+        overallStatus,
+        top: topMetrics,
+        bottom: bottomMetrics
     };
 };
 
@@ -290,7 +406,7 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
 
         // 1. Fetch Work Order Details
         const woRes = await pool.query(
-            `SELECT id, quantity, created_at, status, product_name, model_name FROM smt_work_orders WHERE id = $1`,
+            `SELECT id, quantity, created_at, status, product_name, model_name, sides FROM smt_work_orders WHERE id = $1`,
             [workOrderId]
         );
 
@@ -300,6 +416,8 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
 
         const wo = woRes.rows[0];
         const totalQuantity = safeNumber(wo.quantity);
+        const sides = (wo.sides || 'Top').trim();
+        const isDoubleSided = sides.toLowerCase() === 'top / bottom' || sides.includes('/');
 
         // Fetch distinct production dates for this Work Order
         const datesRes = await pool.query(
@@ -338,12 +456,14 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
         const startDate = rawStartDate ? formatTimestamp(rawStartDate) : (dateParam ? `No activity on ${dateParam}` : 'Not Started');
 
         // 3. Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
-        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam, isDoubleSided, sides);
 
         res.status(200).json({
             success: true,
             workOrderId: wo.id,
             totalQuantity,
+            sides,
+            isDoubleSided,
             startDate,
             overallStatus: metrics.overallStatus,
             productName: wo.product_name,
@@ -354,7 +474,9 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
             yieldSPI: metrics.yieldSPI,
             preAOI: metrics.preAOI,
             postAOI: metrics.postAOI,
-            smtFG: metrics.smtFG
+            smtFG: metrics.smtFG,
+            top: metrics.top,
+            bottom: metrics.bottom
         });
     } catch (err: any) {
         logger.error('Error in getWorkOrderDashboard:', err);
@@ -383,7 +505,7 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
 
         // Fetch Work Order Details
         const woRes = await pool.query(
-            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status FROM smt_work_orders WHERE id = $1`,
+            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status, sides FROM smt_work_orders WHERE id = $1`,
             [workOrderId]
         );
 
@@ -394,9 +516,11 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
         const wo = woRes.rows[0];
         const totalQuantity = safeNumber(wo.quantity);
         const overallStatus = wo.smt_production_status || wo.status || 'Pending';
+        const sides = (wo.sides || 'Top').trim();
+        const isDoubleSided = sides.toLowerCase() === 'top / bottom' || sides.includes('/');
 
         // Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
-        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam, isDoubleSided, sides);
         const labelled = metrics.printing.labelled;
         const printingPassed = metrics.printing.passed;
         const printingFailed = metrics.printing.failed;
@@ -471,7 +595,7 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
         sheet.getCell('A3').font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF1E3A5F' } };
 
         sheet.addRow(['Work Order ID:', wo.id, 'Target Quantity:', totalQuantity, 'Selected Date:', dateParam || 'All Dates']);
-        sheet.addRow(['Product Name:', wo.product_name || 'N/A', 'Labelled Quantity:', labelled, 'Overall Status:', overallStatus]);
+        sheet.addRow(['Product Name:', wo.product_name || 'N/A', 'Sides:', sides, 'Overall Status:', overallStatus]);
         sheet.addRow(['Model Name:', wo.model_name || 'N/A', 'Report Date:', new Date().toLocaleDateString(), 'Report Time:', new Date().toLocaleTimeString()]);
 
         // Style overview rows
@@ -499,76 +623,114 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
         });
 
         // Matrix Rows
-        const matrixData = [
-            ['Printing (Labelled)', printingPassed, printingFailed, actualPending, `${actualPercentage}%`],
-            ['Pre AOI', preAoiPassed, preAoiFailed, preAoiPending, `${preAoiPercentage}%`],
-            ['Post AOI', postAoiPassed, postAoiFailed, postAoiPending, `${postAoiPercentage}%`],
-            ['SMT FG', smtFgPassed, smtFgFailed, smtFgPending, `${smtFgPercentage}%`]
-        ];
+        if (metrics.isDoubleSided && metrics.top && metrics.bottom) {
+            sheet.addRow(['--- TOP SIDE ---']);
+            const topRows = [
+                ['Printing (Top)', metrics.top.printing.passed, metrics.top.printing.failed, metrics.top.printing.pending, `${metrics.top.printing.percentage}%`],
+                ['Pre AOI (Top)', metrics.top.preAOI.passed, metrics.top.preAOI.failed, metrics.top.preAOI.pending, `${metrics.top.preAOI.percentage}%`],
+                ['Post AOI (Top)', metrics.top.postAOI.passed, metrics.top.postAOI.failed, metrics.top.postAOI.pending, `${metrics.top.postAOI.percentage}%`]
+            ];
+            topRows.forEach(m => {
+                const r = sheet.addRow(m);
+                r.height = 20;
+                r.getCell(1).font = { bold: true };
+                r.getCell(2).alignment = { horizontal: 'center' };
+                r.getCell(3).alignment = { horizontal: 'center' };
+                r.getCell(4).alignment = { horizontal: 'center' };
+                r.getCell(5).alignment = { horizontal: 'center' };
+            });
 
-        matrixData.forEach(m => {
-            const r = sheet.addRow(m);
-            r.height = 20;
-            r.getCell(1).font = { bold: true };
-            r.getCell(2).alignment = { horizontal: 'center' };
-            r.getCell(3).alignment = { horizontal: 'center' };
-            r.getCell(4).alignment = { horizontal: 'center' };
-            r.getCell(5).alignment = { horizontal: 'center' };
-        });
+            sheet.addRow(['--- BOTTOM SIDE ---']);
+            const bottomRows = [
+                ['Printing (Bottom)', metrics.bottom.printing.passed, metrics.bottom.printing.failed, metrics.bottom.printing.pending, `${metrics.bottom.printing.percentage}%`],
+                ['Pre AOI (Bottom)', metrics.bottom.preAOI.passed, metrics.bottom.preAOI.failed, metrics.bottom.preAOI.pending, `${metrics.bottom.preAOI.percentage}%`],
+                ['Post AOI (Bottom)', metrics.bottom.postAOI.passed, metrics.bottom.postAOI.failed, metrics.bottom.postAOI.pending, `${metrics.bottom.postAOI.percentage}%`]
+            ];
+            bottomRows.forEach(m => {
+                const r = sheet.addRow(m);
+                r.height = 20;
+                r.getCell(1).font = { bold: true };
+                r.getCell(2).alignment = { horizontal: 'center' };
+                r.getCell(3).alignment = { horizontal: 'center' };
+                r.getCell(4).alignment = { horizontal: 'center' };
+                r.getCell(5).alignment = { horizontal: 'center' };
+            });
+
+            sheet.addRow(['--- SHARED FINAL RELEASE ---']);
+            const fgR = sheet.addRow(['SMT FG (Release)', metrics.smtFG.passed, metrics.smtFG.failed, metrics.smtFG.pending, `${metrics.smtFG.percentage}%`]);
+            fgR.height = 20;
+            fgR.getCell(1).font = { bold: true };
+            fgR.getCell(2).alignment = { horizontal: 'center' };
+            fgR.getCell(3).alignment = { horizontal: 'center' };
+            fgR.getCell(4).alignment = { horizontal: 'center' };
+            fgR.getCell(5).alignment = { horizontal: 'center' };
+        } else {
+            const matrixData = [
+                ['Printing (Labelled)', printingPassed, printingFailed, actualPending, `${actualPercentage}%`],
+                ['Pre AOI', preAoiPassed, preAoiFailed, preAoiPending, `${preAoiPercentage}%`],
+                ['Post AOI', postAoiPassed, postAoiFailed, postAoiPending, `${postAoiPercentage}%`],
+                ['SMT FG', smtFgPassed, smtFgFailed, smtFgPending, `${smtFgPercentage}%`]
+            ];
+
+            matrixData.forEach(m => {
+                const r = sheet.addRow(m);
+                r.height = 20;
+                r.getCell(1).font = { bold: true };
+                r.getCell(2).alignment = { horizontal: 'center' };
+                r.getCell(3).alignment = { horizontal: 'center' };
+                r.getCell(4).alignment = { horizontal: 'center' };
+                r.getCell(5).alignment = { horizontal: 'center' };
+            });
+        }
 
         sheet.addRow([]);
         sheet.addRow(['INSPECTION & SCAN LOGS']);
-        const logHeaderIdx = sheet.rowCount;
-        sheet.getCell(`A${logHeaderIdx}`).font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF1E3A5F' } };
+        sheet.getCell(`A${sheet.rowCount}`).font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF1E3A5F' } };
 
-        const logHeaders = ['#', 'Barcode / Serial', 'Process Step', 'Status', 'Operator', 'Scanned Time', 'Defect / Remark'];
+        // Logs Header
+        const logHeaders = ['Inspection ID', 'Barcode / Serial', 'Stage', 'Status', 'Operator', 'Timestamp', 'Rework Reason'];
         const logHeaderRow = sheet.addRow(logHeaders);
-        logHeaderRow.height = 24;
+        logHeaderRow.height = 22;
         logHeaderRow.eachCell((cell: any) => {
             cell.font = WHITE_TEXT;
             cell.fill = NAVY;
             cell.alignment = { horizontal: 'center', vertical: 'middle' };
         });
 
-        if (logsRes.rows.length === 0) {
-            const emptyRow = sheet.addRow(['No inspection scans recorded for this selection.']);
-            sheet.mergeCells(`A${sheet.rowCount}:G${sheet.rowCount}`);
-            emptyRow.getCell(1).alignment = { horizontal: 'center' };
-        } else {
-            logsRes.rows.forEach((log, idx) => {
-                const r = sheet.addRow([
-                    idx + 1,
-                    log.barcode,
-                    log.process_step,
-                    log.status,
-                    log.scanned_by || 'System',
-                    formatTimestamp(log.scanned_at),
-                    log.rework_reason || '-'
-                ]);
-                r.height = 19;
-                r.getCell(1).alignment = { horizontal: 'center' };
-                r.getCell(4).alignment = { horizontal: 'center' };
-                r.getCell(6).alignment = { horizontal: 'center' };
-                if (log.status === 'FAIL' || log.status === 'REJECTED' || log.status === 'INVALID') {
-                    r.getCell(4).font = { color: { argb: 'FFDC2626' }, bold: true };
-                } else if (log.status === 'PASS') {
-                    r.getCell(4).font = { color: { argb: 'FF166534' }, bold: true };
-                }
-            });
-        }
+        // Logs Data
+        logsRes.rows.forEach(l => {
+            const r = sheet.addRow([
+                l.id,
+                l.barcode,
+                l.process_step,
+                l.status,
+                l.scanned_by || 'System',
+                formatTimestamp(l.scanned_at),
+                l.rework_reason || '-'
+            ]);
+            r.height = 18;
 
-        // Set column widths
+            // Highlight PASS vs FAIL in status cell
+            const statusCell = r.getCell(4);
+            if (l.status === 'PASS') {
+                statusCell.font = { color: { argb: 'FF16A34A' }, bold: true };
+            } else if (l.status === 'FAIL') {
+                statusCell.font = { color: { argb: 'FFDC2626' }, bold: true };
+            }
+        });
+
+        // Column Widths
         sheet.columns = [
-            { width: 8 },  // A
-            { width: 28 }, // B
-            { width: 18 }, // C
-            { width: 16 }, // D
-            { width: 22 }, // E
-            { width: 24 }, // F
-            { width: 35 }  // G
+            { width: 22 },
+            { width: 26 },
+            { width: 18 },
+            { width: 14 },
+            { width: 20 },
+            { width: 22 },
+            { width: 28 }
         ];
 
-        // Send Excel response
+        // Send Excel file as attachment
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="SFCS_WO_${wo.id}_${dateParam || 'all'}.xlsx"`);
 
@@ -586,9 +748,9 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
 
 /**
  * GET /api/smt/admin/work-orders/:workOrderId/export/pdf-data
- * Returns structured metadata for PDF report generation on frontend
+ * Returns formatted JSON data payload used by frontend jsPDF to render crisp client-side PDF reports.
  */
-export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => {
+export const getWorkOrderDayPdfData = async (req: Request, res: Response) => {
     try {
         const { workOrderId } = req.params;
         const requestedDate = req.query.date ? String(req.query.date).trim() : '';
@@ -601,7 +763,7 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
 
         // Fetch Work Order Details
         const woRes = await pool.query(
-            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status FROM smt_work_orders WHERE id = $1`,
+            `SELECT id, quantity, created_at, status, product_name, model_name, smt_production_status, sides FROM smt_work_orders WHERE id = $1`,
             [workOrderId]
         );
 
@@ -612,9 +774,11 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
         const wo = woRes.rows[0];
         const totalQuantity = safeNumber(wo.quantity);
         const overallStatus = wo.smt_production_status || wo.status || 'Pending';
+        const sides = (wo.sides || 'Top').trim();
+        const isDoubleSided = sides.toLowerCase() === 'top / bottom' || sides.includes('/');
 
         // Compute Authoritative Stage Metrics (Pass, Fail, Pending, Yield)
-        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam);
+        const metrics = await calculateSmtStageMetrics(pool, workOrderId, totalQuantity, dateParam, isDoubleSided, sides);
         const labelled = metrics.printing.labelled;
         const printingPassed = metrics.printing.passed;
         const printingFailed = metrics.printing.failed;
@@ -661,6 +825,21 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
 
         const logsRes = await pool.query(logsQuery, logsParams);
 
+        const matrix = (metrics.isDoubleSided && metrics.top && metrics.bottom) ? [
+            { stage: 'Printing (Top)', passed: metrics.top.printing.passed, failed: metrics.top.printing.failed, pending: metrics.top.printing.pending, percentage: metrics.top.printing.percentage },
+            { stage: 'Pre AOI (Top)', passed: metrics.top.preAOI.passed, failed: metrics.top.preAOI.failed, pending: metrics.top.preAOI.pending, percentage: metrics.top.preAOI.percentage },
+            { stage: 'Post AOI (Top)', passed: metrics.top.postAOI.passed, failed: metrics.top.postAOI.failed, pending: metrics.top.postAOI.pending, percentage: metrics.top.postAOI.percentage },
+            { stage: 'Printing (Bottom)', passed: metrics.bottom.printing.passed, failed: metrics.bottom.printing.failed, pending: metrics.bottom.printing.pending, percentage: metrics.bottom.printing.percentage },
+            { stage: 'Pre AOI (Bottom)', passed: metrics.bottom.preAOI.passed, failed: metrics.bottom.preAOI.failed, pending: metrics.bottom.preAOI.pending, percentage: metrics.bottom.preAOI.percentage },
+            { stage: 'Post AOI (Bottom)', passed: metrics.bottom.postAOI.passed, failed: metrics.bottom.postAOI.failed, pending: metrics.bottom.postAOI.pending, percentage: metrics.bottom.postAOI.percentage },
+            { stage: 'SMT FG (Release)', passed: metrics.smtFG.passed, failed: metrics.smtFG.failed, pending: metrics.smtFG.pending, percentage: metrics.smtFG.percentage }
+        ] : [
+            { stage: 'Printing (Labelled)', passed: printingPassed, failed: printingFailed, pending: actualPending, percentage: actualPercentage },
+            { stage: 'Pre AOI', passed: preAoiPassed, failed: preAoiFailed, pending: preAoiPending, percentage: preAoiPercentage },
+            { stage: 'Post AOI', passed: postAoiPassed, failed: postAoiFailed, pending: postAoiPending, percentage: postAoiPercentage },
+            { stage: 'SMT FG', passed: smtFgPassed, failed: smtFgFailed, pending: smtFgPending, percentage: smtFgPercentage }
+        ];
+
         res.status(200).json({
             success: true,
             summary: {
@@ -669,15 +848,17 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
                 modelName: wo.model_name || 'N/A',
                 totalQuantity,
                 overallStatus,
+                sides,
+                isDoubleSided,
                 selectedDate: dateParam || 'all',
                 generatedAt: formatTimestamp(new Date())
             },
-            matrix: [
-                { stage: 'Printing (Labelled)', passed: printingPassed, failed: printingFailed, pending: actualPending, percentage: actualPercentage },
-                { stage: 'Pre AOI', passed: preAoiPassed, failed: preAoiFailed, pending: preAoiPending, percentage: preAoiPercentage },
-                { stage: 'Post AOI', passed: postAoiPassed, failed: postAoiFailed, pending: postAoiPending, percentage: postAoiPercentage },
-                { stage: 'SMT FG', passed: smtFgPassed, failed: smtFgFailed, pending: smtFgPending, percentage: smtFgPercentage }
-            ],
+            isDoubleSided,
+            sides,
+            top: metrics.top,
+            bottom: metrics.bottom,
+            smtFG: metrics.smtFG,
+            matrix,
             logs: logsRes.rows.map(r => ({
                 id: r.id,
                 barcode: r.barcode,
@@ -697,6 +878,11 @@ export const exportWorkOrderDayPdfData = async (req: Request, res: Response) => 
         });
     }
 };
+
+/**
+ * Backward-compatible export alias for smtRoutes.ts
+ */
+export const exportWorkOrderDayPdfData = getWorkOrderDayPdfData;
 
 /**
  * GET /api/smt/admin/dashboard/events
