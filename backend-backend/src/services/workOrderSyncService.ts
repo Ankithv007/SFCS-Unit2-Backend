@@ -38,6 +38,19 @@ export function invalidateSyncCache(): void {
     lastKnownSmtFingerprint = '';
 }
 
+function formatSelectedStagesJson(stages: any): string | null {
+    if (!stages) return null;
+    if (typeof stages === 'string') {
+        try {
+            JSON.parse(stages);
+            return stages;
+        } catch {
+            return JSON.stringify([stages]);
+        }
+    }
+    return JSON.stringify(stages);
+}
+
 /**
  * High-performance set-based synchronization of Work Orders from SMT DB to Backend DB.
  * Features:
@@ -52,14 +65,16 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
 
     inFlightSync = (async () => {
         try {
-            // Fast 0.5ms fingerprint check: has smt_work_orders changed since last sync?
+            // Fast fingerprint check: has smt_work_orders count, timestamps, or stage configuration changed?
             if (!options?.force) {
                 const checkRes = await smtPool.query(`
-                    SELECT count(*) as count, max(created_at)::text as max_created
+                    SELECT count(*) as count, 
+                           max(created_at)::text as max_created,
+                           md5(COALESCE(string_agg(id || COALESCE(selected_stages::text, ''), ',' ORDER BY id), '')) as stages_hash
                     FROM smt_work_orders 
                     WHERE status NOT IN ('Deleted', 'Cancelled')
                 `);
-                const currentFingerprint = `${checkRes.rows[0]?.count || 0}_${checkRes.rows[0]?.max_created || ''}`;
+                const currentFingerprint = `${checkRes.rows[0]?.count || 0}_${checkRes.rows[0]?.max_created || ''}_${checkRes.rows[0]?.stages_hash || ''}`;
                 if (currentFingerprint === lastKnownSmtFingerprint && lastKnownSmtFingerprint !== '') {
                     return; // No changes in SMT work orders; return immediately in ~0.5ms!
                 }
@@ -96,7 +111,7 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
                     const quantity = parseInt(smtWo.quantity) || 0;
                     const customer_name = smtWo.customer_name || '-';
                     const model = smtWo.model_name || '-';
-                    const selected_stages = smtWo.selected_stages ? JSON.stringify(smtWo.selected_stages) : null;
+                    const selected_stages = formatSelectedStagesJson(smtWo.selected_stages);
                     const line_id = smtWo.line_id || 'SMT-1';
                     const priority = smtWo.priority || 'medium';
                     const solder_paste_status = smtWo.solder_paste_status || 'Pending';
@@ -156,11 +171,13 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
 
                 // Update fingerprint after successful commit
                 const finalCheck = await smtPool.query(`
-                    SELECT count(*) as count, max(created_at)::text as max_created
+                    SELECT count(*) as count, 
+                           max(created_at)::text as max_created,
+                           md5(COALESCE(string_agg(id || COALESCE(selected_stages::text, ''), ',' ORDER BY id), '')) as stages_hash
                     FROM smt_work_orders 
                     WHERE status NOT IN ('Deleted', 'Cancelled')
                 `);
-                lastKnownSmtFingerprint = `${finalCheck.rows[0]?.count || 0}_${finalCheck.rows[0]?.max_created || ''}`;
+                lastKnownSmtFingerprint = `${finalCheck.rows[0]?.count || 0}_${finalCheck.rows[0]?.max_created || ''}_${finalCheck.rows[0]?.stages_hash || ''}`;
             } catch (txErr) {
                 await client.query('ROLLBACK');
                 throw txErr;
@@ -218,7 +235,7 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
         const quantity = parseInt(smtWo.quantity) || 0;
         const customer_name = smtWo.customer_name || '-';
         const model = smtWo.model_name || '-';
-        const selected_stages = smtWo.selected_stages ? JSON.stringify(smtWo.selected_stages) : null;
+        const selected_stages = formatSelectedStagesJson(smtWo.selected_stages);
         const line_id = smtWo.line_id || 'SMT-1';
         const priority = smtWo.priority || 'medium';
         const solder_paste_status = smtWo.solder_paste_status || 'Pending';

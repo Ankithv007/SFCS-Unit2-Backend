@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as ExcelJS from 'exceljs';
+import fetch from 'node-fetch';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import { notifySmtDashboardUpdate } from '../utils/dashboardEmitter';
@@ -12,6 +13,12 @@ import {
 import { getUploadsDir } from '../utils/uploads';
 
 const logger = createLogger('SMT_CONTROLLER');
+
+function notifyBackendWorkOrderSync() {
+    const backendUrl = process.env.BACKEND_SERVICE_URL || 'http://backend-backend:5006';
+    fetch(`${backendUrl}/api/backend/work-order/sync`, { method: 'POST' })
+        .catch((err: any) => logger.warn(`Background sync notification to backend failed: ${err.message}`));
+}
 
 const VALID_PRODUCTION_STAGES: { [key: string]: string } = {
     'PTH': 'PTH',
@@ -59,6 +66,10 @@ export const createWorkOrder = async (req: Request, res: Response) => {
 
     const finalCustomerName = (customer_name || customerName || '').toString().trim();
     const finalModelName = (model_name || modelName || model || '').toString().trim();
+    const sessionUserName = ((req as any).user?.name || '').toString().trim();
+    const sessionUserEmail = ((req as any).user?.email || '').toString().trim();
+    const requestCreatedBy = (typeof created_by === 'string' ? created_by.trim() : '');
+    const finalCreatedBy = sessionUserName || (requestCreatedBy && requestCreatedBy !== 'System admin' ? requestCreatedBy : '') || sessionUserEmail || requestCreatedBy;
     let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
 
     if (stagesArr !== null) {
@@ -171,7 +182,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 quantity,
                 panel_quantity,
                 sides,
-                created_by,
+                finalCreatedBy,
                 barcode_source || 'GENERATED',
                 poName,
                 poPath,
@@ -186,6 +197,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         );
 
         logger.info(`Audit: Work order created successfully: ${normalizedWorkOrderId}`);
+        notifyBackendWorkOrderSync();
 
         res.status(201).json({
             success: true,
@@ -636,6 +648,7 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
         );
 
         logger.info(`Audit: Work order updated successfully: ${id}`);
+        notifyBackendWorkOrderSync();
         res.status(200).json({
             success: true,
             message: "Work order updated successfully",

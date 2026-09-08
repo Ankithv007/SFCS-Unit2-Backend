@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import * as ExcelJS from 'exceljs';
 import pool from '../config/db';
 import { createLogger } from '../utils/logger';
 import { isStencilSideCompatible } from '../utils/smtHelper';
@@ -561,6 +562,8 @@ export const assignStencil = async (req: Request, res: Response) => {
                 remarks = $8,
                 updated_by = $9,
                 updated_by_name = $10,
+                created_by = CASE WHEN status = 'EMPTY' THEN $9 ELSE created_by END,
+                created_by_name = CASE WHEN status = 'EMPTY' THEN $10 ELSE created_by_name END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $11
         `, [
@@ -1579,3 +1582,220 @@ export const exportRackReport = async (req: Request, res: Response) => {
         return res.status(500).json({ message: 'Internal server error during report generation.' });
     }
 };
+
+/**
+ * GET /api/stencil-rack/:id/export/excel
+ * Export Excel report for an individual rack
+ */
+export const exportSingleRackExcel = async (req: Request, res: Response) => {
+    const rackId = req.params.id;
+
+    try {
+        const rackResult = await pool.query(
+            'SELECT * FROM stencil_racks WHERE id = $1 AND is_deleted = false',
+            [rackId]
+        );
+
+        if (rackResult.rows.length === 0) {
+            return res.status(404).json({ message: 'Rack not found.' });
+        }
+
+        const rack = rackResult.rows[0];
+
+        const locResult = await pool.query(
+            `SELECT * FROM stencil_rack_locations 
+             WHERE rack_id = $1 
+             ORDER BY row_number ASC, column_number ASC`,
+            [rackId]
+        );
+
+        const locations = locResult.rows;
+        const totalCapacity = Number(rack.rows) * Number(rack.columns);
+        const occupiedCount = locations.filter((l: any) => l.status && l.status !== 'EMPTY').length;
+        const emptyCount = totalCapacity - occupiedCount;
+        const utilizationRate = totalCapacity > 0 ? ((occupiedCount / totalCapacity) * 100).toFixed(1) : '0.0';
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'SFCS Stencil Management';
+        workbook.created = new Date();
+
+        const sheet = workbook.addWorksheet(`${rack.name}`.substring(0, 31));
+
+        // Styling definitions
+        const headerNavyFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+        const subHeaderBlueFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+        const lightGrayFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+        const thinBorder: Partial<ExcelJS.Borders> = {
+            top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+        };
+
+        // 1. Title Banner
+        sheet.mergeCells('A1:L1');
+        const titleCell = sheet.getCell('A1');
+        titleCell.value = `STENCIL RACK CONFIGURATION & INVENTORY REPORT — ${rack.name.toUpperCase()}`;
+        titleCell.font = { name: 'Arial', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+        titleCell.fill = headerNavyFill;
+        titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+        sheet.getRow(1).height = 32;
+
+        // 2. RACK CONFIGURATION & SUMMARY
+        sheet.mergeCells('A3:D3');
+        const summaryHeader = sheet.getCell('A3');
+        summaryHeader.value = 'RACK CONFIGURATION & SUMMARY';
+        summaryHeader.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+        summaryHeader.fill = subHeaderBlueFill;
+        summaryHeader.alignment = { vertical: 'middle', horizontal: 'left' };
+        sheet.getRow(3).height = 24;
+
+        const summaryData = [
+            ['Rack Name', rack.name, 'Status', rack.status],
+            ['Rows × Columns', `${rack.rows} × ${rack.columns}`, 'Total Capacity', totalCapacity],
+            ['Occupied Slots', occupiedCount, 'Empty Slots', emptyCount],
+            ['Utilization Rate', `${utilizationRate}%`, 'Description', rack.description || 'No description provided.'],
+            ['Created By', rack.created_by_name || rack.created_by || 'N/A', 'Created Date & Time', rack.created_at ? new Date(rack.created_at).toLocaleString() : 'N/A'],
+            ['Last Updated Date & Time', rack.updated_at ? new Date(rack.updated_at).toLocaleString() : 'N/A', '', '']
+        ];
+
+        summaryData.forEach((rowVals, idx) => {
+            const rowIndex = 4 + idx;
+            const r = sheet.getRow(rowIndex);
+            r.values = [rowVals[0], rowVals[1], rowVals[2], rowVals[3]];
+            r.height = 20;
+
+            ['A', 'C'].forEach(col => {
+                const c = sheet.getCell(`${col}${rowIndex}`);
+                c.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF475569' } };
+                c.fill = lightGrayFill;
+                c.border = thinBorder;
+                c.alignment = { vertical: 'middle' };
+            });
+
+            ['B', 'D'].forEach(col => {
+                const c = sheet.getCell(`${col}${rowIndex}`);
+                c.font = { name: 'Arial', size: 9, bold: false, color: { argb: 'FF0F172A' } };
+                c.border = thinBorder;
+                c.alignment = { vertical: 'middle' };
+            });
+        });
+
+        // 3. STORAGE MATRIX & STENCIL INVENTORY
+        const invStartRow = 12;
+        sheet.mergeCells(`A${invStartRow}:L${invStartRow}`);
+        const invHeader = sheet.getCell(`A${invStartRow}`);
+        invHeader.value = 'STORAGE MATRIX & STENCIL INVENTORY';
+        invHeader.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+        invHeader.fill = subHeaderBlueFill;
+        invHeader.alignment = { vertical: 'middle', horizontal: 'left' };
+        sheet.getRow(invStartRow).height = 24;
+
+        // Table Columns Header
+        const headerRowIndex = 13;
+        const columns = [
+            'Location Code',
+            'Grid Position',
+            'Slot Status',
+            'Stencil Barcode / ID',
+            'Job Number',
+            'Stencil / Model Name',
+            'Revision',
+            'Thickness (mils)',
+            'Side',
+            'MFG Date',
+            'Remarks',
+            'Created By'
+        ];
+
+        const hRow = sheet.getRow(headerRowIndex);
+        hRow.values = columns;
+        hRow.height = 24;
+
+        columns.forEach((_, cIdx) => {
+            const cell = hRow.getCell(cIdx + 1);
+            cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+            cell.fill = headerNavyFill;
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = thinBorder;
+        });
+
+        // Populate all physical locations (Rows x Columns)
+        let currentRowIndex = 14;
+        const rowCount = Number(rack.rows);
+        const colCount = Number(rack.columns);
+
+        for (let r = 1; r <= rowCount; r++) {
+            for (let c = 1; c <= colCount; c++) {
+                const loc = locations.find((l: any) => Number(l.row_number) === r && Number(l.column_number) === c);
+                const rStr = r.toString().padStart(2, '0');
+                const cStr = c.toString().padStart(2, '0');
+                const locCode = loc?.location_code || `RACK-${rack.name}-R${rStr}-C${cStr}`;
+                const gridPos = `R${r}C${c}`;
+                const isOccupied = loc && loc.status && loc.status !== 'EMPTY';
+                const status = loc?.status || 'EMPTY';
+
+                const slotCreator = isOccupied
+                    ? ((loc.updated_by_name && loc.updated_by_name.trim())
+                       || (loc.created_by_name && loc.created_by_name.trim())
+                       || (loc.updated_by && String(loc.updated_by).trim())
+                       || (loc.created_by && String(loc.created_by).trim())
+                       || '')
+                    : '';
+
+                const rowData = [
+                    locCode,
+                    gridPos,
+                    status,
+                    isOccupied ? (loc.stencil_rack_number || '') : '',
+                    isOccupied ? (loc.job_number || '') : '',
+                    isOccupied ? (loc.stencil_name || '') : '',
+                    isOccupied ? (loc.revision || '') : '',
+                    isOccupied ? (loc.thickness_mills !== null && loc.thickness_mills !== undefined ? loc.thickness_mills : '') : '',
+                    isOccupied ? (loc.side || '') : '',
+                    isOccupied && loc.manufacturing_date ? new Date(loc.manufacturing_date).toISOString().split('T')[0] : '',
+                    isOccupied ? (loc.remarks || '') : '',
+                    slotCreator
+                ];
+
+                const row = sheet.getRow(currentRowIndex);
+                row.values = rowData;
+                row.height = 20;
+
+                const isEven = (currentRowIndex % 2 === 0);
+                const bgFill: ExcelJS.Fill = isOccupied
+                    ? (status === 'STORED' ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } } : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } })
+                    : (isEven ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } } : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } });
+
+                columns.forEach((_, colIdx) => {
+                    const cell = row.getCell(colIdx + 1);
+                    cell.font = { name: 'Arial', size: 9, color: { argb: 'FF0F172A' } };
+                    cell.border = thinBorder;
+                    cell.fill = bgFill;
+                    cell.alignment = (colIdx === 0 || colIdx === 3 || colIdx === 4 || colIdx === 5 || colIdx === 10 || colIdx === 11)
+                        ? { vertical: 'middle', horizontal: 'left' }
+                        : { vertical: 'middle', horizontal: 'center' };
+                });
+
+                currentRowIndex++;
+            }
+        }
+
+        // Set column widths
+        const colWidths = [24, 14, 16, 22, 18, 28, 12, 16, 14, 14, 24, 20];
+        colWidths.forEach((w, i) => {
+            sheet.getColumn(i + 1).width = w;
+        });
+
+        const safeRackName = rack.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="Stencil_Rack_${safeRackName}_Report.xlsx"`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err: any) {
+        logger.error('Error generating individual rack Excel report:', err);
+        return res.status(500).json({ message: 'Internal server error while exporting rack Excel report.' });
+    }
+};
+

@@ -129,7 +129,8 @@ import {
     scanReturn,
     relocateStencil,
     getMovementHistory,
-    exportRackReport
+    exportRackReport,
+    exportSingleRackExcel
 } from '../controllers/stencilRackController';
 import { authenticateToken, requireRole, requirePermission } from '../middleware/authMiddleware';
 import {
@@ -527,6 +528,7 @@ router.post('/stencil-rack/locations/:locationId/assign', [authenticateToken, re
 router.post('/stencil-rack/locations/:locationId/clear', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], clearLocation);
 router.post('/stencil-rack/locations/:locationId/relocate', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], relocateStencil);
 router.get('/stencil-rack/reports/export', authenticateToken, exportRackReport);
+router.get('/stencil-rack/:id/export/excel', authenticateToken, exportSingleRackExcel);
 
 // Stencil Scan Routes
 router.get('/stencil-rack/stencil-info/:jobNumber', authenticateToken, getStencilInfoByJob);
