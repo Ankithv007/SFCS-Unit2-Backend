@@ -115,7 +115,7 @@ export class BatchManagementService {
         let searchFilterCount = '';
         const searchParams: any[] = [];
         if (search && search.trim() !== '') {
-            searchFilter = `AND (b.batch_number ILIKE $5 OR w.wo_number ILIKE $5 OR w.customer_name ILIKE $5 OR w.model ILIKE $5)`;
+            searchFilter = `AND (b.batch_number ILIKE $4 OR w.wo_number ILIKE $4 OR w.customer_name ILIKE $4 OR w.model ILIKE $4)`;
             searchFilterCount = `AND (b.batch_number ILIKE $2 OR w.wo_number ILIKE $2 OR w.customer_name ILIKE $2 OR w.model ILIKE $2)`;
             searchParams.push(`%${search.trim()}%`);
         }

@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 const pool = new Pool({
     user: process.env.DB_USER,
     host: process.env.DB_HOST,
-    database: process.env.DB_NAME || 'sfcs_backend',
+    database: process.env.DB_NAME || 'backend_process_db',
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
 });
@@ -11,7 +11,7 @@ const pool = new Pool({
 export const smtPool = new Pool({
     user: process.env.DB_USER,
     host: process.env.DB_HOST,
-    database: process.env.DB_NAME_SMT || 'sfcs_smt',
+    database: process.env.DB_NAME_SMT || 'smt_db',
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
 });
