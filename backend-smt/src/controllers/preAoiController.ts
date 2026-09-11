@@ -164,22 +164,22 @@ export const createPreAoiSession = async (req: Request, res: Response) => {
             });
         }
 
-        // 2. Verify there are eligible PASS barcodes
-        const printCheck = await client.query(
+        // 2. Verify there are eligible PASS barcodes from SPI
+        const spiCheck = await client.query(
             `SELECT 1 FROM smt_inspections i
-             JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+             JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
              WHERE i.work_order_id = $1 
-               AND LOWER(ps.side) = $2
-               AND i.process_step = 'Printing'
+               AND LOWER(spis.side) = $2
+               AND i.process_step = 'SPI'
                AND i.status = 'PASS'
-               AND ps.is_deleted = false
+               AND spis.is_deleted = false
              LIMIT 1`,
             [work_order_id, side.toLowerCase()]
         );
-        if (printCheck.rows.length === 0) {
+        if (spiCheck.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: `There are no eligible PASS barcodes from the SMT Printing stage for Work Order ${work_order_id} on side ${side}.`
+                message: `There are no eligible PASS barcodes from the SPI stage for Work Order ${work_order_id} on side ${side}.`
             });
         }
 
@@ -760,30 +760,30 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         const serial = serialRes.rows[0];
 
-        // 4. Validate barcode has passed SMT Printing stage on this side
-        const printCheck = await client.query(
+        // 4. Validate barcode has passed SPI stage on this side
+        const spiCheck = await client.query(
             `SELECT i.status FROM smt_inspections i
-             JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+             JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
              WHERE i.work_order_id = $1 
-               AND LOWER(ps.side) = LOWER($2)
+               AND LOWER(spis.side) = LOWER($2)
                AND i.serial_id = $3
-               AND i.process_step = 'Printing'
+               AND i.process_step = 'SPI'
              ORDER BY i.scanned_at DESC, i.id DESC
              LIMIT 1`,
             [session.work_order_id, session.side, serial.id]
         );
 
-        if (printCheck.rows.length === 0) {
+        if (spiCheck.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: `Barcode has not been printed. It must pass the SMT Printing stage before entering Pre AOI.`
+                message: `Barcode has not completed SPI. It must pass the SPI stage before entering Pre AOI.`
             });
         }
 
-        if (printCheck.rows[0].status !== 'PASS') {
+        if (spiCheck.rows[0].status !== 'PASS') {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: `Barcode has a ${printCheck.rows[0].status} status in SMT Printing. It must be PASS before entering Pre AOI.`
+                message: `Barcode has a ${spiCheck.rows[0].status} status in SPI. It must be PASS before entering Pre AOI.`
             });
         }
 
@@ -920,23 +920,23 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         }
         const newSerial = serialRes.rows[0];
 
-        // Check Printing PASS status
-        const printCheck = await client.query(
+        // Check SPI PASS status
+        const spiCheck = await client.query(
             `SELECT i.status FROM smt_inspections i
-             JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+             JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
              WHERE i.work_order_id = $1 
-               AND ps.side = $2
+               AND spis.side = $2
                AND i.serial_id = $3
-               AND i.process_step = 'Printing'
+               AND i.process_step = 'SPI'
              ORDER BY i.scanned_at DESC, i.id DESC
              LIMIT 1`,
             [session.work_order_id, session.side, newSerial.id]
         );
 
-        if (printCheck.rows.length === 0 || printCheck.rows[0].status !== 'PASS') {
+        if (spiCheck.rows.length === 0 || spiCheck.rows[0].status !== 'PASS') {
             await client.query('ROLLBACK');
             return res.status(400).json({
-                message: 'Selected barcode has not passed SMT Printing stage on this side.'
+                message: 'Selected barcode has not passed SPI stage on this side.'
             });
         }
 
@@ -1652,20 +1652,21 @@ export const getAutoPopulateDetails = async (req: Request, res: Response) => {
     try {
         const details = await getAutoPopulateDetailsHelper(woId, sideOverride, 'smt_pre_aoi_sessions');
 
-        // Check if there are any PASS barcodes from Printing stage for the resolved side
-        const printCheck = await pool.query(
+        // Check if there are any PASS barcodes from SPI stage for the resolved side
+        const spiCheck = await pool.query(
             `SELECT 1 FROM smt_inspections i
-             JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+             JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
              WHERE i.work_order_id = $1 
-               AND LOWER(ps.side) = $2
-               AND i.process_step = 'Printing'
+               AND LOWER(spis.side) = $2
+               AND i.process_step = 'SPI'
                AND i.status = 'PASS'
+               AND spis.is_deleted = false
              LIMIT 1`,
             [woId, details.side.toLowerCase()]
         );
-        if (printCheck.rows.length === 0) {
+        if (spiCheck.rows.length === 0) {
             return res.status(400).json({ 
-                message: `There are no eligible PASS barcodes from the SMT Printing stage for Work Order ${woId} on side ${details.side}.` 
+                message: `There are no eligible PASS barcodes from the SPI stage for Work Order ${woId} on side ${details.side}.` 
             });
         }
 

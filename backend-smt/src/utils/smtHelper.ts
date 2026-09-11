@@ -359,7 +359,7 @@ export const getAutoPopulateDetailsHelper = async (
 };
 
 export const getEligibleWorkOrdersHelper = async (
-    stage: 'Printing' | 'Pre AOI' | 'Post AOI' | 'Rework' | 'SMT FG'
+    stage: 'Printing' | 'SPI' | 'Pre AOI' | 'Post AOI' | 'Rework' | 'SMT FG'
 ): Promise<any[]> => {
     logger.info(`[Eligibility Debug] Starting eligibility check for stage: ${stage}`);
     
@@ -430,7 +430,7 @@ export const getEligibleWorkOrdersHelper = async (
                 eligibleList.push(wo);
             }
         } 
-        else if (stage === 'Pre AOI') {
+        else if (stage === 'SPI') {
             // Include only if there is at least one PASS barcode in SMT Printing for this resolved side
             const printPassRes = await pool.query(
                 `SELECT 1 FROM smt_inspections i
@@ -445,6 +445,41 @@ export const getEligibleWorkOrdersHelper = async (
             );
             if (printPassRes.rows.length === 0) {
                 logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no PASS barcodes exist in Printing for side ${side}`);
+                continue;
+            }
+
+            // Exclude if a completed session in SPI exists for this side
+            const sessionRes = await pool.query(
+                `SELECT 1 FROM smt_spi_sessions 
+                 WHERE work_order_id = $1 
+                   AND LOWER(side) = $2 
+                   AND status = 'Completed'
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (sessionRes.rows.length > 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because SPI is already Completed for side ${side}`);
+            } else {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} is ELIGIBLE for stage ${stage} on side ${side}`);
+                eligibleList.push(wo);
+            }
+        }
+        else if (stage === 'Pre AOI') {
+            // Include only if there is at least one PASS barcode in SPI for this resolved side
+            const spiPassRes = await pool.query(
+                `SELECT 1 FROM smt_inspections i
+                 JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
+                 WHERE i.work_order_id = $1 
+                   AND LOWER(spis.side) = $2
+                   AND i.process_step = 'SPI'
+                   AND i.status = 'PASS'
+                   AND spis.is_deleted = false
+                 LIMIT 1`,
+                [wo.work_order_id, lowerSide]
+            );
+            if (spiPassRes.rows.length === 0) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no PASS barcodes exist in SPI for side ${side}`);
                 continue;
             }
 

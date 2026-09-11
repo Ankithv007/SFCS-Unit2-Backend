@@ -259,10 +259,17 @@ export class WorkflowEngineService {
         if (workOrderOrBatch && (workOrderOrBatch.workOrderId || workOrderOrBatch.batchId || workOrderOrBatch.woNumber || workOrderOrBatch.selectedStages)) {
             const route = await this.resolveActiveRoute(workOrderOrBatch, dbClient);
             const currentIndex = route.findIndex(s => s.id === currentStageId);
-            if (currentIndex === -1 || currentIndex === route.length - 1) {
-                return null;
+            if (currentIndex >= 0 && currentIndex < route.length - 1) {
+                return route[currentIndex + 1];
             }
-            return route[currentIndex + 1];
+            if (currentIndex === -1) {
+                const currentStageObj = await this.getStageById(currentStageId, dbClient);
+                if (currentStageObj) {
+                    const nextIdx = route.findIndex(s => s.stage_order > currentStageObj.stage_order);
+                    return nextIdx >= 0 ? route[nextIdx] : null;
+                }
+            }
+            return null;
         }
 
         // Legacy fallback to static workflow_transitions table
@@ -289,10 +296,17 @@ export class WorkflowEngineService {
     ): Promise<ProductionStage | null> {
         const route = await this.resolveActiveRoute(workOrderOrBatch, dbClient);
         const currentIndex = route.findIndex(s => s.id === currentStageId);
-        if (currentIndex <= 0) {
-            return null;
+        if (currentIndex > 0) {
+            return route[currentIndex - 1];
         }
-        return route[currentIndex - 1];
+        if (currentIndex === -1) {
+            const currentStageObj = await this.getStageById(currentStageId, dbClient);
+            if (currentStageObj) {
+                const prevStages = route.filter(s => s.stage_order < currentStageObj.stage_order);
+                return prevStages.length > 0 ? prevStages[prevStages.length - 1] : null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -452,7 +466,17 @@ export class WorkflowEngineService {
             }
 
             // Determine the expected next stage in the active route
-            const expectedNextStage = currentIndex >= 0 ? activeRoute[currentIndex + 1] : null;
+            let expectedNextStage: ProductionStage | null = null;
+            if (currentIndex >= 0) {
+                expectedNextStage = activeRoute[currentIndex + 1] || null;
+            } else if (currentStageObj) {
+                // If unit's current_stage_id is NOT in activeRoute (e.g. stage was removed/skipped after unit completed it),
+                // find the first stage in activeRoute whose stage_order > currentStageObj.stage_order
+                const nextIdx = activeRoute.findIndex(s => s.stage_order > currentStageObj.stage_order);
+                expectedNextStage = nextIdx >= 0 ? activeRoute[nextIdx] : null;
+            } else {
+                expectedNextStage = activeRoute[0] || null;
+            }
 
             if (!expectedNextStage) {
                 throw new ValidationError({

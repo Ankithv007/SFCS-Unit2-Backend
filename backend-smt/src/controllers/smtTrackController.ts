@@ -41,12 +41,14 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                 i.rework_reason,
                 COALESCE(
                     ps.side,
+                    spis.side,
                     pas.side,
                     poas.side,
                     rs.side
                 ) AS side
             FROM smt_inspections i
             LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+            LEFT JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
             LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
             LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
             LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
@@ -235,7 +237,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
-            const stepNames = ['Serial Number', 'Printing', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+            const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
             stepNames.forEach(step => {
                 const stepHist = history.filter((h: any) => h.process_step === step);
                 if (stepHist.length > 0) {
@@ -386,8 +388,11 @@ export const getCountDetails = async (req: Request, res: Response) => {
             if (stg === 'printing') {
                 return 'Serial Number';
             }
-            if (stg === 'pre aoi' || stg === 'pre_aoi') {
+            if (stg === 'spi') {
                 return 'Printing';
+            }
+            if (stg === 'pre aoi' || stg === 'pre_aoi') {
+                return 'SPI';
             }
             if (stg === 'post aoi' || stg === 'post_aoi') {
                 return 'Pre AOI';
@@ -503,6 +508,59 @@ export const getCountDetails = async (req: Request, res: Response) => {
                 break;
             }
 
+            case 'spi': {
+                if (normType === 'passed' || normType === 'scanned') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
+                        rework_reason: null
+                    }));
+                } else if (normType === 'failed') {
+                    filtered = mappedSerials.filter(s => s.history.some((h: any) => h.process_step === 'SPI' && h.status === 'FAIL')).map(s => {
+                        const failInsp = s.history.find((h: any) => h.process_step === 'SPI' && h.status === 'FAIL');
+                        return {
+                            serial_number: s.serial_number,
+                            status: s.stepLatest['SPI']?.status || 'FAIL',
+                            scanned_by: failInsp?.scanned_by || s.stepLatest['SPI']?.scanned_by,
+                            scanned_at: failInsp?.scanned_at || s.stepLatest['SPI']?.scanned_at,
+                            previous_stage: getSMTPreviousStage(s, stageStr),
+                            rework_reason: failInsp?.rework_reason || s.stepLatest['SPI']?.rework_reason
+                        };
+                    });
+                } else if (normType === 'printing_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PASS',
+                        scanned_by: s.stepLatest['Printing']?.scanned_by,
+                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
+                        rework_reason: null
+                    }));
+                } else if (normType === 'pending') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status !== 'PASS').map(s => ({
+                        serial_number: s.serial_number,
+                        status: 'PENDING',
+                        scanned_by: null,
+                        scanned_at: null,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
+                        rework_reason: null
+                    }));
+                } else {
+                    filtered = mappedSerials.map(s => ({
+                        serial_number: s.serial_number,
+                        status: s.stepLatest['SPI']?.status || 'PENDING',
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
+                        previous_stage: getSMTPreviousStage(s, stageStr),
+                        rework_reason: s.stepLatest['SPI']?.rework_reason
+                    }));
+                }
+                break;
+            }
+
             case 'pre aoi':
             case 'pre_aoi': {
                 if (normType === 'passed') {
@@ -526,12 +584,12 @@ export const getCountDetails = async (req: Request, res: Response) => {
                             rework_reason: failInsp?.rework_reason || s.stepLatest['Pre AOI']?.rework_reason
                         };
                     });
-                } else if (normType === 'spi_passed' || normType === 'printing_passed' || normType === 'previous_passed') {
-                    filtered = mappedSerials.filter(s => s.stepLatest['Printing']?.status === 'PASS').map(s => ({
+                } else if (normType === 'spi_passed' || normType === 'previous_passed') {
+                    filtered = mappedSerials.filter(s => s.stepLatest['SPI']?.status === 'PASS').map(s => ({
                         serial_number: s.serial_number,
                         status: 'PASS',
-                        scanned_by: s.stepLatest['Printing']?.scanned_by,
-                        scanned_at: s.stepLatest['Printing']?.scanned_at,
+                        scanned_by: s.stepLatest['SPI']?.scanned_by,
+                        scanned_at: s.stepLatest['SPI']?.scanned_at,
                         previous_stage: getSMTPreviousStage(s, stageStr),
                         rework_reason: null
                     }));
@@ -844,7 +902,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
             historyBySerial[row.serial_id].push(row);
         });
 
-        const stepNames = ['Serial Number', 'Printing', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+        const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
 
         const mappedSerials = serials.map((s: any) => {
             const history = historyBySerial[s.id] || [];
@@ -935,6 +993,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
             'CURRENT STAGE',
             'OVERALL STATUS',
             'PRINTING',
+            'SPI',
             'PRE AOI',
             'POST AOI',
             'REWORK',
@@ -966,6 +1025,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 s.current_stage || 'Pending',
                 s.final_status_label || 'Pending',
                 s.step_status['Printing'] || '-',
+                s.step_status['SPI'] || '-',
                 s.step_status['Pre AOI'] || '-',
                 s.step_status['Post AOI'] || '-',
                 s.step_status['Rework'] || '-',
@@ -998,7 +1058,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 }
 
                 // Process Stage Statuses
-                if (colNumber >= 4 && colNumber <= 8) {
+                if (colNumber >= 4 && colNumber <= 9) {
                     const statusText = cell.value?.toString().toUpperCase();
                     if (statusText === 'PASS') {
                         cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };

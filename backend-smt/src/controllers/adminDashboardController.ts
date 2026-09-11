@@ -28,6 +28,7 @@ export interface SmtStageMetrics {
 
 export interface SmtSideMetrics {
     printing: SmtStageMetrics & { labelled: number };
+    spi: SmtStageMetrics;
     preAOI: SmtStageMetrics;
     postAOI: SmtStageMetrics;
     yieldSPI: number;
@@ -37,6 +38,7 @@ export interface SmtMetricsSummary {
     isDoubleSided: boolean;
     sides: string;
     printing: SmtStageMetrics & { labelled: number };
+    spi: SmtStageMetrics;
     preAOI: SmtStageMetrics;
     postAOI: SmtStageMetrics;
     smtFG: SmtStageMetrics;
@@ -85,6 +87,7 @@ export const calculateSmtStageMetrics = async (
                 CASE 
                     WHEN i.process_step = 'SMT FG' THEN 'SHARED'
                     WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN spis.side IS NOT NULL THEN UPPER(TRIM(spis.side))
                     WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
                     WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
                     WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
@@ -98,6 +101,7 @@ export const calculateSmtStageMetrics = async (
                 CASE 
                     WHEN i.process_step = 'SMT FG' THEN 'SHARED'
                     WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN spis.side IS NOT NULL THEN UPPER(TRIM(spis.side))
                     WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
                     WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
                     WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
@@ -111,12 +115,13 @@ export const calculateSmtStageMetrics = async (
             LEFT JOIN smt_work_orders wo ON i.work_order_id = wo.id
             LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
             LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+            LEFT JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
             LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
             LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
             LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
             LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
             WHERE (i.work_order_id = $1 OR sn.work_order_id = $1)
-              AND i.process_step IN ('Printing', 'Pre AOI', 'Post AOI', 'SMT FG')
+              AND i.process_step IN ('Printing', 'SPI', 'Pre AOI', 'Post AOI', 'SMT FG')
               AND i.status IN ('PASS', 'FAIL')
     `;
     const params: any[] = [workOrderId];
@@ -132,6 +137,7 @@ export const calculateSmtStageMetrics = async (
                 CASE 
                     WHEN i.process_step = 'SMT FG' THEN 'SHARED'
                     WHEN ps.side IS NOT NULL THEN UPPER(TRIM(ps.side))
+                    WHEN spis.side IS NOT NULL THEN UPPER(TRIM(spis.side))
                     WHEN pas.side IS NOT NULL THEN UPPER(TRIM(pas.side))
                     WHEN poas.side IS NOT NULL THEN UPPER(TRIM(poas.side))
                     WHEN rs.side IS NOT NULL THEN UPPER(TRIM(rs.side))
@@ -156,6 +162,7 @@ export const calculateSmtStageMetrics = async (
 
     const sideCounts: Record<string, Record<string, { passed: number; failed: number }>> = {
         'Printing': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
+        'SPI': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
         'Pre AOI': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
         'Post AOI': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } },
         'SMT FG': { 'TOP': { passed: 0, failed: 0 }, 'BOTTOM': { passed: 0, failed: 0 } }
@@ -184,9 +191,14 @@ export const calculateSmtStageMetrics = async (
         const printPending = Math.max(0, totalQuantity - printPassed - printFailed);
         const printYield = totalQuantity > 0 ? safeNumber(((printPassed / totalQuantity) * 100).toFixed(1)) : 0;
 
+        const spiPassed = sideCounts['SPI'][sideKey].passed;
+        const spiFailed = sideCounts['SPI'][sideKey].failed;
+        const spiPending = Math.max(0, (dateParam ? printPassed : totalQuantity) - spiPassed - spiFailed);
+        const spiYield = totalQuantity > 0 ? safeNumber(((spiPassed / totalQuantity) * 100).toFixed(1)) : 0;
+
         const preAoiPassed = sideCounts['Pre AOI'][sideKey].passed;
         const preAoiFailed = sideCounts['Pre AOI'][sideKey].failed;
-        const preAoiPending = Math.max(0, (dateParam ? printPassed : totalQuantity) - preAoiPassed - preAoiFailed);
+        const preAoiPending = Math.max(0, (dateParam ? spiPassed : totalQuantity) - preAoiPassed - preAoiFailed);
         const preAoiYield = totalQuantity > 0 ? safeNumber(((preAoiPassed / totalQuantity) * 100).toFixed(1)) : 0;
 
         const postAoiPassed = sideCounts['Post AOI'][sideKey].passed;
@@ -205,6 +217,16 @@ export const calculateSmtStageMetrics = async (
                 passed: printPassed,
                 failed: printFailed,
                 percentage: printYield
+            },
+            spi: {
+                stage: 'SPI',
+                pass: spiPassed,
+                fail: spiFailed,
+                pending: spiPending,
+                yield: spiYield,
+                passed: spiPassed,
+                failed: spiFailed,
+                percentage: spiYield
             },
             preAOI: {
                 stage: 'Pre AOI',
@@ -226,7 +248,7 @@ export const calculateSmtStageMetrics = async (
                 failed: postAoiFailed,
                 percentage: postAoiYield
             },
-            yieldSPI: printYield
+            yieldSPI: spiYield
         };
     };
 
@@ -267,6 +289,7 @@ export const calculateSmtStageMetrics = async (
         overallStatus = 'COMPLETED';
     } else if (
         topMetrics.printing.passed > 0 || bottomMetrics.printing.passed > 0 ||
+        topMetrics.spi.passed > 0 || bottomMetrics.spi.passed > 0 ||
         overallSmtFgPassed > 0 ||
         topMetrics.preAOI.passed > 0 || bottomMetrics.preAOI.passed > 0 ||
         topMetrics.postAOI.passed > 0 || bottomMetrics.postAOI.passed > 0
@@ -280,6 +303,7 @@ export const calculateSmtStageMetrics = async (
         isDoubleSided: detectedDoubleSided,
         sides: detectedSides,
         printing: primaryMetrics.printing,
+        spi: primaryMetrics.spi,
         preAOI: primaryMetrics.preAOI,
         postAOI: primaryMetrics.postAOI,
         smtFG: smtFgMetrics,
@@ -308,16 +332,29 @@ const formatTimestamp = (dateInput: any): string => {
     }).format(date);
 };
 
+const STARTED_WO_CONDITION = `(
+    wo.is_registered = true OR
+    COALESCE(wo.smt_production_status, '') != '' OR
+    EXISTS (SELECT 1 FROM smt_serial_numbers sn WHERE UPPER(TRIM(sn.work_order_id)) = UPPER(TRIM(wo.id))) OR
+    EXISTS (SELECT 1 FROM smt_serial_batches sb WHERE UPPER(TRIM(sb.work_order_id)) = UPPER(TRIM(wo.id)) AND sb.is_deleted = false) OR
+    EXISTS (SELECT 1 FROM smt_process_setups ps WHERE UPPER(TRIM(ps.work_order_id)) = UPPER(TRIM(wo.id))) OR
+    EXISTS (SELECT 1 FROM smt_printing_sessions sess WHERE UPPER(TRIM(sess.work_order_id)) = UPPER(TRIM(wo.id))) OR
+    EXISTS (SELECT 1 FROM smt_spi_sessions spisess WHERE UPPER(TRIM(spisess.work_order_id)) = UPPER(TRIM(wo.id))) OR
+    EXISTS (SELECT 1 FROM smt_inspections insp WHERE UPPER(TRIM(insp.work_order_id)) = UPPER(TRIM(wo.id))) OR
+    EXISTS (SELECT 1 FROM material_management mm WHERE UPPER(TRIM(mm.work_order_id)) = UPPER(TRIM(wo.id)))
+)`;
+
 /**
  * GET /api/smt/admin/dashboard/live-work-orders
- * Returns active/in-progress Work Orders
+ * Returns active/in-progress/completed Work Orders where printing or serial generation has started
  */
 export const getLiveWorkOrders = async (req: Request, res: Response) => {
     try {
         const query = `
             SELECT wo.id, wo.product_name, wo.quantity, wo.created_at, wo.status, wo.model_name
             FROM smt_work_orders wo
-            WHERE LOWER(COALESCE(wo.status, '')) NOT IN ('cancelled', 'deleted', 'completed')
+            WHERE LOWER(COALESCE(wo.status, '')) NOT IN ('cancelled', 'deleted')
+              AND ${STARTED_WO_CONDITION}
             ORDER BY wo.created_at DESC
         `;
         const result = await pool.query(query);
@@ -346,7 +383,7 @@ export const getLiveWorkOrders = async (req: Request, res: Response) => {
 
 /**
  * GET /api/smt/admin/work-orders/search
- * Server-side debounced search for active & historical Work Orders
+ * Server-side debounced search for active & historical Work Orders where printing or serial generation has started
  */
 export const searchWorkOrders = async (req: Request, res: Response) => {
     try {
@@ -355,11 +392,12 @@ export const searchWorkOrders = async (req: Request, res: Response) => {
         let query = `
             SELECT wo.id, wo.product_name, wo.quantity, wo.created_at, wo.status, wo.model_name, wo.po_id
             FROM smt_work_orders wo
+            WHERE ${STARTED_WO_CONDITION}
         `;
         const params: any[] = [];
 
         if (q) {
-            query += ` WHERE wo.id ILIKE $1 OR wo.product_name ILIKE $1 OR wo.po_id ILIKE $1 OR wo.model_name ILIKE $1`;
+            query += ` AND (wo.id ILIKE $1 OR wo.product_name ILIKE $1 OR wo.po_id ILIKE $1 OR wo.model_name ILIKE $1)`;
             params.push(`%${q}%`);
         }
 
@@ -471,6 +509,7 @@ export const getWorkOrderDashboard = async (req: Request, res: Response) => {
             selectedDate: dateParam || 'all',
             availableDates,
             actualStatus: metrics.printing,
+            spi: metrics.spi,
             yieldSPI: metrics.yieldSPI,
             preAOI: metrics.preAOI,
             postAOI: metrics.postAOI,
@@ -627,6 +666,7 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
             sheet.addRow(['--- TOP SIDE ---']);
             const topRows = [
                 ['Printing (Top)', metrics.top.printing.passed, metrics.top.printing.failed, metrics.top.printing.pending, `${metrics.top.printing.percentage}%`],
+                ['SPI (Top)', metrics.top.spi.passed, metrics.top.spi.failed, metrics.top.spi.pending, `${metrics.top.spi.percentage}%`],
                 ['Pre AOI (Top)', metrics.top.preAOI.passed, metrics.top.preAOI.failed, metrics.top.preAOI.pending, `${metrics.top.preAOI.percentage}%`],
                 ['Post AOI (Top)', metrics.top.postAOI.passed, metrics.top.postAOI.failed, metrics.top.postAOI.pending, `${metrics.top.postAOI.percentage}%`]
             ];
@@ -643,6 +683,7 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
             sheet.addRow(['--- BOTTOM SIDE ---']);
             const bottomRows = [
                 ['Printing (Bottom)', metrics.bottom.printing.passed, metrics.bottom.printing.failed, metrics.bottom.printing.pending, `${metrics.bottom.printing.percentage}%`],
+                ['SPI (Bottom)', metrics.bottom.spi.passed, metrics.bottom.spi.failed, metrics.bottom.spi.pending, `${metrics.bottom.spi.percentage}%`],
                 ['Pre AOI (Bottom)', metrics.bottom.preAOI.passed, metrics.bottom.preAOI.failed, metrics.bottom.preAOI.pending, `${metrics.bottom.preAOI.percentage}%`],
                 ['Post AOI (Bottom)', metrics.bottom.postAOI.passed, metrics.bottom.postAOI.failed, metrics.bottom.postAOI.pending, `${metrics.bottom.postAOI.percentage}%`]
             ];
@@ -665,8 +706,14 @@ export const exportWorkOrderDayExcel = async (req: Request, res: Response) => {
             fgR.getCell(4).alignment = { horizontal: 'center' };
             fgR.getCell(5).alignment = { horizontal: 'center' };
         } else {
+            const spiPassed = metrics.spi.passed;
+            const spiFailed = metrics.spi.failed;
+            const spiPending = metrics.spi.pending;
+            const spiPercentage = metrics.spi.percentage;
+
             const matrixData = [
                 ['Printing (Labelled)', printingPassed, printingFailed, actualPending, `${actualPercentage}%`],
+                ['SPI', spiPassed, spiFailed, spiPending, `${spiPercentage}%`],
                 ['Pre AOI', preAoiPassed, preAoiFailed, preAoiPending, `${preAoiPercentage}%`],
                 ['Post AOI', postAoiPassed, postAoiFailed, postAoiPending, `${postAoiPercentage}%`],
                 ['SMT FG', smtFgPassed, smtFgFailed, smtFgPending, `${smtFgPercentage}%`]
@@ -827,14 +874,17 @@ export const getWorkOrderDayPdfData = async (req: Request, res: Response) => {
 
         const matrix = (metrics.isDoubleSided && metrics.top && metrics.bottom) ? [
             { stage: 'Printing (Top)', passed: metrics.top.printing.passed, failed: metrics.top.printing.failed, pending: metrics.top.printing.pending, percentage: metrics.top.printing.percentage },
+            { stage: 'SPI (Top)', passed: metrics.top.spi.passed, failed: metrics.top.spi.failed, pending: metrics.top.spi.pending, percentage: metrics.top.spi.percentage },
             { stage: 'Pre AOI (Top)', passed: metrics.top.preAOI.passed, failed: metrics.top.preAOI.failed, pending: metrics.top.preAOI.pending, percentage: metrics.top.preAOI.percentage },
             { stage: 'Post AOI (Top)', passed: metrics.top.postAOI.passed, failed: metrics.top.postAOI.failed, pending: metrics.top.postAOI.pending, percentage: metrics.top.postAOI.percentage },
             { stage: 'Printing (Bottom)', passed: metrics.bottom.printing.passed, failed: metrics.bottom.printing.failed, pending: metrics.bottom.printing.pending, percentage: metrics.bottom.printing.percentage },
+            { stage: 'SPI (Bottom)', passed: metrics.bottom.spi.passed, failed: metrics.bottom.spi.failed, pending: metrics.bottom.spi.pending, percentage: metrics.bottom.spi.percentage },
             { stage: 'Pre AOI (Bottom)', passed: metrics.bottom.preAOI.passed, failed: metrics.bottom.preAOI.failed, pending: metrics.bottom.preAOI.pending, percentage: metrics.bottom.preAOI.percentage },
             { stage: 'Post AOI (Bottom)', passed: metrics.bottom.postAOI.passed, failed: metrics.bottom.postAOI.failed, pending: metrics.bottom.postAOI.pending, percentage: metrics.bottom.postAOI.percentage },
             { stage: 'SMT FG (Release)', passed: metrics.smtFG.passed, failed: metrics.smtFG.failed, pending: metrics.smtFG.pending, percentage: metrics.smtFG.percentage }
         ] : [
             { stage: 'Printing (Labelled)', passed: printingPassed, failed: printingFailed, pending: actualPending, percentage: actualPercentage },
+            { stage: 'SPI', passed: metrics.spi.passed, failed: metrics.spi.failed, pending: metrics.spi.pending, percentage: metrics.spi.percentage },
             { stage: 'Pre AOI', passed: preAoiPassed, failed: preAoiFailed, pending: preAoiPending, percentage: preAoiPercentage },
             { stage: 'Post AOI', passed: postAoiPassed, failed: postAoiFailed, pending: postAoiPending, percentage: postAoiPercentage },
             { stage: 'SMT FG', passed: smtFgPassed, failed: smtFgFailed, pending: smtFgPending, percentage: smtFgPercentage }

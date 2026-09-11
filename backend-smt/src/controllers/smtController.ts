@@ -565,25 +565,6 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
             });
         }
 
-        // Lock route modification if production scans have already started
-        if (stagesArr !== null) {
-            const existingStages = currentQuery.rows[0].selected_stages;
-            const existingCanonical: string[] = Array.isArray(existingStages)
-                ? existingStages.map((s: string) => normalizeStageForSmt(s)).filter((s): s is string => s !== null)
-                : [];
-            const isIdentical = existingCanonical.length === stagesArr.length &&
-                existingCanonical.every((s: string, i: number) => s === stagesArr[i]);
-
-            if (!isIdentical) {
-                const inspCheck = await pool.query('SELECT id FROM smt_inspections WHERE work_order_id = $1 LIMIT 1', [id]);
-                if (inspCheck.rows.length > 0) {
-                    return res.status(400).json({
-                        success: false,
-                        message: "Cannot modify process stages. Production scans have already started for this Work Order."
-                    });
-                }
-            }
-        }
 
         let poName = currentQuery.rows[0].po_document_name;
         let poPath = currentQuery.rows[0].po_document_path;

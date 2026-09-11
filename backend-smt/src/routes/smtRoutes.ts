@@ -165,6 +165,24 @@ import {
     checkBottomCompleted
 } from '../controllers/printingController';
 import {
+    getEligibleWorkOrders as getSpiEligibleWos,
+    getStencilDetailsForWo as getSpiStencilDetails,
+    createSpiSession,
+    getSpiSessions,
+    getSessionById as getSpiSessionById,
+    updateSessionStatus as updateSpiSessionStatus,
+    deleteSpiSession,
+    validateAndRecordScan as validateAndRecordSpiScan,
+    updateScanBarcode as updateSpiScanBarcode,
+    failScanRow as failSpiScanRow,
+    getSessionStatistics as getSpiSessionStatistics,
+    exportSpiSessionExcel,
+    exportSpiSessionPdfData,
+    checkBottomCompleted as checkSpiBottomCompleted,
+    getPrintingPassedBarcodes as getSpiPrintingPassedBarcodes,
+    getAutoPopulateDetails as getSpiAutoPopulateDetails
+} from '../controllers/spiController';
+import {
     getEligibleWorkOrders as getPreAoiEligibleWos,
     getStencilDetailsForWo as getPreAoiStencilDetails,
     createPreAoiSession,
@@ -422,6 +440,24 @@ router.get('/printing/sessions/:id/stats', authenticateToken, getSessionStatisti
 router.get('/printing/sessions/:id/export/excel', authenticateToken, exportPrintingSessionExcel);
 router.get('/printing/sessions/:id/export/pdf-data', authenticateToken, exportPrintingSessionPdfData);
 router.get('/printing/work-orders/:woId/check-bottom', authenticateToken, checkBottomCompleted);
+
+// SMT SPI Workflow
+router.get('/spi/eligible-wos', authenticateToken, getSpiEligibleWos);
+router.get('/spi/stencil-details/:woId', authenticateToken, getSpiStencilDetails);
+router.post('/spi/sessions', authenticateToken, createSpiSession);
+router.get('/spi/sessions', authenticateToken, getSpiSessions);
+router.get('/spi/sessions/:id', authenticateToken, getSpiSessionById);
+router.patch('/spi/sessions/:id/status', authenticateToken, updateSpiSessionStatus);
+router.delete('/spi/sessions/:id', [authenticateToken, requirePermission('smt_spi', 'can_delete')], deleteSpiSession);
+router.post('/spi/sessions/:id/scan', authenticateToken, validateAndRecordSpiScan);
+router.put('/spi/sessions/:id/scan/:scanId', authenticateToken, updateSpiScanBarcode);
+router.post('/spi/sessions/:id/scan/:scanId/fail', authenticateToken, failSpiScanRow);
+router.get('/spi/sessions/:id/stats', authenticateToken, getSpiSessionStatistics);
+router.get('/spi/sessions/:id/export/excel', authenticateToken, exportSpiSessionExcel);
+router.get('/spi/sessions/:id/export/pdf-data', authenticateToken, exportSpiSessionPdfData);
+router.get('/spi/work-orders/:woId/check-bottom', authenticateToken, checkSpiBottomCompleted);
+router.get('/spi/sessions/:id/printing-passed', authenticateToken, getSpiPrintingPassedBarcodes);
+router.get('/spi/auto-populate-details/:woId', authenticateToken, getSpiAutoPopulateDetails);
 
 // SMT Pre AOI Workflow
 router.get('/pre-aoi/eligible-wos', authenticateToken, getPreAoiEligibleWos);
