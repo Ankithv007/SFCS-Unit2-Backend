@@ -61,7 +61,11 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         modelName,
         model,
         selected_stages,
-        selectedStages
+        selectedStages,
+        has_smt,
+        hasSmt,
+        has_backend,
+        hasBackend
     } = req.body;
 
     const finalCustomerName = (customer_name || customerName || '').toString().trim();
@@ -70,32 +74,39 @@ export const createWorkOrder = async (req: Request, res: Response) => {
     const sessionUserEmail = ((req as any).user?.email || '').toString().trim();
     const requestCreatedBy = (typeof created_by === 'string' ? created_by.trim() : '');
     const finalCreatedBy = sessionUserName || (requestCreatedBy && requestCreatedBy !== 'System admin' ? requestCreatedBy : '') || sessionUserEmail || requestCreatedBy;
+    const finalHasSmt = typeof has_smt === 'boolean' ? has_smt : typeof hasSmt === 'boolean' ? hasSmt : true;
+    const finalHasBackend = typeof has_backend === 'boolean' ? has_backend : typeof hasBackend === 'boolean' ? hasBackend : true;
+
     let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
 
-    if (stagesArr !== null) {
-        if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "At least one production stage must be selected."
-            });
-        }
-        const validatedStages: string[] = [];
-        for (const st of stagesArr) {
-            const canonical = normalizeStageForSmt(st);
-            if (!canonical) {
+    if (finalHasBackend) {
+        if (stagesArr !== null) {
+            if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
                 return res.status(400).json({
                     success: false,
-                    message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                    message: "At least one backend production stage must be selected when Backend is enabled."
                 });
             }
-            if (!validatedStages.includes(canonical)) {
-                validatedStages.push(canonical);
+            const validatedStages: string[] = [];
+            for (const st of stagesArr) {
+                const canonical = normalizeStageForSmt(st);
+                if (!canonical) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                    });
+                }
+                if (!validatedStages.includes(canonical)) {
+                    validatedStages.push(canonical);
+                }
             }
+            stagesArr = validatedStages;
         }
-        stagesArr = validatedStages;
+    } else {
+        stagesArr = [];
     }
 
-    const finalStages = stagesArr ? JSON.stringify(stagesArr) : JSON.stringify(['PTH', 'VI', 'QA', 'Flashing', 'PCBA-FCT', 'Assembly', 'Unit Testing', 'QI', 'Packing']);
+    const finalStages = stagesArr !== null ? JSON.stringify(stagesArr) : finalHasBackend ? JSON.stringify(['PTH', 'VI', 'QA', 'Flashing', 'PCBA-FCT', 'Assembly', 'Unit Testing', 'QI', 'Packing']) : JSON.stringify([]);
 
     // 1. Input Normalization for Work Order ID
     const normalizedWorkOrderId = typeof work_order_id === 'string'
@@ -168,9 +179,10 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 id, area_id, line_id, priority, product_name, product_description, 
                 quantity, panel_quantity, sides, created_by, barcode_source,
                 po_document_name, po_document_path, po_document_type, uploaded_at,
-                po_id, remark, customer_name, model_name, selected_stages
+                po_id, remark, customer_name, model_name, selected_stages,
+                has_smt, has_backend
             ) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) 
             RETURNING *`,
             [
                 normalizedWorkOrderId,
@@ -192,7 +204,9 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 remark || null,
                 finalCustomerName || null,
                 finalModelName || null,
-                finalStages
+                finalStages,
+                finalHasSmt,
+                finalHasBackend
             ]
         );
 
@@ -485,37 +499,48 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
         modelName,
         model,
         selected_stages,
-        selectedStages
+        selectedStages,
+        has_smt,
+        hasSmt,
+        has_backend,
+        hasBackend
     } = req.body;
 
     const finalCustomerName = (customer_name || customerName || '').toString().trim();
     const finalModelName = (model_name || modelName || model || '').toString().trim();
+    const finalHasSmt = typeof has_smt === 'boolean' ? has_smt : typeof hasSmt === 'boolean' ? hasSmt : true;
+    const finalHasBackend = typeof has_backend === 'boolean' ? has_backend : typeof hasBackend === 'boolean' ? hasBackend : true;
+
     let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
 
-    if (stagesArr !== null) {
-        if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "At least one production stage must be selected."
-            });
-        }
-        const validatedStages: string[] = [];
-        for (const st of stagesArr) {
-            const canonical = normalizeStageForSmt(st);
-            if (!canonical) {
+    if (finalHasBackend) {
+        if (stagesArr !== null) {
+            if (!Array.isArray(stagesArr) || stagesArr.length === 0) {
                 return res.status(400).json({
                     success: false,
-                    message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                    message: "At least one backend production stage must be selected when Backend is enabled."
                 });
             }
-            if (!validatedStages.includes(canonical)) {
-                validatedStages.push(canonical);
+            const validatedStages: string[] = [];
+            for (const st of stagesArr) {
+                const canonical = normalizeStageForSmt(st);
+                if (!canonical) {
+                    return res.status(400).json({
+                        success: false,
+                        message: `Invalid production stage: "${st}". Allowed stages are: PTH, VI, QA, Flashing, PCBA-FCT, Assembly, Unit Testing, QI, Packing.`
+                    });
+                }
+                if (!validatedStages.includes(canonical)) {
+                    validatedStages.push(canonical);
+                }
             }
+            stagesArr = validatedStages;
         }
-        stagesArr = validatedStages;
+    } else {
+        stagesArr = [];
     }
 
-    const finalStages = stagesArr ? JSON.stringify(stagesArr) : null;
+    const finalStages = stagesArr !== null ? JSON.stringify(stagesArr) : null;
 
     const normalizedPoId = typeof po_id === 'string' ? po_id.trim() : '';
     if (!normalizedPoId) {
@@ -604,8 +629,10 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
                  po_document_path = $11, po_document_type = $12, uploaded_at = $13,
                  customer_name = COALESCE($14, customer_name),
                  model_name = COALESCE($15, model_name),
-                 selected_stages = COALESCE($16::jsonb, selected_stages)
-             WHERE id = $17
+                 selected_stages = COALESCE($16::jsonb, selected_stages),
+                 has_smt = $17,
+                 has_backend = $18
+             WHERE id = $19
              RETURNING *`,
             [
                 normalizedPoId,
@@ -624,6 +651,8 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
                 finalCustomerName || null,
                 finalModelName || null,
                 finalStages,
+                finalHasSmt,
+                finalHasBackend,
                 id
             ]
         );

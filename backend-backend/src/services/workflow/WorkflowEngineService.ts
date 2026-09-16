@@ -135,18 +135,18 @@ export class WorkflowEngineService {
         let rawSelected = workOrderOrBatch.selectedStages !== undefined ? workOrderOrBatch.selectedStages : workOrderOrBatch.stagesList;
         let isExplicitlyProvided = rawSelected !== undefined;
 
+        let woRow: any = null;
         if (!isExplicitlyProvided) {
-            let woRow: any = null;
 
             if (workOrderOrBatch.workOrderId) {
                 const res = await db.query(
-                    'SELECT id, wo_number, selected_stages FROM work_orders WHERE id = $1',
+                    'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE id = $1',
                     [workOrderOrBatch.workOrderId]
                 );
                 if (res.rows.length > 0) woRow = res.rows[0];
             } else if (workOrderOrBatch.batchId) {
                 const res = await db.query(
-                    `SELECT w.id, w.wo_number, w.selected_stages 
+                    `SELECT w.id, w.wo_number, w.selected_stages, w.has_backend 
                      FROM batches b 
                      JOIN work_orders w ON b.work_order_id = w.id 
                      WHERE b.id = $1`,
@@ -155,7 +155,7 @@ export class WorkflowEngineService {
                 if (res.rows.length > 0) woRow = res.rows[0];
             } else if (workOrderOrBatch.woNumber) {
                 const res = await db.query(
-                    'SELECT id, wo_number, selected_stages FROM work_orders WHERE wo_number = $1',
+                    'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE wo_number = $1',
                     [workOrderOrBatch.woNumber]
                 );
                 if (res.rows.length > 0) woRow = res.rows[0];
@@ -168,16 +168,27 @@ export class WorkflowEngineService {
             } else if (woNum) {
                 try {
                     const smtRes = await smtPool.query(
-                        'SELECT id, selected_stages FROM smt_work_orders WHERE id = $1',
+                        'SELECT id, selected_stages, has_backend FROM smt_work_orders WHERE id = $1',
                         [woNum]
                     );
-                    if (smtRes.rows.length > 0 && smtRes.rows[0].selected_stages !== null) {
-                        rawSelected = smtRes.rows[0].selected_stages;
+                    if (smtRes.rows.length > 0) {
+                        if (smtRes.rows[0].selected_stages !== null) {
+                            rawSelected = smtRes.rows[0].selected_stages;
+                        }
+                        if (woRow) woRow.has_backend = smtRes.rows[0].has_backend;
                     }
                 } catch (e) {
                     logger.warn(`Failed to query smt_work_orders for WO [${woNum}]: ${(e as any).message}`);
                 }
             }
+        }
+
+        if (woRow && woRow.has_backend === false) {
+            throw new ValidationError({
+                errorCode: 'BACKEND_DISABLED',
+                message: 'Backend process routing is disabled for this Work Order (SMT Only).',
+                severity: 'error'
+            });
         }
 
         // 3. Handle Legacy Work Orders: NULL or undefined means default to all standard stages
@@ -347,6 +358,7 @@ export class WorkflowEngineService {
             batchId?: number | null;
             workOrderId?: number | null;
             woNumber?: string | null;
+            barcode?: string;
             selectedStages?: any;
             dbClient?: any;
         }
@@ -410,6 +422,112 @@ export class WorkflowEngineService {
                         severity: 'error'
                     });
                 }
+
+                // Check if Work Order has SMT enabled
+                let woNumber = context?.woNumber;
+                let hasSmt = true;
+
+                if (context?.workOrderId) {
+                    const woRes = await db.query(
+                        'SELECT wo_number, has_smt FROM work_orders WHERE id = $1',
+                        [context.workOrderId]
+                    );
+                    if (woRes.rows.length > 0) {
+                        hasSmt = woRes.rows[0].has_smt !== false;
+                        woNumber = woRes.rows[0].wo_number;
+                    }
+                } else if (context?.batchId) {
+                    const woRes = await db.query(
+                        `SELECT w.wo_number, w.has_smt 
+                         FROM batches b 
+                         JOIN work_orders w ON b.work_order_id = w.id 
+                         WHERE b.id = $1`,
+                        [context.batchId]
+                    );
+                    if (woRes.rows.length > 0) {
+                        hasSmt = woRes.rows[0].has_smt !== false;
+                        woNumber = woRes.rows[0].wo_number;
+                    }
+                } else if (woNumber) {
+                    const woRes = await db.query(
+                        'SELECT wo_number, has_smt FROM work_orders WHERE wo_number = $1',
+                        [woNumber]
+                    );
+                    if (woRes.rows.length > 0) {
+                        hasSmt = woRes.rows[0].has_smt !== false;
+                    }
+                }
+
+                if (hasSmt) {
+                    const barcodeToTest = context?.barcode || unit?.barcode;
+                    if (barcodeToTest) {
+                        const cleanBarcode = barcodeToTest.trim().toUpperCase();
+                        // Query SMT database for PASS record in SMT FG for this barcode
+                        const smtPassCheck = await smtPool.query(
+                            `SELECT 1 
+                             FROM smt_inspections i
+                             LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+                             WHERE (UPPER(TRIM(i.scanned_barcode)) = $1 OR UPPER(TRIM(sn.serial_number)) = $1)
+                               AND i.process_step = 'SMT FG'
+                               AND i.status = 'PASS'
+                             LIMIT 1`,
+                            [cleanBarcode]
+                        );
+
+                        if (smtPassCheck.rows.length === 0) {
+                            // Check if the serial was generated in SMT
+                            const smtSerialCheck = await smtPool.query(
+                                `SELECT id, serial_number FROM smt_serial_numbers 
+                                 WHERE UPPER(TRIM(serial_number)) = $1`,
+                                [cleanBarcode]
+                            );
+
+                            // Check latest inspection status in SMT (if any scans exist)
+                            const smtLatestInspection = await smtPool.query(
+                                `SELECT i.process_step, i.status, i.rework_reason
+                                 FROM smt_inspections i
+                                 LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+                                 WHERE UPPER(TRIM(i.scanned_barcode)) = $1 OR UPPER(TRIM(sn.serial_number)) = $1
+                                 ORDER BY i.scanned_at DESC, i.id DESC
+                                 LIMIT 1`,
+                                [cleanBarcode]
+                            );
+
+                            if (smtLatestInspection.rows.length > 0) {
+                                const latest = smtLatestInspection.rows[0];
+                                const statusUpper = (latest.status || '').toUpperCase();
+                                if (['FAIL', 'FAILED', 'REWORK', 'INVALID'].includes(statusUpper)) {
+                                    throw new ValidationError({
+                                        errorCode: 'SMT_UNIT_FAILED',
+                                        message: `Barcode "${cleanBarcode}" failed in SMT process (${latest.process_step}: ${latest.status}) and cannot enter Backend.`,
+                                        currentStage: targetStage.stage_name,
+                                        suggestedAction: `This unit failed at SMT stage ${latest.process_step}. Please repair and pass it in SMT line first.`,
+                                        severity: 'error'
+                                    });
+                                }
+                            }
+
+                            if (smtSerialCheck.rows.length === 0 && smtLatestInspection.rows.length === 0) {
+                                throw new ValidationError({
+                                    errorCode: 'SMT_SERIAL_NOT_FOUND',
+                                    message: `Barcode "${cleanBarcode}" was not generated or processed in SMT line.`,
+                                    currentStage: targetStage.stage_name,
+                                    suggestedAction: 'Please generate serial number and process it through SMT stages first.',
+                                    severity: 'error'
+                                });
+                            }
+
+                            throw new ValidationError({
+                                errorCode: 'SMT_FG_NOT_PASSED',
+                                message: `Barcode "${cleanBarcode}" has not passed SMT FG stage yet.`,
+                                currentStage: targetStage.stage_name,
+                                suggestedAction: 'This unit must complete and pass the SMT FG stage before entering Backend process routing.',
+                                severity: 'error'
+                            });
+                        }
+                    }
+                }
+
                 return true;
             }
 

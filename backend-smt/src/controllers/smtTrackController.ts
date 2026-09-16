@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import pool from '../config/db';
+import pool, { backendPool } from '../config/db';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('SMT_TRACK_CONTROLLER');
@@ -16,7 +16,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
     try {
         // 1. Find the serial number record
         const serialResult = await pool.query(
-            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.created_by as wo_created_by, wo.created_at as wo_created_at
+            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.created_by as wo_created_by, wo.created_at as wo_created_at
              FROM smt_serial_numbers sn
              LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
              WHERE sn.serial_number = $1`,
@@ -129,6 +129,35 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             rework_reason: row.rework_reason || null
         }));
 
+        // Fetch Backend process scan history if applicable
+        let backendScanHistory: any[] = [];
+        try {
+            const backendRes = await backendPool.query(
+                `SELECT 
+                    ps.stage_name AS station,
+                    ps.stage_order,
+                    s.scan_result AS status,
+                    s.scanned_by,
+                    s.scanned_at,
+                    s.remarks
+                FROM scans s
+                JOIN production_stages ps ON s.stage_id = ps.id
+                WHERE s.barcode = $1
+                ORDER BY s.scanned_at ASC`,
+                [serial.serial_number]
+            );
+            backendScanHistory = backendRes.rows.map((row: any) => ({
+                station: row.station,
+                stage_order: row.stage_order,
+                status: (row.status || '').toUpperCase(),
+                scanned_by: row.scanned_by || '-',
+                scanned_at: row.scanned_at,
+                remarks: row.remarks || null,
+            }));
+        } catch (bErr: any) {
+            logger.warn('Failed to fetch backend scan history:', bErr.message);
+        }
+
         return res.status(200).json({
             serial_number: serial.serial_number,
             serial_format: serial.serial_format,
@@ -137,6 +166,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             quantity: serial.quantity || '-',
             line_id: serial.line_id || '-',
             sides: serial.sides || '-',
+            has_smt: serial.has_smt ?? true,
+            has_backend: serial.has_backend ?? true,
             current_stage: currentStage,
             current_status: currentStatus,
             final_status_label: finalStatusLabel,
@@ -145,6 +176,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             total_reworks: totalReworks,
             total_passed: totalPassed,
             scan_history: history,
+            backend_scan_history: backendScanHistory,
             solder_paste: {
                 barcode: sp.solder_paste_barcode || '-',
                 status: sp.solder_paste_status || 'Pending',
@@ -287,6 +319,8 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             quantity: wo.quantity,
             line_id: wo.line_id,
             sides: wo.sides || '-',
+            has_smt: wo.has_smt ?? true,
+            has_backend: wo.has_backend ?? true,
             total_serials: serials.length,
             serials: mappedSerials,
             solder_paste: {

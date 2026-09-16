@@ -11,4 +11,13 @@ const pool = new Pool({
     port:     parseInt(process.env.DB_PORT || '5432', 10),
 });
 
+export const backendPool = new Pool({
+    user:     process.env.DB_USER     || 'postgres',
+    host:     process.env.DB_HOST     || 'db',
+    database: process.env.DB_NAME_BACKEND || 'backend_process_db',
+    password: process.env.DB_PASSWORD,
+    port:     parseInt(process.env.DB_PORT || '5432', 10),
+});
+
 export default pool;
+

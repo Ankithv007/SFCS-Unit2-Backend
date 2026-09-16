@@ -54,6 +54,8 @@ export const trackBarcode = async (req: Request, res: Response) => {
                 wo.model,
                 wo.quantity,
                 wo.selected_stages,
+                wo.has_smt,
+                wo.has_backend,
                 ps.stage_name AS current_stage,
                 fps.stage_name AS failed_stage
             FROM units u
@@ -236,6 +238,35 @@ export const trackBarcode = async (req: Request, res: Response) => {
             finalStatusLabel = 'REPAIR DONE – AWAITING RESCAN';
         }
 
+        // Fetch SMT inspection history if available
+        let smtScanHistory: any[] = [];
+        try {
+            const smtRes = await smtPool.query(
+                `SELECT 
+                    i.id,
+                    i.process_step,
+                    i.scanned_by,
+                    i.scanned_at,
+                    i.status,
+                    i.rework_reason
+                FROM smt_inspections i
+                JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+                WHERE sn.serial_number = $1
+                ORDER BY i.scanned_at ASC`,
+                [barcode]
+            );
+            smtScanHistory = smtRes.rows.map((row: any) => ({
+                id: row.id,
+                process_step: row.process_step || '-',
+                status: (row.status || '').toUpperCase(),
+                scanned_by: row.scanned_by || '-',
+                scanned_at: row.scanned_at,
+                rework_reason: row.rework_reason || null,
+            }));
+        } catch (sErr: any) {
+            console.warn('Failed to fetch SMT scan history in backend trackController:', sErr.message);
+        }
+
         return res.status(200).json({
             barcode: tracking.barcode,
             unit_serial_number: unitSerialNumber,
@@ -257,7 +288,10 @@ export const trackBarcode = async (req: Request, res: Response) => {
             total_reworks: totalReworks,
             total_debugs: totalDebugs,
             scan_history: history,
+            smt_scan_history: smtScanHistory,
             selected_stages: tracking.selected_stages,
+            has_smt: tracking.has_smt ?? true,
+            has_backend: tracking.has_backend ?? true,
             active_route: activeRoute.map((s: any) => ({
                 id: s.id,
                 stage_code: s.stage_code,

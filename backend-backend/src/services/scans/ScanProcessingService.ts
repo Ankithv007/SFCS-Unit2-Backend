@@ -135,6 +135,7 @@ export class ScanProcessingService {
             await WorkflowEngineService.validateTransition(unit, stage, {
                 batchId,
                 workOrderId: payload.work_order_id,
+                barcode: payload.barcode,
                 dbClient: client
             });
 
@@ -549,6 +550,7 @@ export class ScanProcessingService {
             await WorkflowEngineService.validateTransition(unit, stage, {
                 batchId,
                 workOrderId,
+                barcode: resolvedBarcode,
                 dbClient: client
             });
 

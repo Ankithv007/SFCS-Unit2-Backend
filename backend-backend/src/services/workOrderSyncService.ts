@@ -20,6 +20,8 @@ export async function ensureSchemaColumns(): Promise<void> {
             ADD COLUMN IF NOT EXISTS solder_paste_status VARCHAR(50),
             ADD COLUMN IF NOT EXISTS selected_stages JSONB,
             ADD COLUMN IF NOT EXISTS remark TEXT,
+            ADD COLUMN IF NOT EXISTS has_smt BOOLEAN DEFAULT TRUE,
+            ADD COLUMN IF NOT EXISTS has_backend BOOLEAN DEFAULT TRUE,
             ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 
@@ -83,7 +85,8 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
             const smtRes = await smtPool.query(`
                 SELECT id, po_id, product_name, product_description, sides, quantity, 
                        customer_name, model_name, selected_stages, line_id, priority, 
-                       solder_paste_status, created_by, created_at, remark
+                       solder_paste_status, created_by, created_at, remark,
+                       has_smt, has_backend
                 FROM smt_work_orders 
                 WHERE status NOT IN ('Deleted', 'Cancelled')
             `);
@@ -118,14 +121,16 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
                     const created_by = smtWo.created_by || 'System admin';
                     const created_at = smtWo.created_at || new Date();
                     const remark = smtWo.remark || null;
+                    const has_smt = smtWo.has_smt !== false;
+                    const has_backend = smtWo.has_backend !== false;
 
                     await client.query(
                         `INSERT INTO work_orders (
                             wo_number, po_id, product_name, product_description, sides, quantity, 
                             customer_name, model, selected_stages, line_id, priority, 
-                            solder_paste_status, created_by, created_at, remark
+                            solder_paste_status, created_by, created_at, remark, has_smt, has_backend
                         )
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17)
                          ON CONFLICT (wo_number) 
                          DO UPDATE SET 
                             po_id = EXCLUDED.po_id,
@@ -140,11 +145,13 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
                             priority = EXCLUDED.priority,
                             solder_paste_status = EXCLUDED.solder_paste_status,
                             created_by = EXCLUDED.created_by,
-                            remark = EXCLUDED.remark`,
+                            remark = EXCLUDED.remark,
+                            has_smt = EXCLUDED.has_smt,
+                            has_backend = EXCLUDED.has_backend`,
                         [
                             wo_number, po_id, product_name, product_description, sides, quantity,
                             customer_name, model, selected_stages, line_id, priority,
-                            solder_paste_status, created_by, created_at, remark
+                            solder_paste_status, created_by, created_at, remark, has_smt, has_backend
                         ]
                     );
                 }
@@ -217,7 +224,8 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
         const smtRes = await smtPool.query(`
             SELECT id, po_id, product_name, product_description, sides, quantity, 
                    customer_name, model_name, selected_stages, line_id, priority, 
-                   solder_paste_status, created_by, created_at, remark
+                   solder_paste_status, created_by, created_at, remark,
+                   has_smt, has_backend
             FROM smt_work_orders 
             WHERE (UPPER(TRIM(id)) = UPPER($1) OR UPPER(TRIM(po_id)) = UPPER($1))
               AND status NOT IN ('Deleted', 'Cancelled')
@@ -242,6 +250,8 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
         const created_by = smtWo.created_by || 'System admin';
         const created_at = smtWo.created_at || new Date();
         const remark = smtWo.remark || null;
+        const has_smt = smtWo.has_smt !== false;
+        const has_backend = smtWo.has_backend !== false;
 
         const stagesRes = await pool.query(`SELECT id FROM production_stages ORDER BY stage_order ASC`);
         const firstStageId = stagesRes.rows.length > 0 ? stagesRes.rows[0].id : 1;
@@ -254,9 +264,9 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
                 `INSERT INTO work_orders (
                     wo_number, po_id, product_name, product_description, sides, quantity, 
                     customer_name, model, selected_stages, line_id, priority, 
-                    solder_paste_status, created_by, created_at, remark
+                    solder_paste_status, created_by, created_at, remark, has_smt, has_backend
                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17)
                  ON CONFLICT (wo_number) 
                  DO UPDATE SET 
                     po_id = EXCLUDED.po_id,
@@ -271,12 +281,14 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
                     priority = EXCLUDED.priority,
                     solder_paste_status = EXCLUDED.solder_paste_status,
                     created_by = EXCLUDED.created_by,
-                    remark = EXCLUDED.remark
+                    remark = EXCLUDED.remark,
+                    has_smt = EXCLUDED.has_smt,
+                    has_backend = EXCLUDED.has_backend
                  RETURNING id`,
                 [
                     wo_number, po_id, product_name, product_description, sides, quantity,
                     customer_name, model, selected_stages, line_id, priority,
-                    solder_paste_status, created_by, created_at, remark
+                    solder_paste_status, created_by, created_at, remark, has_smt, has_backend
                 ]
             );
 
