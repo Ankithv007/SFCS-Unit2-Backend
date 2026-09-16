@@ -1380,32 +1380,47 @@ export const deleteInspectionsForBatch = async (req: Request, res: Response) => 
 
 export const createInspection = async (req: Request, res: Response) => {
     const { serial_id, process_step, scanned_by, status, rework_reason } = req.body;
+    const client = await pool.connect();
     try {
+        await client.query('BEGIN');
+
+        // Lock the serial number row to prevent race conditions
+        const serialLock = await client.query(
+            `SELECT * FROM smt_serial_numbers WHERE id = $1 FOR UPDATE`,
+            [serial_id]
+        );
+
+        if (serialLock.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: "Serial number not found" });
+        }
+
         // Duplicate validation check: BLOCK duplicate PASS scans
         if (status !== 'FAIL') {
-            const dupCheck = await pool.query(
+            const dupCheck = await client.query(
                 `SELECT * FROM smt_inspections 
                  WHERE serial_id = $1 AND process_step = $2 
-                 ORDER BY scanned_at DESC LIMIT 1`,
+                 ORDER BY scanned_at DESC LIMIT 1 FOR UPDATE`,
                 [serial_id, process_step]
             );
 
             if ((dupCheck.rowCount ?? 0) > 0 && dupCheck.rows[0].status === 'PASS') {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Barcode already processed successfully" });
             }
         }
 
         if (process_step === 'Post AOI') {
             // Find the absolute latest inspection for this serial_id
-            const latestRes = await pool.query(
-                `SELECT * FROM smt_inspections WHERE serial_id = $1 ORDER BY scanned_at DESC LIMIT 1`,
+            const latestRes = await client.query(
+                `SELECT * FROM smt_inspections WHERE serial_id = $1 ORDER BY scanned_at DESC LIMIT 1 FOR UPDATE`,
                 [serial_id]
             );
 
             if ((latestRes.rowCount ?? 0) > 0 && latestRes.rows[0].process_step === 'Post AOI') {
                 const latestId = latestRes.rows[0].id;
                 // Update the existing row instead of inserting a new one
-                const result = await pool.query(
+                const result = await client.query(
                     `UPDATE smt_inspections 
                      SET status = $1, rework_reason = $2, scanned_by = $3, scanned_at = CURRENT_TIMESTAMP
                      WHERE id = $4 RETURNING *`,
@@ -1414,10 +1429,13 @@ export const createInspection = async (req: Request, res: Response) => {
 
                 // Also update the main status in serial_numbers
                 const serialStatus = status === 'FAIL' ? 'REWORK' : 'SCANNED';
-                const snUpdate = await pool.query(
+                const snUpdate = await client.query(
                     'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2 RETURNING work_order_id',
                     [serialStatus, serial_id]
                 );
+
+                await client.query('COMMIT');
+
                 if (snUpdate.rows.length > 0 && snUpdate.rows[0].work_order_id) {
                     notifySmtDashboardUpdate(snUpdate.rows[0].work_order_id);
                 }
@@ -1429,7 +1447,7 @@ export const createInspection = async (req: Request, res: Response) => {
         let finalReworkReason = rework_reason || null;
 
         // Standard Insert Logic for other steps or new Post AOI / revalidation scans
-        const result = await pool.query(
+        const result = await client.query(
             `INSERT INTO smt_inspections (serial_id, process_step, scanned_by, status, rework_reason) 
              VALUES ($1, $2, $3, $4, $5) RETURNING *`,
             [serial_id, process_step, scanned_by, status || 'PASS', finalReworkReason]
@@ -1441,18 +1459,24 @@ export const createInspection = async (req: Request, res: Response) => {
             serialStatus = 'COMPLETED';
         }
 
-        const snUpdate = await pool.query(
+        const snUpdate = await client.query(
             'UPDATE smt_serial_numbers SET status = $1 WHERE id = $2 RETURNING work_order_id',
             [serialStatus, serial_id]
         );
+
+        await client.query('COMMIT');
+
         if (snUpdate.rows.length > 0 && snUpdate.rows[0].work_order_id) {
             notifySmtDashboardUpdate(snUpdate.rows[0].work_order_id);
         }
 
         res.status(201).json(result.rows[0]);
     } catch (err) {
+        await client.query('ROLLBACK');
         logger.error("Error creating inspection:", err);
         res.status(500).json({ error: "Failed to create inspection" });
+    } finally {
+        client.release();
     }
 };
 

@@ -166,85 +166,52 @@ export const resolveWorkOrderSide = async (woId: string, sides: string): Promise
 /**
  * Resolves the side for Rework.
  * Checks if there are any unrepaired Post AOI failures on Bottom or Top.
+ * Optimized: uses a single NOT EXISTS SQL query per side instead of an O(n) application-level loop.
  */
 export const resolveReworkSide = async (woId: string, sides: string): Promise<'Top' | 'Bottom'> => {
     const woSides = (sides || '').trim().toLowerCase();
     if (woSides === 'top') return 'Top';
     if (woSides === 'bottom') return 'Bottom';
     if (woSides === 'top / bottom' || woSides.includes('/')) {
-        // Check for unrepaired failures on Bottom side
-        const bottomFails = await pool.query(
-            `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
-             JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-             WHERE i.work_order_id = $1
-               AND LOWER(ps.side) = 'bottom'
-               AND i.process_step = 'Post AOI'
-               AND i.status = 'FAIL'
-               AND ps.is_deleted = false`,
-            [woId]
-        );
-        let hasBottomUnrepaired = false;
-        for (const row of bottomFails.rows) {
-            const reworkCheck = await pool.query(
-                `SELECT ri.id FROM smt_inspections ri
-                 JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
-                 WHERE ri.work_order_id = $1
-                   AND LOWER(rs.side) = 'bottom'
-                   AND (
-                     (ri.serial_id IS NOT NULL AND ri.serial_id = $2)
-                     OR (ri.scanned_barcode = $3)
-                   )
-                   AND ri.process_step = 'Rework'
-                   AND ri.status = 'PASS'
-                   AND ri.scanned_at > $4
-                   AND rs.is_deleted = false
-                 LIMIT 1`,
-                [woId, row.serial_id, row.scanned_barcode, row.scanned_at]
-            );
-            if (reworkCheck.rows.length === 0) {
-                hasBottomUnrepaired = true;
-                break;
-            }
-        }
-        if (hasBottomUnrepaired) {
+        // Single query replaces the previous O(n) application-level loop.
+        // Checks: does any Post AOI FAIL on the given side lack a subsequent Rework PASS?
+        const unrepairedQuery = `
+            SELECT EXISTS (
+                SELECT 1
+                FROM smt_inspections i
+                JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+                WHERE i.work_order_id = $1
+                  AND LOWER(ps.side) = $2
+                  AND i.process_step = 'Post AOI'
+                  AND i.status = 'FAIL'
+                  AND ps.is_deleted = false
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM smt_inspections ri
+                      JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                      WHERE ri.work_order_id = $1
+                        AND LOWER(rs.side) = $2
+                        AND (
+                            (ri.serial_id IS NOT NULL AND ri.serial_id = i.serial_id)
+                            OR (ri.scanned_barcode = i.scanned_barcode)
+                        )
+                        AND ri.process_step = 'Rework'
+                        AND ri.status = 'PASS'
+                        AND ri.scanned_at > i.scanned_at
+                        AND rs.is_deleted = false
+                  )
+            ) AS has_unrepaired
+        `;
+
+        // Check Bottom side first (same priority order as the original implementation)
+        const bottomRes = await pool.query(unrepairedQuery, [woId, 'bottom']);
+        if (bottomRes.rows[0]?.has_unrepaired === true) {
             return 'Bottom';
         }
 
-        // Check for unrepaired failures on Top side
-        const topFails = await pool.query(
-            `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
-             JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-             WHERE i.work_order_id = $1
-               AND LOWER(ps.side) = 'top'
-               AND i.process_step = 'Post AOI'
-               AND i.status = 'FAIL'
-               AND ps.is_deleted = false`,
-            [woId]
-        );
-        let hasTopUnrepaired = false;
-        for (const row of topFails.rows) {
-            const reworkCheck = await pool.query(
-                `SELECT ri.id FROM smt_inspections ri
-                 JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
-                 WHERE ri.work_order_id = $1
-                   AND LOWER(rs.side) = 'top'
-                   AND (
-                     (ri.serial_id IS NOT NULL AND ri.serial_id = $2)
-                     OR (ri.scanned_barcode = $3)
-                   )
-                   AND ri.process_step = 'Rework'
-                   AND ri.status = 'PASS'
-                   AND ri.scanned_at > $4
-                   AND rs.is_deleted = false
-                 LIMIT 1`,
-                [woId, row.serial_id, row.scanned_barcode, row.scanned_at]
-            );
-            if (reworkCheck.rows.length === 0) {
-                hasTopUnrepaired = true;
-                break;
-            }
-        }
-        if (hasTopUnrepaired) {
+        // Check Top side
+        const topRes = await pool.query(unrepairedQuery, [woId, 'top']);
+        if (topRes.rows[0]?.has_unrepaired === true) {
             return 'Top';
         }
     }
@@ -362,7 +329,6 @@ export const getEligibleWorkOrdersHelper = async (
     stage: 'Printing' | 'SPI' | 'Pre AOI' | 'Post AOI' | 'Rework' | 'SMT FG'
 ): Promise<any[]> => {
     logger.info(`[Eligibility Debug] Starting eligibility check for stage: ${stage}`);
-    
     const query = `
         SELECT 
             wo.id AS work_order_id,
@@ -551,42 +517,38 @@ export const getEligibleWorkOrdersHelper = async (
                 continue;
             }
 
-            // Check if there are failed barcodes from Post AOI that have not been repaired yet
-            const failCheck = await pool.query(
-                `SELECT i.serial_id, i.scanned_barcode, i.scanned_at FROM smt_inspections i
-                 JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-                 WHERE i.work_order_id = $1
-                   AND LOWER(ps.side) = $2
-                   AND i.process_step = 'Post AOI'
-                   AND i.status = 'FAIL'
-                   AND ps.is_deleted = false`,
+            // Check if there are failed barcodes from Post AOI that have not been repaired yet.
+            // Uses NOT EXISTS instead of an O(n) application-level loop — same logic as resolveReworkSide.
+            const unrepairedFailCheck = await pool.query(
+                `SELECT EXISTS (
+                    SELECT 1
+                    FROM smt_inspections i
+                    JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
+                    WHERE i.work_order_id = $1
+                      AND LOWER(ps.side) = $2
+                      AND i.process_step = 'Post AOI'
+                      AND i.status = 'FAIL'
+                      AND ps.is_deleted = false
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM smt_inspections ri
+                          JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+                          WHERE ri.work_order_id = $1
+                            AND LOWER(rs.side) = $2
+                            AND (
+                                (ri.serial_id IS NOT NULL AND ri.serial_id = i.serial_id)
+                                OR (ri.scanned_barcode = i.scanned_barcode)
+                            )
+                            AND ri.process_step = 'Rework'
+                            AND ri.status = 'PASS'
+                            AND ri.scanned_at > i.scanned_at
+                            AND rs.is_deleted = false
+                      )
+                ) AS has_unrepaired`,
                 [wo.work_order_id, lowerSide]
             );
 
-            let hasEligibleFail = false;
-            for (const row of failCheck.rows) {
-                const reworkCheck = await pool.query(
-                    `SELECT ri.id FROM smt_inspections ri
-                     JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
-                     WHERE ri.work_order_id = $1
-                       AND LOWER(rs.side) = $2
-                       AND (
-                         (ri.serial_id IS NOT NULL AND ri.serial_id = $3)
-                         OR (ri.scanned_barcode = $4)
-                       )
-                       AND ri.process_step = 'Rework'
-                       AND ri.status = 'PASS'
-                       AND ri.scanned_at > $5
-                       AND rs.is_deleted = false
-                     LIMIT 1`,
-                    [wo.work_order_id, lowerSide, row.serial_id, row.scanned_barcode, row.scanned_at]
-                );
-                if (reworkCheck.rows.length === 0) {
-                    hasEligibleFail = true;
-                    break;
-                }
-            }
-
+            const hasEligibleFail = unrepairedFailCheck.rows[0]?.has_unrepaired === true;
             if (!hasEligibleFail) {
                 logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because no failed barcodes require rework for side ${side}`);
             } else {

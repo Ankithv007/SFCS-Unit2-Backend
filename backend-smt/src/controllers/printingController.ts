@@ -256,47 +256,40 @@ export const createPrintingSession = async (req: Request, res: Response) => {
     }
 };
 
-const fetchPrintingSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number) => {
-    const passedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-         FROM smt_inspections 
-         WHERE printing_session_id = $1 AND status = 'PASS'`,
+const fetchPrintingSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number, sessionRow?: any) => {
+    // Single aggregation query replaces 4 separate COUNT queries.
+    // FILTER (WHERE ...) is standard PostgreSQL and executes in one pass over the index.
+    const statsRes = await client.query(
+        `SELECT
+            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS')    AS passed,
+            COUNT(id)                                                    FILTER (WHERE status = 'FAIL')    AS failed,
+            COUNT(id)                                                    FILTER (WHERE status = 'INVALID') AS invalid
+         FROM smt_inspections
+         WHERE printing_session_id = $1`,
         [sessionId]
     );
-    const passed = parseInt(passedRes.rows[0].count, 10) || 0;
-
-    const failedRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE printing_session_id = $1 AND status = 'FAIL'`,
-        [sessionId]
-    );
-    const failed = parseInt(failedRes.rows[0].count, 10) || 0;
-
+    const passed  = parseInt(statsRes.rows[0].passed,  10) || 0;
+    const failed  = parseInt(statsRes.rows[0].failed,  10) || 0;
+    const invalid = parseInt(statsRes.rows[0].invalid, 10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
-    const invalidRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE printing_session_id = $1 AND status = 'INVALID'`,
-        [sessionId]
-    );
-    const invalid = parseInt(invalidRes.rows[0].count, 10) || 0;
+    // duplicate_scan_count is maintained directly on the session row (updated via UPDATE ... SET duplicate_scan_count + 1).
+    // If the caller passes the session row already fetched inside the transaction, read it directly.
+    // Otherwise fall back to a targeted query (avoids a full table re-scan).
+    let duplicate = 0;
+    if (sessionRow !== undefined) {
+        duplicate = sessionRow.duplicate_scan_count || 0;
+    } else {
+        const dupRes = await client.query(
+            `SELECT duplicate_scan_count FROM smt_printing_sessions WHERE id = $1`,
+            [sessionId]
+        );
+        duplicate = dupRes.rows[0]?.duplicate_scan_count || 0;
+    }
 
-    const dupRes = await client.query(
-        `SELECT duplicate_scan_count FROM smt_printing_sessions WHERE id = $1`,
-        [sessionId]
-    );
-    const duplicate = dupRes.rows[0]?.duplicate_scan_count || 0;
-
-    return {
-        passed,
-        failed,
-        pending,
-        invalid,
-        duplicate
-    };
+    return { passed, failed, pending, invalid, duplicate };
 };
+
 
 /**
  * GET /api/smt/printing/sessions
@@ -612,12 +605,13 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             );
         }
 
-        // 2. Fetch work order details
+        // 2. Fetch work order details (quantity + sides in one query — sides used later for double-sided check)
         const woRes = await client.query(
-            `SELECT quantity FROM smt_work_orders WHERE id = $1`,
+            `SELECT quantity, sides FROM smt_work_orders WHERE id = $1`,
             [session.work_order_id]
         );
         const workOrderQty = woRes.rows[0]?.quantity || 0;
+        const workOrderSides = (woRes.rows[0]?.sides || '').trim().toLowerCase();
 
         // 3. Fetch existing scans for this barcode in this session to check for duplicate/repair
         const existingScanRes = await client.query(
@@ -791,11 +785,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         // Case B: Valid Barcode
         const serialRecord = serialRes.rows[0];
 
-        // For double-sided (TOP/BOTTOM) Work Orders, Top side Printing scan requires this SPECIFIC barcode to have completed Bottom side
+        // For double-sided (TOP/BOTTOM) Work Orders, Top side Printing scan requires this SPECIFIC barcode to have completed Bottom side.
+        // Uses workOrderSides already fetched at the top of the function — no extra DB round-trip.
         if (session.side.toLowerCase() === 'top') {
-            const woSidesRes = await client.query(`SELECT sides FROM smt_work_orders WHERE id = $1`, [session.work_order_id]);
-            const woSides = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
-            const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
+            const isDoubleSided = workOrderSides === 'top / bottom' || workOrderSides.includes('/');
             if (isDoubleSided) {
                 const bottomDone = await isBarcodeBottomCompleted(session.work_order_id, serialRecord.id, cleanBarcode);
                 if (!bottomDone) {
@@ -840,15 +833,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             [id]
         );
         const passCount = parseInt(passRes.rows[0].count, 10);
-
-        // Also fetch total processed count for response
-        const processedRes = await client.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status IN ('PASS', 'FAIL')`,
-            [id]
-        );
-        const processedCount = parseInt(processedRes.rows[0].count, 10);
+        // processedCount is no longer separately queried; stats helper covers it
 
         let completed = false;
         if (passCount >= workOrderQty) {
