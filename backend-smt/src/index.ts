@@ -9,6 +9,7 @@ import pool from './config/db';
 import { createLogger } from './utils/logger';
 import { runMigrations } from './db/runMigrations';
 import { ensureUploadDirectoriesExist } from './utils/uploads';
+import { processAutoFgJobs } from './services/autoFgService';
 
 const logger = createLogger('SMT');
 const app = express();
@@ -97,6 +98,17 @@ const startServer = async () => {
         app.listen(PORT, () => {
             logger.info(`SMT Backend Server running on port ${PORT}`);
         });
+
+        // Auto-FG background poller: runs every 5 seconds.
+        // Picks up any overdue pending_auto_fg_jobs and executes them.
+        setInterval(async () => {
+            try {
+                await processAutoFgJobs();
+            } catch (err: any) {
+                logger.error(`AutoFG poller uncaught error: ${err.message}`);
+            }
+        }, 5_000);
+        logger.info('Auto-FG background poller started (interval: 5s).');
     } catch (err: any) {
         logger.error(`Failed to start SMT Backend Server: ${err.message}`);
         process.exit(1);

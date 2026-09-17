@@ -27,4 +27,15 @@ export const backendPool = new Pool({
     connectionTimeoutMillis: 5000,
 });
 
+export const authPool = new Pool({
+    user:     process.env.DB_USER     || 'postgres',
+    host:     process.env.DB_HOST     || 'db',
+    database: process.env.DB_NAME_AUTH || 'sfcs_auth',
+    password: process.env.DB_PASSWORD,
+    port:     parseInt(process.env.DB_PORT || '5432', 10),
+    max:                     5,
+    idleTimeoutMillis:   30000,
+    connectionTimeoutMillis: 5000,
+});
+
 export default pool;

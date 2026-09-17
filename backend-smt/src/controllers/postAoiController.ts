@@ -4,6 +4,7 @@ import { createLogger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
 import { getAutoPopulateDetailsHelper, resolveWorkOrderSide, getEligibleWorkOrdersHelper, hasAnyBarcodeBottomCompleted, ensureStencilLifecycleId } from '../utils/smtHelper';
 import { notifySmtDashboardUpdate } from '../utils/dashboardEmitter';
+import { scheduleAutoFgJob } from '../services/autoFgService';
 
 const logger = createLogger('PostAoiController');
 
@@ -81,8 +82,8 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
                     srl.status AS stencil_status,
                     srl.job_number,
                     srl.thickness_mills,
-                    COALESCE(lc.qty_life_cycle, 100000) AS qty_life_cycle,
-                    COALESCE(lc.balance_life_cycle, 100000) AS remaining_life,
+                    COALESCE(lc.qty_life_cycle, 60000) AS qty_life_cycle,
+                    COALESCE(lc.balance_life_cycle, 60000) AS remaining_life,
                     COALESCE(lc.current_used_life_cycle, 0) AS current_life_count,
                     COALESCE(srl.checked_out_work_order_side, srl.side) AS stencil_side,
                     srl.remarks AS stencil_remarks,
@@ -834,6 +835,56 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
+
+        // ── Automatic SMT-FG scheduling ──────────────────────────────────────
+        // Evaluates whether this Post-AOI PASS is the final applicable stage for the Work Order.
+        // Runs after COMMIT so a failure here cannot affect the Post-AOI record.
+        try {
+            const woSidesRes = await pool.query(
+                `SELECT sides FROM smt_work_orders WHERE id = $1`,
+                [session.work_order_id]
+            );
+            const woSides = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
+            const sessionSide = (session.side || '').trim().toLowerCase();
+
+            let isFinalStage = false;
+            let targetFgSide = 'Top';
+
+            if (woSides === 'bottom') {
+                // BOTTOM-only Work Order: Bottom is the final applicable stage
+                if (sessionSide === 'bottom') {
+                    isFinalStage = true;
+                    targetFgSide = 'Bottom';
+                }
+            } else if (woSides === 'top') {
+                // TOP-only Work Order: Top is the final applicable stage
+                if (sessionSide === 'top') {
+                    isFinalStage = true;
+                    targetFgSide = 'Top';
+                }
+            } else if (woSides === 'top / bottom' || woSides === 'top/bottom' || woSides.includes('/')) {
+                // TOP/BOTTOM Work Order: Bottom pass is intermediate (NO FG). Only Top pass is final stage.
+                if (sessionSide === 'top') {
+                    isFinalStage = true;
+                    targetFgSide = 'Top';
+                }
+            }
+
+            if (isFinalStage) {
+                // Fire-and-forget (scheduleAutoFgJob swallows its own errors)
+                scheduleAutoFgJob(
+                    session.work_order_id,
+                    serial.id,
+                    cleanBarcode,
+                    id,
+                    targetFgSide
+                );
+            }
+        } catch (autoFgErr: any) {
+            logger.warn(`Post-AOI autoFG scheduling error (non-fatal): ${autoFgErr.message}`);
+        }
+        // ────────────────────────────────────────────────────────────────────
+
         notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({
             success: true,

@@ -252,6 +252,12 @@ import {
     getAutoPopulateDetails as getFgAutoPopulateDetails,
     checkBottomCompleted as checkFgBottomCompleted
 } from '../controllers/fgController';
+import {
+    getSmtOperators,
+    getOperatorAssignment,
+    assignOperator,
+    getPendingFgJobs
+} from '../controllers/smtFgOperatorController';
 
 
 const router = express.Router();
@@ -512,6 +518,12 @@ router.get('/rework/sessions/:id/export/pdf-data', authenticateToken, exportRewo
 router.get('/rework/work-orders/:woId/check-bottom', authenticateToken, checkReworkBottomCompleted);
 router.get('/rework/sessions/:id/post-aoi-failed', authenticateToken, getPostAoiFailedBarcodes);
 router.get('/rework/auto-populate-details/:woId', authenticateToken, getReworkAutoPopulateDetails);
+
+// SMT-FG Operator Assignment (Admin Panel)
+router.get('/smt-fg/smt-operators', [authenticateToken, requireRole(['Admin', 'Super Admin'])], getSmtOperators);
+router.get('/smt-fg/pending-fg-jobs', [authenticateToken, requireRole(['Admin', 'Super Admin'])], getPendingFgJobs);
+router.get('/smt-fg/work-orders/:woId/operator-assignment', [authenticateToken, requireRole(['Admin', 'Super Admin'])], getOperatorAssignment);
+router.post('/smt-fg/work-orders/:woId/operator-assignment', [authenticateToken, requireRole(['Admin', 'Super Admin'])], assignOperator);
 
 // SMT FG Workflow
 router.get('/smt-fg/eligible-wos', authenticateToken, getFgEligibleWos);

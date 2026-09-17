@@ -44,7 +44,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                     spis.side,
                     pas.side,
                     poas.side,
-                    rs.side
+                    rs.side,
+                    fgs.side
                 ) AS side
             FROM smt_inspections i
             LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
@@ -52,6 +53,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
             LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
             LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+            LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
             WHERE i.serial_id = $1
             ORDER BY i.scanned_at ASC`,
             [serial.id]
