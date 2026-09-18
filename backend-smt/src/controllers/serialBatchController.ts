@@ -83,6 +83,10 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
             return sendError(res, 404, 'Work Order not found.', 'RESOURCE_NOT_FOUND');
         }
         const workOrder = woRes.rows[0];
+        if (workOrder.has_smt === false) {
+            await client.query('ROLLBACK');
+            return sendError(res, 400, 'This Work Order is Backend only and cannot generate SMT serial batches.', 'INVALID_PROCESS_TYPE');
+        }
 
         // 3. Calculate Cumulative Quantity & Remaining Quantity
         const activeQtyRes = await client.query(`

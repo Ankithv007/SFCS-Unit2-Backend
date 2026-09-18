@@ -156,11 +156,12 @@ export async function syncSmtWorkOrders(options?: { force?: boolean }): Promise<
                     );
                 }
 
-                // 2. Set-based bulk batch creation for any work orders without a batch
+                // 2. Set-based bulk batch creation for any work orders without a batch (only if Backend enabled)
                 await client.query(`
                     INSERT INTO batches (work_order_id, batch_number, current_stage_id, created_by, created_at)
                     SELECT w.id, w.wo_number, $1, w.created_by, w.created_at
                     FROM work_orders w
+                    WHERE (w.has_backend = true OR w.has_backend IS NULL)
                     ON CONFLICT (batch_number) 
                     DO UPDATE SET work_order_id = EXCLUDED.work_order_id
                 `, [firstStageId]);
@@ -294,24 +295,27 @@ export async function syncSingleWorkOrder(identifier: string | number): Promise<
 
             const workOrderId = woRes.rows[0].id;
 
-            const batchRes = await client.query(
-                `INSERT INTO batches (work_order_id, batch_number, current_stage_id, created_by, created_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (batch_number) 
-                 DO UPDATE SET work_order_id = EXCLUDED.work_order_id
-                 RETURNING id`,
-                [workOrderId, wo_number, firstStageId, created_by, created_at]
-            );
-
-            const batchId = batchRes.rows[0].id;
-
-            for (const stageRow of stagesRes.rows) {
-                await client.query(
-                    `INSERT INTO batch_stage_progress (batch_id, stage_id)
-                     VALUES ($1, $2)
-                     ON CONFLICT (batch_id, stage_id) DO NOTHING`,
-                    [batchId, stageRow.id]
+            if (has_backend) {
+                const batchRes = await client.query(
+                    `INSERT INTO batches (work_order_id, batch_number, current_stage_id, created_by, created_at)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (batch_number) 
+                     DO UPDATE SET work_order_id = EXCLUDED.work_order_id
+                     RETURNING id`,
+                    [workOrderId, wo_number, firstStageId, created_by, created_at]
                 );
+
+                const batchId = batchRes.rows[0]?.id;
+                if (batchId) {
+                    for (const stageRow of stagesRes.rows) {
+                        await client.query(
+                            `INSERT INTO batch_stage_progress (batch_id, stage_id)
+                             VALUES ($1, $2)
+                             ON CONFLICT (batch_id, stage_id) DO NOTHING`,
+                            [batchId, stageRow.id]
+                        );
+                    }
+                }
             }
 
             await client.query('COMMIT');

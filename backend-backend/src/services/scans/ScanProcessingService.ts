@@ -93,13 +93,22 @@ export class ScanProcessingService {
 
             // 3. Fetch the Unit to validate transitions (Row-locked for concurrency safety)
             const unitRes = await client.query(`
-                SELECT u.*, b.batch_number as unit_batch_number, w.wo_number as unit_wo_number 
+                SELECT u.*, b.batch_number as unit_batch_number, w.wo_number as unit_wo_number, w.has_backend 
                 FROM units u
                 LEFT JOIN batches b ON u.batch_id = b.id
                 LEFT JOIN work_orders w ON b.work_order_id = w.id
                 WHERE u.barcode = $1
                 FOR UPDATE OF u`, [payload.barcode]);
             const unit = unitRes.rows.length > 0 ? unitRes.rows[0] : null;
+
+            if (unit && unit.has_backend === false) {
+                throw new ValidationError({
+                    errorCode: 'BACKEND_DISABLED',
+                    message: 'This Work Order is SMT only and cannot be processed in Backend.',
+                    workOrder: unit.unit_wo_number || 'Unknown WO',
+                    severity: 'error'
+                });
+            }
 
             // 4. Validate Batch Match
             if (unit && unit.batch_id && unit.batch_id !== batchId && payload.status !== 'RESOLVED') {

@@ -134,14 +134,17 @@ export const getLifecycleWorkOrders = async (req: Request, res: Response) => {
                 GROUP BY work_order_id
             ) l ON wo.id = l.work_order_id
             WHERE 
-                l.lifecycle_count IS NULL
-                OR (
-                    (LOWER(wo.sides) = 'top' OR LOWER(wo.sides) = 'bottom') AND l.lifecycle_count < 1
-                )
-                OR (
-                    (LOWER(wo.sides) LIKE '%/%' OR LOWER(wo.sides) = 'top / bottom' OR LOWER(wo.sides) = 'top/bottom') 
-                    AND l.has_combined IS NOT TRUE 
-                    AND l.lifecycle_count < 2
+                (wo.has_smt = true OR wo.has_smt IS NULL)
+                AND (
+                    l.lifecycle_count IS NULL
+                    OR (
+                        (LOWER(wo.sides) = 'top' OR LOWER(wo.sides) = 'bottom') AND l.lifecycle_count < 1
+                    )
+                    OR (
+                        (LOWER(wo.sides) LIKE '%/%' OR LOWER(wo.sides) = 'top / bottom' OR LOWER(wo.sides) = 'top/bottom') 
+                        AND l.has_combined IS NOT TRUE 
+                        AND l.lifecycle_count < 2
+                    )
                 )
             ORDER BY wo.created_at DESC
         `;

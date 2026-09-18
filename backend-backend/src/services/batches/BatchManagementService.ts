@@ -14,9 +14,18 @@ export class BatchManagementService {
     ): Promise<number | null> {
         try {
             if (workOrderId) {
-                const woCheck = await pool.query('SELECT id, selected_stages FROM work_orders WHERE id = $1', [workOrderId]);
+                const woCheck = await pool.query('SELECT id, selected_stages, has_backend FROM work_orders WHERE id = $1', [workOrderId]);
                 if (woCheck.rows.length === 0 || !woCheck.rows[0].selected_stages) {
                     await syncSingleWorkOrder(workOrderId);
+                }
+                const woRecheck = await pool.query('SELECT id, has_backend FROM work_orders WHERE id = $1', [workOrderId]);
+                if (woRecheck.rows.length > 0 && woRecheck.rows[0].has_backend === false) {
+                    throw new Error('Work Order is not configured for Backend processing.');
+                }
+            } else if (batchNumber) {
+                const woByNum = await pool.query('SELECT id, has_backend FROM work_orders WHERE wo_number = $1', [batchNumber]);
+                if (woByNum.rows.length > 0 && woByNum.rows[0].has_backend === false) {
+                    throw new Error('Work Order is not configured for Backend processing.');
                 }
             }
 
@@ -176,7 +185,7 @@ export class BatchManagementService {
                 JOIN work_orders w ON b.work_order_id = w.id
                 JOIN units u ON u.batch_id = b.id
                 JOIN production_stages ps ON u.failed_stage_id = ps.id
-                WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilter}
+                WHERE b.is_deleted = FALSE AND (w.has_backend = true OR w.has_backend IS NULL) ${statusFilter} ${searchFilter}
                   AND u.current_status = '${stageCode}'
                   AND ($1::int IS NULL OR true)
                 GROUP BY b.id, w.id, ps.id, ps.stage_name
@@ -190,7 +199,7 @@ export class BatchManagementService {
                 JOIN work_orders w ON b.work_order_id = w.id
                 JOIN units u ON u.batch_id = b.id
                 JOIN production_stages ps ON u.failed_stage_id = ps.id
-                WHERE b.is_deleted = FALSE ${statusFilter} ${searchFilterCount}
+                WHERE b.is_deleted = FALSE AND (w.has_backend = true OR w.has_backend IS NULL) ${statusFilter} ${searchFilterCount}
                   AND u.current_status = '${stageCode}'
                   AND ($1::int IS NULL OR true)
             `;
@@ -224,7 +233,7 @@ export class BatchManagementService {
             FROM batches b
             JOIN work_orders w ON b.work_order_id = w.id
             LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
-            WHERE b.is_deleted = FALSE ${statusFilter} ${stageInRoutingFilter} ${searchFilter}
+            WHERE b.is_deleted = FALSE AND (w.has_backend = true OR w.has_backend IS NULL) ${statusFilter} ${stageInRoutingFilter} ${searchFilter}
             ORDER BY b.created_at DESC LIMIT $2::int OFFSET $3::int
         `;
 
@@ -234,7 +243,7 @@ export class BatchManagementService {
                 SELECT COUNT(*) as count FROM batches b 
                 JOIN work_orders w ON b.work_order_id = w.id
                 LEFT JOIN batch_stage_progress p ON b.id = p.batch_id AND p.stage_id = $1
-                WHERE b.is_deleted = FALSE ${statusFilter} ${stageInRoutingFilter} ${searchFilterCount}
+                WHERE b.is_deleted = FALSE AND (w.has_backend = true OR w.has_backend IS NULL) ${statusFilter} ${stageInRoutingFilter} ${searchFilterCount}
             `, searchParams.length > 0 ? [stageId, searchParams[0]] : [stageId])
         ]);
 

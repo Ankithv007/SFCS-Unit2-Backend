@@ -381,7 +381,8 @@ export const getQmsWorkOrders = async (req: Request, res: Response) => {
         const result = await pool.query(`
             SELECT id as work_order_number, po_id as po_number, product_name, product_description, quantity, remark as warehouse_remarks
             FROM smt_work_orders
-            WHERE id NOT IN (
+            WHERE (has_smt = true OR has_smt IS NULL)
+              AND id NOT IN (
                 SELECT work_order_number
                 FROM qms_master
                 WHERE is_deleted = false

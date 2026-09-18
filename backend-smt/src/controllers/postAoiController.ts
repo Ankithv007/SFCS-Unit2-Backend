@@ -218,9 +218,15 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
 
         // Check Work Order side and sequence
         const woRes = await client.query(
-            `SELECT sides FROM smt_work_orders WHERE id = $1`,
+            `SELECT sides, has_smt FROM smt_work_orders WHERE id = $1`,
             [work_order_id]
         );
+        if (woRes.rows.length === 0 || woRes.rows[0].has_smt === false) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                message: `Work Order ${work_order_id} is not configured for SMT processing.`
+            });
+        }
         if (woRes.rows.length > 0) {
             const woSides = (woRes.rows[0].sides || '').trim().toLowerCase();
             const isDoubleSided = woSides === 'top / bottom' || woSides.includes('/');
@@ -844,7 +850,8 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 `SELECT sides FROM smt_work_orders WHERE id = $1`,
                 [session.work_order_id]
             );
-            const woSides = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
+            const woSidesRaw = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
+            const woSides = woSidesRaw.replace(/\s*\/\s*/g, '/');
             const sessionSide = (session.side || '').trim().toLowerCase();
 
             let isFinalStage = false;
@@ -862,22 +869,31 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     isFinalStage = true;
                     targetFgSide = 'Top';
                 }
-            } else if (woSides === 'top / bottom' || woSides === 'top/bottom' || woSides.includes('/')) {
+            } else if (woSides === 'top/bottom' || woSides.includes('/')) {
                 // TOP/BOTTOM Work Order: Bottom pass is intermediate (NO FG). Only Top pass is final stage.
                 if (sessionSide === 'top') {
                     isFinalStage = true;
                     targetFgSide = 'Top';
                 }
+            } else {
+                // Any other side configuration: match session side
+                if (sessionSide === woSides || !woSides) {
+                    isFinalStage = true;
+                    targetFgSide = session.side || 'Top';
+                }
             }
 
             if (isFinalStage) {
+                const postAoiOperatorCode = operator?.name && operator.name !== 'Unknown User' ? operator.name : 'VEP01098';
+
                 // Fire-and-forget (scheduleAutoFgJob swallows its own errors)
                 scheduleAutoFgJob(
                     session.work_order_id,
                     serial.id,
                     cleanBarcode,
                     id,
-                    targetFgSide
+                    targetFgSide,
+                    postAoiOperatorCode
                 );
             }
         } catch (autoFgErr: any) {
@@ -1806,9 +1822,9 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
 export const checkBottomCompleted = async (req: Request, res: Response) => {
     const { woId } = req.params;
     try {
-        const woRes = await pool.query('SELECT sides FROM smt_work_orders WHERE id = $1', [woId]);
-        if (woRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Work Order not found.' });
+        const woRes = await pool.query('SELECT sides, has_smt FROM smt_work_orders WHERE id = $1', [woId]);
+        if (woRes.rows.length === 0 || woRes.rows[0].has_smt === false) {
+            return res.status(404).json({ message: 'Work Order not found or not configured for SMT.' });
         }
         const resolvedSide = await resolveWorkOrderSide(woId, woRes.rows[0].sides);
         return res.status(200).json({ completed: resolvedSide === 'Top' });

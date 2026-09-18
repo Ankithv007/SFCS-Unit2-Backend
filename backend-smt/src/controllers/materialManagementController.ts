@@ -97,7 +97,8 @@ export const getEligibleWorkOrders = async (req: Request, res: Response) => {
                 LIMIT 1
             ) br ON true
             WHERE qm.is_deleted = false 
-              AND qm.status = 'Active' 
+              AND qm.status = 'Active'
+              AND (wo.has_smt = true OR wo.has_smt IS NULL) 
               AND NOT EXISTS (
                   SELECT 1 
                   FROM material_management mm 

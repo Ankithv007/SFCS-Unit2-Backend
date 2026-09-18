@@ -136,33 +136,32 @@ export class WorkflowEngineService {
         let isExplicitlyProvided = rawSelected !== undefined;
 
         let woRow: any = null;
+        if (workOrderOrBatch.workOrderId) {
+            const res = await db.query(
+                'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE id = $1',
+                [workOrderOrBatch.workOrderId]
+            );
+            if (res.rows.length > 0) woRow = res.rows[0];
+        } else if (workOrderOrBatch.batchId) {
+            const res = await db.query(
+                `SELECT w.id, w.wo_number, w.selected_stages, w.has_backend 
+                 FROM batches b 
+                 JOIN work_orders w ON b.work_order_id = w.id 
+                 WHERE b.id = $1`,
+                [workOrderOrBatch.batchId]
+            );
+            if (res.rows.length > 0) woRow = res.rows[0];
+        } else if (workOrderOrBatch.woNumber) {
+            const res = await db.query(
+                'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE wo_number = $1',
+                [workOrderOrBatch.woNumber]
+            );
+            if (res.rows.length > 0) woRow = res.rows[0];
+        }
+
+        const woNum = woRow?.wo_number || workOrderOrBatch.woNumber;
         if (!isExplicitlyProvided) {
-
-            if (workOrderOrBatch.workOrderId) {
-                const res = await db.query(
-                    'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE id = $1',
-                    [workOrderOrBatch.workOrderId]
-                );
-                if (res.rows.length > 0) woRow = res.rows[0];
-            } else if (workOrderOrBatch.batchId) {
-                const res = await db.query(
-                    `SELECT w.id, w.wo_number, w.selected_stages, w.has_backend 
-                     FROM batches b 
-                     JOIN work_orders w ON b.work_order_id = w.id 
-                     WHERE b.id = $1`,
-                    [workOrderOrBatch.batchId]
-                );
-                if (res.rows.length > 0) woRow = res.rows[0];
-            } else if (workOrderOrBatch.woNumber) {
-                const res = await db.query(
-                    'SELECT id, wo_number, selected_stages, has_backend FROM work_orders WHERE wo_number = $1',
-                    [workOrderOrBatch.woNumber]
-                );
-                if (res.rows.length > 0) woRow = res.rows[0];
-            }
-
             // Fallback: If not found or selected_stages is null, check smt_work_orders if woNumber is known
-            const woNum = woRow?.wo_number || workOrderOrBatch.woNumber;
             if (woRow && woRow.selected_stages !== null && woRow.selected_stages !== undefined) {
                 rawSelected = woRow.selected_stages;
             } else if (woNum) {
@@ -186,7 +185,7 @@ export class WorkflowEngineService {
         if (woRow && woRow.has_backend === false) {
             throw new ValidationError({
                 errorCode: 'BACKEND_DISABLED',
-                message: 'Backend process routing is disabled for this Work Order (SMT Only).',
+                message: `Work Order ${woRow.wo_number || ''} is not configured for Backend processing.`,
                 severity: 'error'
             });
         }

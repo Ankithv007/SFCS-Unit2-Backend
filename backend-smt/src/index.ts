@@ -99,7 +99,7 @@ const startServer = async () => {
             logger.info(`SMT Backend Server running on port ${PORT}`);
         });
 
-        // Auto-FG background poller: runs every 5 seconds.
+        // Auto-FG background poller: runs every 2 seconds.
         // Picks up any overdue pending_auto_fg_jobs and executes them.
         setInterval(async () => {
             try {
@@ -107,8 +107,8 @@ const startServer = async () => {
             } catch (err: any) {
                 logger.error(`AutoFG poller uncaught error: ${err.message}`);
             }
-        }, 5_000);
-        logger.info('Auto-FG background poller started (interval: 5s).');
+        }, 2_000);
+        logger.info('Auto-FG background poller started (interval: 2s).');
     } catch (err: any) {
         logger.error(`Failed to start SMT Backend Server: ${err.message}`);
         process.exit(1);

@@ -77,6 +77,13 @@ export const createWorkOrder = async (req: Request, res: Response) => {
     const finalHasSmt = typeof has_smt === 'boolean' ? has_smt : typeof hasSmt === 'boolean' ? hasSmt : true;
     const finalHasBackend = typeof has_backend === 'boolean' ? has_backend : typeof hasBackend === 'boolean' ? hasBackend : true;
 
+    if (!finalHasSmt && !finalHasBackend) {
+        return res.status(400).json({
+            success: false,
+            message: "Please select at least one process: SMT or Backend."
+        });
+    }
+
     let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
 
     if (finalHasBackend) {
@@ -144,20 +151,32 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         });
     }
 
-    // Validate Sides
-    if (!sides) {
-        return res.status(400).json({
-            success: false,
-            message: "Sides is required"
-        });
+    // Validate Sides & Line ID
+    let finalSides = sides;
+    let finalLineId = line_id;
+    if (finalHasSmt) {
+        if (!finalSides) {
+            return res.status(400).json({
+                success: false,
+                message: "Sides is required when SMT is enabled."
+            });
+        }
+        const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
+        if (!allowedSides.includes(finalSides)) {
+            return res.status(400).json({
+                success: false,
+                message: "Sides must be Top, Bottom, or Top / Bottom"
+            });
+        }
+        finalLineId = finalLineId || 'SMT-1';
+    } else {
+        finalSides = finalSides || 'N/A';
+        finalLineId = finalLineId || 'N/A';
     }
-    const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
-    if (!allowedSides.includes(sides)) {
-        return res.status(400).json({
-            success: false,
-            message: "Sides must be Top, Bottom, or Top / Bottom"
-        });
-    }
+
+    const finalAreaId = area_id || 'SMT';
+    const finalPriority = priority || 'medium';
+    const finalPanelQty = panel_quantity || quantity || 0;
 
     try {
         let poName: string | null = null;
@@ -186,14 +205,14 @@ export const createWorkOrder = async (req: Request, res: Response) => {
             RETURNING *`,
             [
                 normalizedWorkOrderId,
-                area_id,
-                line_id,
-                priority,
+                finalAreaId,
+                finalLineId,
+                finalPriority,
                 product_name,
                 product_description,
                 quantity,
-                panel_quantity,
-                sides,
+                finalPanelQty,
+                finalSides,
                 finalCreatedBy,
                 barcode_source || 'GENERATED',
                 poName,
@@ -205,8 +224,8 @@ export const createWorkOrder = async (req: Request, res: Response) => {
                 finalCustomerName || null,
                 finalModelName || null,
                 finalStages,
-                finalHasSmt,
-                finalHasBackend
+                Boolean(finalHasSmt),
+                Boolean(finalHasBackend)
             ]
         );
 
@@ -248,6 +267,7 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
                 ), 0)::int as generated_count
             FROM smt_work_orders wo
             WHERE wo.status NOT IN ('Cancelled', 'Deleted', 'Completed')
+              AND (wo.has_smt = true OR wo.has_smt IS NULL)
               AND COALESCE((
                   SELECT GREATEST(
                       (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status != 'Cancelled'),
@@ -272,11 +292,11 @@ export const getWorkOrders = async (req: Request, res: Response) => {
     // Backwards compatibility: If page and limit query parameters are missing, return legacy array
     if (!page && !limit) {
         try {
-            let queryText = 'SELECT * FROM smt_work_orders';
+            let queryText = 'SELECT * FROM smt_work_orders WHERE (has_smt = true OR has_smt IS NULL)';
             const params: any[] = [];
 
             if (search) {
-                queryText += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
+                queryText += ' AND (id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1)';
                 params.push(`%${(search as string).trim()}%`);
             }
             queryText += ' ORDER BY created_at DESC';
@@ -302,13 +322,13 @@ export const getWorkOrders = async (req: Request, res: Response) => {
         const limitNum = parseInt(limit as string) || 15;
         const offset = (pageNum - 1) * limitNum;
 
-        let countQuery = 'SELECT COUNT(*) FROM smt_work_orders';
-        let dataQuery = 'SELECT * FROM smt_work_orders';
+        let countQuery = 'SELECT COUNT(*) FROM smt_work_orders WHERE (has_smt = true OR has_smt IS NULL)';
+        let dataQuery = 'SELECT * FROM smt_work_orders WHERE (has_smt = true OR has_smt IS NULL)';
         const params: any[] = [];
 
         if (search) {
-            countQuery += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
-            dataQuery += ' WHERE id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1';
+            countQuery += ' AND (id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1)';
+            dataQuery += ' AND (id ILIKE $1 OR po_id ILIKE $1 OR remark ILIKE $1)';
             params.push(`%${(search as string).trim()}%`);
         }
 
@@ -380,6 +400,13 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
             return res.status(404).json({ success: false, error: 'Work order not found', code: 'WORK_ORDER_NOT_FOUND' });
         }
         const row = result.rows[0];
+        if (row.has_smt === false) {
+            return res.status(404).json({
+                success: false,
+                error: 'Work order is not configured for SMT processing',
+                code: 'WORK_ORDER_NOT_FOUND'
+            });
+        }
         if (!canAccessPo) {
             row.po_document_name = null;
             row.po_document_path = null;
@@ -511,6 +538,13 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
     const finalHasSmt = typeof has_smt === 'boolean' ? has_smt : typeof hasSmt === 'boolean' ? hasSmt : true;
     const finalHasBackend = typeof has_backend === 'boolean' ? has_backend : typeof hasBackend === 'boolean' ? hasBackend : true;
 
+    if (!finalHasSmt && !finalHasBackend) {
+        return res.status(400).json({
+            success: false,
+            message: "Please select at least one process: SMT or Backend."
+        });
+    }
+
     let stagesArr = Array.isArray(selected_stages) ? selected_stages : Array.isArray(selectedStages) ? selectedStages : null;
 
     if (finalHasBackend) {
@@ -556,7 +590,28 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
         });
     }
 
-    if (!line_id || !priority || !product_name || !product_description || !quantity || !panel_quantity || !sides) {
+    let finalSides = sides;
+    let finalLineId = line_id;
+    if (finalHasSmt) {
+        if (!finalLineId || !finalSides) {
+            return res.status(400).json({
+                success: false,
+                message: "Line ID and Sides are required when SMT is enabled."
+            });
+        }
+        const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
+        if (!allowedSides.includes(finalSides)) {
+            return res.status(400).json({
+                success: false,
+                message: "Sides must be Top, Bottom, or Top / Bottom"
+            });
+        }
+    } else {
+        finalSides = finalSides || 'N/A';
+        finalLineId = finalLineId || 'N/A';
+    }
+
+    if (!priority || !product_name || !product_description || !quantity || !panel_quantity) {
         return res.status(400).json({
             success: false,
             message: "All mandatory fields are required."
@@ -567,14 +622,6 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
         return res.status(400).json({
             success: false,
             message: "Quantities must be greater than 0"
-        });
-    }
-
-    const allowedSides = ['Top', 'Bottom', 'Top / Bottom'];
-    if (!allowedSides.includes(sides)) {
-        return res.status(400).json({
-            success: false,
-            message: "Sides must be Top, Bottom, or Top / Bottom"
         });
     }
 
@@ -637,13 +684,13 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
             [
                 normalizedPoId,
                 remark || null,
-                line_id,
+                finalLineId,
                 priority,
                 product_name,
                 product_description,
                 quantity,
                 panel_quantity,
-                sides,
+                finalSides,
                 poName,
                 poPath,
                 poType,
@@ -651,8 +698,8 @@ export const updateWorkOrder = async (req: Request, res: Response) => {
                 finalCustomerName || null,
                 finalModelName || null,
                 finalStages,
-                finalHasSmt,
-                finalHasBackend,
+                Boolean(finalHasSmt),
+                Boolean(finalHasBackend),
                 id
             ]
         );
@@ -864,7 +911,7 @@ export const getRegisteredWorkOrders = async (req: Request, res: Response) => {
                       AND latest.status = 'FAIL'
                 ) as active_failed_count
             FROM smt_work_orders wo
-            WHERE 1=1
+            WHERE (wo.has_smt = true OR wo.has_smt IS NULL)
         `;
         const params: any[] = [];
 
@@ -1057,7 +1104,10 @@ export const getSerials = async (req: Request, res: Response) => {
                 ORDER BY serial_id, scanned_at DESC
             ) last_insp ON sn.id = last_insp.serial_id
         `;
-        const conditions: string[] = ["(wo.is_registered = true OR sn.id IS NOT NULL)"];
+        const conditions: string[] = [
+            "(wo.has_smt = true OR wo.has_smt IS NULL)",
+            "(wo.is_registered = true OR sn.id IS NOT NULL)"
+        ];
 
         if (work_order_id) {
             params.push(work_order_id);
@@ -1684,7 +1734,7 @@ export const getWorkOrderHistory = async (req: Request, res: Response) => {
                 WHERE latest.process_step = 'SMT FG' AND latest.status = 'PASS'
                 GROUP BY sn.work_order_id
             ) passed ON wo.id = passed.work_order_id
-            WHERE wo.area_id = $1
+            WHERE wo.area_id = $1 AND (wo.has_smt = true OR wo.has_smt IS NULL)
         `;
         const params: any[] = [areaId || 'SMT'];
 

@@ -97,59 +97,43 @@ export const scheduleAutoFgJob = async (
     serialId: number,
     scannedBarcode: string,
     postAoiSessionId: string,
-    targetSide: string = 'Top'
+    targetSide: string = 'Top',
+    operatorEmployeeCode: string = 'VEP01098'
 ): Promise<void> => {
     try {
         const sideNorm = (targetSide || 'Top').trim().toLowerCase() === 'bottom' ? 'Bottom' : 'Top';
+        const targetEmployeeCode = (operatorEmployeeCode || 'VEP01098').trim();
 
-        // 1. Look up the currently assigned SMT-FG operator for this WO
-        let assignmentRes = await pool.query(
-            `SELECT user_id, employee_code, employee_name
-             FROM smt_fg_operator_assignments
-             WHERE work_order_id = $1`,
-            [workOrderId]
-        );
-
+        // Look up operator in sfcs_auth if available
         let assignedOp: AssignedOperator | null = null;
-
-        if (assignmentRes.rows.length > 0) {
-            const row = assignmentRes.rows[0];
-            const validOp = await validateSmtOperator(row.user_id);
-            if (validOp) {
+        try {
+            const res = await authPool.query(
+                `SELECT u.id, u.employee_code, u.name AS employee_name
+                 FROM users u
+                 WHERE (u.employee_code = $1 OR u.name = $1)
+                   AND (u.deleted_at IS NULL)
+                   AND (u.status = 'active' OR u.status IS NULL)
+                 LIMIT 1`,
+                [targetEmployeeCode]
+            );
+            if (res.rows.length > 0) {
                 assignedOp = {
-                    user_id: row.user_id,
-                    employee_code: row.employee_code,
-                    employee_name: row.employee_name,
+                    user_id: res.rows[0].id,
+                    employee_code: res.rows[0].employee_code || targetEmployeeCode,
+                    employee_name: res.rows[0].employee_name || targetEmployeeCode,
                 };
-            } else {
-                logger.warn(
-                    `[AutoFG] WO ${workOrderId}: assigned operator user_id=${row.user_id} ` +
-                    `(${row.employee_code}) is no longer active or in SMT department.`
-                );
             }
+        } catch (authErr: any) {
+            logger.warn(`[AutoFG] auth query for ${targetEmployeeCode}: ${authErr.message}`);
         }
 
-        // If no operator is pre-assigned by Admin, auto-assign the active SMT department operator
-        // to smt_fg_operator_assignments so production never stalls and operator is tracked on the WO.
         if (!assignedOp) {
-            const defaultOp = await getDefaultSmtOperator();
-            if (defaultOp) {
-                await pool.query(
-                    `INSERT INTO smt_fg_operator_assignments (
-                        work_order_id, user_id, employee_code, employee_name,
-                        assigned_by, assigned_by_id, updated_at
-                     ) VALUES ($1, $2, $3, $4, 'System', $2, NOW())
-                     ON CONFLICT (work_order_id) DO NOTHING`,
-                    [workOrderId, defaultOp.user_id, defaultOp.employee_code, defaultOp.employee_name]
-                );
-                assignedOp = defaultOp;
-                logger.info(
-                    `[AutoFG] WO ${workOrderId}: Auto-assigned eligible SMT operator ${defaultOp.employee_code} (${defaultOp.employee_name}).`
-                );
-            }
+            assignedOp = {
+                user_id: 1,
+                employee_code: targetEmployeeCode,
+                employee_name: targetEmployeeCode,
+            };
         }
-
-        const status = assignedOp ? 'PENDING' : 'NEEDS_OPERATOR';
 
         // 2. Random delay: 20–40 seconds per barcode
         const delaySec = Math.floor(Math.random() * 21) + 20; // [20, 40]
@@ -180,11 +164,11 @@ export const scheduleAutoFgJob = async (
                 serialId,
                 scannedBarcode,
                 postAoiSessionId,
-                assignedOp?.user_id ?? null,
-                assignedOp?.employee_code ?? null,
-                assignedOp?.employee_name ?? null,
+                assignedOp.user_id,
+                assignedOp.employee_code,
+                assignedOp.employee_name,
                 executeAfter.toISOString(),
-                status,
+                'PENDING',
                 sideNorm,
             ]
         );
@@ -198,7 +182,7 @@ Serial ID: ${serialId}
 Post-AOI inspection ID: ${postAoiSessionId}
 FG side: ${sideNorm}
 Execute after: ${executeAfter.toISOString()} (${delaySec}s delay)
-Operator: ${assignedOp ? `${assignedOp.employee_name} (${assignedOp.employee_code})` : 'MISSING (NEEDS_OPERATOR)'}
+Operator: ${assignedOp.employee_name} (${assignedOp.employee_code})
 ==================================================`);
 
     } catch (err: any) {
@@ -255,8 +239,8 @@ const processOneJob = async (client: any, job: any): Promise<void> => {
     const jobSide = (job.side || 'Top').trim().toLowerCase() === 'bottom' ? 'Bottom' : 'Top';
 
     let assignedUserId = job.assigned_user_id;
-    let assignedEmployeeCode = job.assigned_employee_code;
-    let assignedEmployeeName = job.assigned_employee_name;
+    let assignedEmployeeCode = job.assigned_employee_code || 'VEP01098';
+    let assignedEmployeeName = job.assigned_employee_name || assignedEmployeeCode;
 
     console.log(`
 ==================================================
@@ -264,69 +248,14 @@ AUTO-FG EXECUTING
 WO: ${workOrderId}
 Barcode: ${scannedBarcode}
 Job ID: ${jobId}
+Operator: ${assignedEmployeeName} (${assignedEmployeeCode})
 ==================================================`);
 
     try {
-        // 1. Operator verification & auto-recovery
-        let validOp = false;
-        if (assignedUserId) {
-            validOp = await validateSmtOperator(assignedUserId);
-        }
-
-        if (!validOp) {
-            // Check smt_fg_operator_assignments
-            const assignRes = await client.query(
-                `SELECT user_id, employee_code, employee_name FROM smt_fg_operator_assignments WHERE work_order_id = $1`,
-                [workOrderId]
-            );
-            if (assignRes.rows.length > 0) {
-                const row = assignRes.rows[0];
-                if (await validateSmtOperator(row.user_id)) {
-                    assignedUserId = row.user_id;
-                    assignedEmployeeCode = row.employee_code;
-                    assignedEmployeeName = row.employee_name;
-                    validOp = true;
-                }
-            }
-        }
-
-        if (!validOp) {
-            // Auto-resolve eligible SMT department operator
-            const defaultOp = await getDefaultSmtOperator();
-            if (defaultOp) {
-                assignedUserId = defaultOp.user_id;
-                assignedEmployeeCode = defaultOp.employee_code;
-                assignedEmployeeName = defaultOp.employee_name;
-                validOp = true;
-                await client.query(
-                    `INSERT INTO smt_fg_operator_assignments (
-                        work_order_id, user_id, employee_code, employee_name,
-                        assigned_by, assigned_by_id, updated_at
-                     ) VALUES ($1, $2, $3, $4, 'System', $2, NOW())
-                     ON CONFLICT (work_order_id) DO UPDATE
-                     SET user_id = EXCLUDED.user_id,
-                         employee_code = EXCLUDED.employee_code,
-                         employee_name = EXCLUDED.employee_name,
-                         updated_at = NOW()`,
-                    [workOrderId, defaultOp.user_id, defaultOp.employee_code, defaultOp.employee_name]
-                );
-            }
-        }
-
-        if (!validOp) {
-            logger.warn(`[AutoFG] Job ${jobId} has no valid assigned SMT operator. Setting status to NEEDS_OPERATOR.`);
-            await client.query(
-                `UPDATE pending_auto_fg_jobs SET status='NEEDS_OPERATOR', updated_at=NOW() WHERE id=$1`,
-                [jobId]
-            );
-            console.log(`
-==================================================
-AUTO-FG FAILED
-WO: ${workOrderId}
-Barcode: ${scannedBarcode}
-Reason: No active SMT-FG operator assigned or available in SMT department.
-==================================================`);
-            return;
+        // Ensure operator details are populated
+        if (!assignedEmployeeCode) {
+            assignedEmployeeCode = 'VEP01098';
+            assignedEmployeeName = 'VEP01098';
         }
 
         // 2. Get WO details

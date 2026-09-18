@@ -4,17 +4,26 @@ import { syncSmtWorkOrders, syncSingleWorkOrder, invalidateSyncCache } from '../
 import { WorkflowEngineService } from '../services/workflow/WorkflowEngineService';
 
 export const createWorkOrder = async (req: Request, res: Response) => {
-    const { wo_number, quantity, customer_name, model, selected_stages, selectedStages } = req.body;
+    const { wo_number, quantity, customer_name, model, selected_stages, selectedStages, has_smt, has_backend } = req.body;
     const stagesInput = selected_stages !== undefined ? selected_stages : selectedStages;
     const created_by = (req as any).user?.username || req.body.created_by || 'admin';
 
-    // Validate selected_stages if provided
+    const finalHasSmt = has_smt !== undefined ? Boolean(has_smt) : false;
+    const finalHasBackend = has_backend !== undefined ? Boolean(has_backend) : true;
+
+    if (!finalHasSmt && !finalHasBackend) {
+        return res.status(400).json({ error: "Please select at least one process: SMT or Backend." });
+    }
+
+    // Validate selected_stages if provided and Backend enabled
     let sanitizedStages: any = null;
-    if (stagesInput !== undefined && stagesInput !== null) {
-        if (!Array.isArray(stagesInput) || stagesInput.length === 0) {
-            return res.status(400).json({ error: "At least one production stage must be selected." });
+    if (finalHasBackend) {
+        if (stagesInput !== undefined && stagesInput !== null) {
+            if (!Array.isArray(stagesInput) || stagesInput.length === 0) {
+                return res.status(400).json({ error: "At least one production stage must be selected when Backend is enabled." });
+            }
+            sanitizedStages = JSON.stringify(stagesInput);
         }
-        sanitizedStages = JSON.stringify(stagesInput);
     }
 
     const client = await pool.connect();
@@ -22,47 +31,50 @@ export const createWorkOrder = async (req: Request, res: Response) => {
         await client.query('BEGIN');
 
         const woQuery = `
-            INSERT INTO work_orders (wo_number, quantity, customer_name, model, created_by, selected_stages)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO work_orders (wo_number, quantity, customer_name, model, created_by, selected_stages, has_smt, has_backend)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
             RETURNING *
         `;
-        const woResult = await client.query(woQuery, [wo_number, quantity, customer_name, model, created_by, sanitizedStages]);
+        const woResult = await client.query(woQuery, [wo_number, quantity, customer_name, model, created_by, sanitizedStages, finalHasSmt, finalHasBackend]);
         const newWo = woResult.rows[0];
 
-        // Dynamic route resolution for initial batch
-        let firstStageId = 1;
-        try {
-            const activeRoute = await WorkflowEngineService.resolveActiveRoute({
-                workOrderId: newWo.id,
-                stagesList: stagesInput,
-                dbClient: client
-            });
-            if (activeRoute && activeRoute.length > 0) {
-                firstStageId = activeRoute[0].id;
+        let newBatch = null;
+        if (finalHasBackend) {
+            // Dynamic route resolution for initial batch
+            let firstStageId = 1;
+            try {
+                const activeRoute = await WorkflowEngineService.resolveActiveRoute({
+                    workOrderId: newWo.id,
+                    stagesList: stagesInput,
+                    dbClient: client
+                });
+                if (activeRoute && activeRoute.length > 0) {
+                    firstStageId = activeRoute[0].id;
+                }
+            } catch (routeErr: any) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: `Routing configuration error: ${routeErr.message}` });
             }
-        } catch (routeErr: any) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ error: `Routing configuration error: ${routeErr.message}` });
-        }
 
-        // 2. Create the associated batch in batches table
-        const batchQuery = `
-            INSERT INTO batches (batch_number, work_order_id, current_stage_id, created_by)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *
-        `;
-        const batchResult = await client.query(batchQuery, [wo_number, newWo.id, firstStageId, created_by]);
-        const newBatch = batchResult.rows[0];
+            // 2. Create the associated batch in batches table
+            const batchQuery = `
+                INSERT INTO batches (batch_number, work_order_id, current_stage_id, created_by)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+            `;
+            const batchResult = await client.query(batchQuery, [wo_number, newWo.id, firstStageId, created_by]);
+            newBatch = batchResult.rows[0];
 
-        // 3. Create batch_stage_progress for the active selected stages
-        const stagesRes = await client.query('SELECT id FROM production_stages ORDER BY stage_order ASC');
-        for (const stageRow of stagesRes.rows) {
-            await client.query(
-                `INSERT INTO batch_stage_progress (batch_id, stage_id) 
-                 VALUES ($1, $2) 
-                 ON CONFLICT (batch_id, stage_id) DO NOTHING`,
-                [newBatch.id, stageRow.id]
-            );
+            // 3. Create batch_stage_progress for the active selected stages
+            const stagesRes = await client.query('SELECT id FROM production_stages ORDER BY stage_order ASC');
+            for (const stageRow of stagesRes.rows) {
+                await client.query(
+                    `INSERT INTO batch_stage_progress (batch_id, stage_id) 
+                     VALUES ($1, $2) 
+                     ON CONFLICT (batch_id, stage_id) DO NOTHING`,
+                    [newBatch.id, stageRow.id]
+                );
+            }
         }
 
         await client.query('COMMIT');
@@ -90,10 +102,10 @@ export const getAllWorkOrders = async (req: Request, res: Response) => {
 
         // If explicitly requesting all without pagination (e.g. internal exports)
         if (req.query.all === 'true') {
-            let allQuery = 'SELECT * FROM work_orders';
+            let allQuery = 'SELECT * FROM work_orders WHERE (has_backend = true OR has_backend IS NULL)';
             const allParams: any[] = [];
             if (searchTrimmed) {
-                allQuery += ' WHERE wo_number ILIKE $1';
+                allQuery += ' AND wo_number ILIKE $1';
                 allParams.push(`%${searchTrimmed}%`);
             }
             allQuery += ' ORDER BY created_at DESC, id DESC';
@@ -110,13 +122,13 @@ export const getAllWorkOrders = async (req: Request, res: Response) => {
         const limitNum = Math.max(1, Math.min(100, parseInt(req.query.limit as string, 10) || 20));
         const offset = (pageNum - 1) * limitNum;
 
-        let countQuery = 'SELECT COUNT(*)::int as total FROM work_orders';
-        let dataQuery = 'SELECT * FROM work_orders';
+        let countQuery = 'SELECT COUNT(*)::int as total FROM work_orders WHERE (has_backend = true OR has_backend IS NULL)';
+        let dataQuery = 'SELECT * FROM work_orders WHERE (has_backend = true OR has_backend IS NULL)';
         const params: any[] = [];
 
         if (searchTrimmed) {
-            countQuery += ' WHERE wo_number ILIKE $1';
-            dataQuery += ' WHERE wo_number ILIKE $1';
+            countQuery += ' AND wo_number ILIKE $1';
+            dataQuery += ' AND wo_number ILIKE $1';
             params.push(`%${searchTrimmed}%`);
         }
 
@@ -193,6 +205,12 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
                 );
                 if (smtRes.rowCount && smtRes.rowCount > 0) {
                     const smtWo = smtRes.rows[0];
+                    if (smtWo.has_backend === false) {
+                        return res.status(404).json({
+                            error: `Work Order "${trimmed}" is not configured for Backend processing.`,
+                            code: 'WORK_ORDER_NOT_FOUND'
+                        });
+                    }
                     await syncSingleWorkOrder(trimmed);
                     result = await pool.query(query, [trimmed]);
                     if (result.rowCount === 0) {
@@ -224,6 +242,12 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
         }
 
         const wo = result.rows[0];
+        if (wo.has_backend === false) {
+            return res.status(404).json({
+                error: `Work Order "${trimmed}" is not configured for Backend processing.`,
+                code: 'WORK_ORDER_NOT_FOUND'
+            });
+        }
         let selectedStages = wo.selected_stages;
         if (typeof selectedStages === 'string') {
             try { selectedStages = JSON.parse(selectedStages); } catch (e) {}

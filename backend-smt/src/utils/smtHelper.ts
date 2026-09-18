@@ -343,7 +343,8 @@ export const getEligibleWorkOrdersHelper = async (
             wo.remark AS work_order_remarks
         FROM smt_work_orders wo
         WHERE 
-            EXISTS (
+            (wo.has_smt = true OR wo.has_smt IS NULL)
+            AND EXISTS (
                 SELECT 1 FROM smt_serial_numbers sn
                 WHERE sn.work_order_id = wo.id
                   AND (sn.batch_id IS NULL OR EXISTS (
