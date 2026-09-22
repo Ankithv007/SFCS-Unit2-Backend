@@ -1,79 +1,32 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
 import cors from 'cors';
-import path from 'path';
-import fs from 'fs';
-import rrhRoutes from './routes/rrhRoutes';
-import pool, { ensureDatabaseExists } from './config/db';
-import { createLogger } from './utils/logger';
-import { runMigrations } from './db/runMigrations';
+import dotenv from 'dotenv';
 import { ensureUploadDirectoriesExist } from './utils/uploads';
+import { createLogger } from './utils/logger';
+import masterDataRoutes from './routes/masterDataRoutes';
 
-const logger = createLogger('RRH');
+dotenv.config();
+
 const app = express();
 const PORT = process.env.PORT || 5007;
+const logger = createLogger('Server');
 
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
+app.use(express.json());
 
-// Request logging middleware
-app.use((req: Request, res: Response, next: NextFunction) => {
-    logger.info(`${req.method} ${req.originalUrl}`);
-    next();
+// Init Directories
+ensureUploadDirectoriesExist();
+
+// Routes
+app.use('/api/rrh', masterDataRoutes);
+
+// Health check
+app.get('/api/rrh/health', (req, res) => {
+    res.status(200).json({ status: 'RRH Service is healthy.' });
 });
 
-// Health check endpoint
-app.get('/health', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'healthy', service: 'backend-rrh', timestamp: new Date() });
+// Start Server
+app.listen(PORT, () => {
+    logger.info(`RRH Microservice running on port ${PORT}`);
 });
-
-// Root endpoint
-app.get('/', (_req: Request, res: Response) => {
-    res.send('RRH (Remote Radio Head) Processing Service is running');
-});
-
-// Mount routes (Supports both direct and gateway-stripped paths)
-app.use('/api/rrh', rrhRoutes);
-app.use('/api', rrhRoutes);
-app.use('/', rrhRoutes);
-
-// Initialize Database and Directories
-const initDB = async () => {
-    try {
-        logger.info('Initializing RRH database...');
-        await ensureDatabaseExists();
-
-        const schemaPath = path.join(__dirname, 'db/schema.sql');
-        if (fs.existsSync(schemaPath)) {
-            const schema = fs.readFileSync(schemaPath, 'utf8');
-            await pool.query(schema);
-            logger.info('RRH Database baseline schema verified.');
-        }
-
-        // Run migrations
-        await runMigrations();
-        logger.info('RRH migrations completed successfully.');
-
-        // Initialize uploads directories
-        ensureUploadDirectoriesExist();
-    } catch (err: any) {
-        logger.error(`Error initializing RRH database: ${err.message}`);
-        throw err;
-    }
-};
-
-const startServer = async () => {
-    try {
-        await initDB();
-        app.listen(PORT, () => {
-            logger.info(`RRH Microservice running on port ${PORT}`);
-        });
-    } catch (err: any) {
-        logger.error(`Failed to start RRH service: ${err.message}`);
-        process.exit(1);
-    }
-};
-
-startServer();
-
-export default app;

@@ -27,16 +27,19 @@ export const getUploadsDir = (): string => {
 export const ensureUploadDirectoriesExist = () => {
     try {
         const uploadsDir = getUploadsDir();
-        logger.info(`Centralized initialization in: ${uploadsDir}`);
-        const subdirs = ['RRH-Work-Orders', 'temp'];
+        logger.info(`[Uploads] Centralized initialization in: ${uploadsDir}`);
+        const subdirs = [
+            'rrh', 
+            'rrh/temp'
+        ];
         subdirs.forEach(subdir => {
             const dirPath = path.join(uploadsDir, subdir);
             if (!fs.existsSync(dirPath)) {
-                logger.info(`Creating required subdirectory: ${dirPath}`);
+                logger.info(`[Uploads] Creating required subdirectory: ${dirPath}`);
                 fs.mkdirSync(dirPath, { recursive: true, mode: 0o755 });
             }
         });
     } catch (err: any) {
-        logger.error(`Upload directory initialization failed: ${err.message}`);
+        logger.error(`[Uploads] Centralized directory initialization failed: ${err.message}`);
     }
 };

@@ -1,15 +1,7 @@
-export const createLogger = (serviceName: string) => {
-    const prefix = `[${serviceName.toUpperCase()}]`;
-
+export const createLogger = (context: string) => {
     return {
-        info: (message: string, ...args: any[]) => {
-            console.log(`${prefix} ${message}`, ...args);
-        },
-        error: (message: string, ...args: any[]) => {
-            console.error(`${prefix} ERROR: ${message}`, ...args);
-        },
-        warn: (message: string, ...args: any[]) => {
-            console.warn(`${prefix} WARNING: ${message}`, ...args);
-        }
+        info: (msg: string) => console.log(`[${new Date().toISOString()}] [INFO] [${context}] ${msg}`),
+        error: (msg: string) => console.error(`[${new Date().toISOString()}] [ERROR] [${context}] ${msg}`),
+        warn: (msg: string) => console.warn(`[${new Date().toISOString()}] [WARN] [${context}] ${msg}`)
     };
 };
