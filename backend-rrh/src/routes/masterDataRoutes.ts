@@ -10,7 +10,8 @@ import {
     createWorkOrder,
     deleteTempFile,
     downloadWorkOrderExcel,
-    deleteWorkOrder
+    deleteWorkOrder,
+    getMasterViewData
 } from '../controllers/masterDataController';
 import { authMiddleware } from '../middleware/auth';
 
@@ -45,6 +46,7 @@ const upload = multer({
 router.get('/work-orders', authMiddleware, getWorkOrders);
 router.post('/work-orders', authMiddleware, upload.single('file'), createWorkOrder);
 router.get('/work-orders/:id', authMiddleware, getWorkOrderById);
+router.get('/work-orders/:id/master-view', authMiddleware, getMasterViewData);
 router.get('/work-orders/:id/download', authMiddleware, downloadWorkOrderExcel);
 router.delete('/work-orders/:id', authMiddleware, deleteWorkOrder);
 

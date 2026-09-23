@@ -885,3 +885,250 @@ export const deleteWorkOrder = async (req: Request, res: Response) => {
         if (client) client.release();
     }
 };
+
+/**
+ * GET /api/rrh/work-orders/:id/master-view
+ * Dedicated endpoint for the Full-Page Master Excel Viewer.
+ * Supports server-side pagination, filtering/search, and exact structural reconstruction.
+ */
+export const getMasterViewData = async (req: Request, res: Response) => {
+    let client;
+    try {
+        const rawId = req.params.id;
+        if (!rawId) {
+            return res.status(400).json({ success: false, error: 'Work Order ID is required.' });
+        }
+
+        const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+        const limitParam = req.query.limit as string;
+        let limit = 50;
+        let isAll = false;
+        if (limitParam === 'all' || limitParam === '-1') {
+            isAll = true;
+            limit = 10000;
+        } else {
+            const parsedLimit = parseInt(limitParam, 10);
+            if (!isNaN(parsedLimit) && parsedLimit > 0) {
+                limit = Math.min(parsedLimit, 1000);
+            }
+        }
+        const offset = (page - 1) * limit;
+        const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+        client = await getClient();
+
+        // 1. Fetch Work Order
+        const numId = parseInt(rawId, 10);
+        let woRes;
+        if (!isNaN(numId) && String(numId) === rawId.trim()) {
+            woRes = await client.query('SELECT * FROM rrh_work_orders WHERE id = $1', [numId]);
+        } else {
+            woRes = await client.query('SELECT * FROM rrh_work_orders WHERE work_order_id = $1', [rawId]);
+        }
+
+        if (woRes.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Work Order not found.' });
+        }
+
+        const wo = woRes.rows[0];
+
+        if (!wo.active_import_id) {
+            return res.status(200).json({
+                success: true,
+                data: {
+                    ...wo,
+                    work_order_date: wo.work_order_date || wo.date,
+                    excel_structure: null,
+                    pagination: {
+                        page: 1,
+                        limit,
+                        totalDataRows: 0,
+                        filteredDataRows: 0,
+                        totalPages: 1
+                    }
+                }
+            });
+        }
+
+        // 2. Fetch Sheet
+        const sheetRes = await client.query(
+            'SELECT * FROM rrh_excel_sheets WHERE import_id = $1 LIMIT 1',
+            [wo.active_import_id]
+        );
+
+        if (sheetRes.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Master Excel sheet not found for this Work Order.' });
+        }
+
+        const sheet = sheetRes.rows[0];
+        const sheetId = sheet.id;
+
+        // 3. Fetch Merges
+        const mergesRes = await client.query(
+            `SELECT range_reference, start_row, start_column, end_row, end_column, row_span, column_span 
+             FROM rrh_excel_merged_cells WHERE sheet_id = $1`,
+            [sheetId]
+        );
+
+        const mergeLookup = new Map<string, any>();
+        for (const m of mergesRes.rows) {
+            for (let r = m.start_row; r <= m.end_row; r++) {
+                for (let c = m.start_column; c <= m.end_column; c++) {
+                    const isMaster = (r === m.start_row && c === m.start_column);
+                    mergeLookup.set(`${r}:${c}`, { m, isMaster });
+                }
+            }
+        }
+
+        // Helper to format cells
+        const formatCell = (rowNum: number, c: any) => {
+            const mInfo = mergeLookup.get(`${rowNum}:${c.column_number}`);
+            const isMerged = !!mInfo;
+            const mergeType = isMerged ? (mInfo.isMaster ? 'MASTER' : 'SLAVE') : 'NONE';
+            const rowSpan = mInfo && mInfo.isMaster ? (mInfo.m.row_span || 1) : 1;
+            const colSpan = mInfo && mInfo.isMaster ? (mInfo.m.column_span || 1) : 1;
+
+            return {
+                columnNumber: c.column_number,
+                c: c.column_number,
+                columnLetter: c.column_letter,
+                rawValue: c.raw_value,
+                displayValue: c.display_value,
+                v: c.display_value,
+                dataType: c.data_type,
+                t: c.data_type,
+                isMerged,
+                mergeType,
+                rowSpan,
+                colSpan
+            };
+        };
+
+        // 4. Fetch Header Rows (Row 1 & Row 2) unconditionally
+        const headerRowsRes = await client.query(
+            `SELECT r.id as row_id, r.row_number, r.row_type,
+                    c.column_number, c.column_letter, c.raw_value, c.display_value, c.data_type
+             FROM rrh_excel_rows r
+             LEFT JOIN rrh_excel_cells c ON r.id = c.row_id
+             WHERE r.sheet_id = $1 AND (r.row_type IN ('HEADER', 'SUB_HEADER') OR r.row_number <= 2)
+             ORDER BY r.row_number ASC, c.column_number ASC`,
+            [sheetId]
+        );
+
+        const headerRowMap = new Map<number, any>();
+        for (const rItem of headerRowsRes.rows) {
+            if (!headerRowMap.has(rItem.row_number)) {
+                headerRowMap.set(rItem.row_number, {
+                    rowNumber: rItem.row_number,
+                    rowType: rItem.row_type,
+                    cells: []
+                });
+            }
+            if (rItem.column_number !== null) {
+                headerRowMap.get(rItem.row_number).cells.push(formatCell(rItem.row_number, rItem));
+            }
+        }
+        const headerRows = Array.from(headerRowMap.values());
+
+        // 5. Total Data Rows in Sheet (row_number > 2)
+        const totalDataRowsRes = await client.query(
+            `SELECT COUNT(*) FROM rrh_excel_rows WHERE sheet_id = $1 AND row_number > 2`,
+            [sheetId]
+        );
+        const totalDataRows = parseInt(totalDataRowsRes.rows[0].count, 10) || 0;
+
+        // 6. Filtered Data Rows Count & Slice
+        let countSql = `SELECT COUNT(*) FROM rrh_excel_rows r WHERE r.sheet_id = $1 AND r.row_number > 2`;
+        let dataRowSql = `SELECT r.id, r.row_number, r.row_type FROM rrh_excel_rows r WHERE r.sheet_id = $1 AND r.row_number > 2`;
+        const queryParams: any[] = [sheetId];
+
+        if (search) {
+            const searchParam = `%${search}%`;
+            queryParams.push(searchParam);
+            const searchClause = ` AND EXISTS (
+                SELECT 1 FROM rrh_excel_cells c 
+                WHERE c.row_id = r.id 
+                  AND (c.display_value ILIKE $2 OR c.raw_value ILIKE $2)
+            )`;
+            countSql += searchClause;
+            dataRowSql += searchClause;
+        }
+
+        const filteredCountRes = await client.query(countSql, queryParams);
+        const filteredDataRows = parseInt(filteredCountRes.rows[0].count, 10) || 0;
+
+        // Pagination limit/offset
+        dataRowSql += ` ORDER BY r.row_number ASC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        const paginatedDataRowsRes = await client.query(dataRowSql, [...queryParams, limit, offset]);
+
+        const dataRows: any[] = [];
+        if (paginatedDataRowsRes.rows.length > 0) {
+            const rowIds = paginatedDataRowsRes.rows.map((r: any) => r.id);
+            const cellsRes = await client.query(
+                `SELECT row_id, column_number, column_letter, raw_value, display_value, data_type
+                 FROM rrh_excel_cells
+                 WHERE row_id = ANY($1)
+                 ORDER BY column_number ASC`,
+                [rowIds]
+            );
+
+            const cellMapByRowId = new Map<number, any[]>();
+            for (const c of cellsRes.rows) {
+                if (!cellMapByRowId.has(c.row_id)) {
+                    cellMapByRowId.set(c.row_id, []);
+                }
+                cellMapByRowId.get(c.row_id)!.push(c);
+            }
+
+            for (const r of paginatedDataRowsRes.rows) {
+                const rawCells = cellMapByRowId.get(r.id) || [];
+                const formattedCells = rawCells.map((c: any) => formatCell(r.row_number, c));
+                dataRows.push({
+                    rowNumber: r.row_number,
+                    rowType: r.row_type,
+                    cells: formattedCells
+                });
+            }
+        }
+
+        const totalPages = Math.ceil(filteredDataRows / limit) || 1;
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...wo,
+                work_order_date: wo.work_order_date || wo.date,
+                pagination: {
+                    page,
+                    limit,
+                    isAll,
+                    totalDataRows,
+                    filteredDataRows,
+                    totalPages
+                },
+                excel_structure: {
+                    sheetName: sheet.sheet_name,
+                    totalRows: sheet.total_rows,
+                    totalColumns: sheet.total_columns,
+                    merges: mergesRes.rows.map(m => ({
+                        rangeReference: m.range_reference,
+                        startRow: m.start_row,
+                        startColumn: m.start_column,
+                        endRow: m.end_row,
+                        endColumn: m.end_column,
+                        rowSpan: m.row_span,
+                        colSpan: m.column_span
+                    })),
+                    headerRows,
+                    dataRows,
+                    rows: [...headerRows, ...dataRows]
+                }
+            }
+        });
+    } catch (error: any) {
+        logger.error(`Get Master View Data Error: ${error.message}`);
+        return res.status(500).json({ success: false, error: 'Failed to fetch Master View data.' });
+    } finally {
+        if (client) client.release();
+    }
+};
