@@ -16,7 +16,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
     try {
         // 1. Find the serial number record
         const serialResult = await pool.query(
-            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.created_by as wo_created_by, wo.created_at as wo_created_at
+            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.selected_stages, wo.created_by as wo_created_by, wo.created_at as wo_created_at
              FROM smt_serial_numbers sn
              LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
              WHERE sn.serial_number = $1`,
@@ -131,11 +131,25 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             rework_reason: row.rework_reason || null
         }));
 
+        // Normalize backend status to production-display values
+        const normalizeBackendStatus = (status: string): string => {
+            switch ((status || '').toUpperCase()) {
+                case 'ACCEPTED': return 'PASS';
+                case 'PASS':     return 'PASS';
+                case 'FAILED':   return 'FAIL';
+                case 'FAIL':     return 'FAIL';
+                case 'REWORK':   return 'REWORK';
+                case 'RESOLVED': return 'RESOLVED';
+                default: return (status || '').toUpperCase();
+            }
+        };
+
         // Fetch Backend process scan history if applicable
         let backendScanHistory: any[] = [];
         try {
             const backendRes = await backendPool.query(
                 `SELECT 
+                    ps.stage_code,
                     ps.stage_name AS station,
                     ps.stage_order,
                     s.scan_result AS status,
@@ -149,9 +163,10 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                 [serial.serial_number]
             );
             backendScanHistory = backendRes.rows.map((row: any) => ({
+                stage_code: row.stage_code || null,
                 station: row.station,
                 stage_order: row.stage_order,
-                status: (row.status || '').toUpperCase(),
+                status: normalizeBackendStatus(row.status),
                 scanned_by: row.scanned_by || '-',
                 scanned_at: row.scanned_at,
                 remarks: row.remarks || null,
@@ -170,6 +185,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             sides: serial.sides || '-',
             has_smt: serial.has_smt ?? true,
             has_backend: serial.has_backend ?? true,
+            selected_stages: serial.selected_stages || null,
             current_stage: currentStage,
             current_status: currentStatus,
             final_status_label: finalStatusLabel,
@@ -938,7 +954,74 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
             historyBySerial[row.serial_id].push(row);
         });
 
-        const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+        const normalizeStatus = (status: string): string => {
+            switch ((status || '').toUpperCase()) {
+                case 'ACCEPTED': return 'PASS';
+                case 'PASS':     return 'PASS';
+                case 'FAILED':   return 'FAIL';
+                case 'FAIL':     return 'FAIL';
+                case 'REWORK':   return 'REWORK';
+                case 'RESOLVED': return 'RESOLVED';
+                default: return (status || '').toUpperCase();
+            }
+        };
+
+        // Fetch Backend Stages & History
+        let backendStagesList: any[] = [];
+        let selectedBackendStages: any[] = [];
+        if (wo.has_backend) {
+            try {
+                const bStagesRes = await backendPool.query('SELECT id, stage_code, stage_name, stage_label FROM production_stages ORDER BY stage_order ASC');
+                backendStagesList = bStagesRes.rows;
+                if (wo.selected_stages) {
+                    try {
+                        selectedBackendStages = typeof wo.selected_stages === 'string' ? JSON.parse(wo.selected_stages) : wo.selected_stages;
+                    } catch (e) {}
+                } else {
+                    selectedBackendStages = backendStagesList;
+                }
+            } catch (err: any) {
+                logger.warn('Failed to fetch backend stages for excel:', err.message);
+            }
+        }
+
+        const normalizeStageId = (s: string) => (s || '').toUpperCase().replace(/[\s\-_]/g, '');
+        const isBackendStageSelected = (stage: any): boolean => {
+            if (!selectedBackendStages || selectedBackendStages.length === 0) return true;
+            const codeNorm = normalizeStageId(stage.stage_code);
+            const nameNorm = normalizeStageId(stage.stage_name);
+            const labelNorm = normalizeStageId(stage.stage_label);
+            return selectedBackendStages.some((item: any) => {
+                const s = typeof item === 'string' ? item : (item?.stage_code || item?.stage_name || '');
+                const sNorm = normalizeStageId(s);
+                return sNorm === codeNorm || sNorm === nameNorm || sNorm === labelNorm;
+            });
+        };
+
+        const activeBackendStages = backendStagesList.filter(isBackendStageSelected);
+
+        const backendHistoryBySerial: { [key: string]: any[] } = {};
+        if (wo.has_backend && serials.length > 0) {
+            const serialNumbers = serials.map((s: any) => s.serial_number);
+            try {
+                const bHistoryRes = await backendPool.query(`
+                    SELECT s.barcode, ps.stage_code, ps.stage_name as station, s.scan_result as status, s.scanned_at
+                    FROM scans s
+                    JOIN production_stages ps ON s.stage_id = ps.id
+                    WHERE s.barcode = ANY($1)
+                    ORDER BY s.scanned_at ASC
+                `, [serialNumbers]);
+                
+                bHistoryRes.rows.forEach((row: any) => {
+                    if (!backendHistoryBySerial[row.barcode]) backendHistoryBySerial[row.barcode] = [];
+                    backendHistoryBySerial[row.barcode].push(row);
+                });
+            } catch (err: any) {
+                logger.warn('Failed to fetch backend history for excel:', err.message);
+            }
+        }
+
+        const smtStepNames = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
 
         const mappedSerials = serials.map((s: any) => {
             const history = historyBySerial[s.id] || [];
@@ -947,20 +1030,31 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
             if (history.length > 0) {
                 const last = history[history.length - 1];
                 currentStage = last.process_step;
-                currentStatus = last.status;
+                currentStatus = normalizeStatus(last.status);
             }
             const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'FAIL').length;
             const totalReworks = history.filter((h: any) => h.process_step === 'Rework').length;
             const totalDebugs = history.filter((h: any) => h.process_step === 'Debug').length;
-            const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
+            const totalPassed = history.filter((h: any) => normalizeStatus(h.status) === 'PASS').length;
 
             const step_status: { [key: string]: string } = {};
-            stepNames.forEach(step => {
+            smtStepNames.forEach(step => {
                 const stepHist = history.filter((h: any) => h.process_step === step);
                 if (stepHist.length > 0) {
-                    step_status[step] = stepHist[stepHist.length - 1].status;
+                    step_status[step] = normalizeStatus(stepHist[stepHist.length - 1].status);
                 } else {
                     step_status[step] = '-';
+                }
+            });
+
+            const bHistory = backendHistoryBySerial[s.serial_number] || [];
+            activeBackendStages.forEach(st => {
+                const stepKey = st.stage_code;
+                const stepHist = bHistory.filter((h: any) => h.stage_code === stepKey || h.station === st.stage_name);
+                if (stepHist.length > 0) {
+                    step_status[stepKey] = normalizeStatus(stepHist[stepHist.length - 1].status);
+                } else {
+                    step_status[stepKey] = '-';
                 }
             });
 
@@ -1023,17 +1117,12 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         worksheet.addRow([]); // Blank spacer row
 
-        // Headers
         const tableHeaders = [
             'SERIAL NUMBER',
             'CURRENT STAGE',
             'OVERALL STATUS',
-            'PRINTING',
-            'SPI',
-            'PRE AOI',
-            'POST AOI',
-            'REWORK',
-            'SMT FG',
+            ...smtStepNames.map(s => s.toUpperCase()),
+            ...activeBackendStages.map((st: any) => (st.stage_label || st.stage_name).toUpperCase()),
             'TOTAL FAILURES',
             'TOTAL REWORKS'
         ];
@@ -1056,19 +1145,16 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         // Add Data Rows
         mappedSerials.forEach((s: any) => {
-            const dataRow = worksheet.addRow([
+            const rowData = [
                 s.serial_number,
                 s.current_stage || 'Pending',
                 s.final_status_label || 'Pending',
-                s.step_status['Printing'] || '-',
-                s.step_status['SPI'] || '-',
-                s.step_status['Pre AOI'] || '-',
-                s.step_status['Post AOI'] || '-',
-                s.step_status['Rework'] || '-',
-                s.step_status['SMT FG'] || '-',
+                ...smtStepNames.map(step => s.step_status[step] || '-'),
+                ...activeBackendStages.map((st: any) => s.step_status[st.stage_code] || '-'),
                 s.total_failures || 0,
                 s.total_reworks || 0
-            ]);
+            ];
+            const dataRow = worksheet.addRow(rowData);
             dataRow.height = 20;
 
             const isCompleted = s.final_status_label === 'Completed';
@@ -1094,7 +1180,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 }
 
                 // Process Stage Statuses
-                if (colNumber >= 4 && colNumber <= 9) {
+                if (colNumber >= 4 && colNumber <= (3 + smtStepNames.length + activeBackendStages.length)) {
                     const statusText = cell.value?.toString().toUpperCase();
                     if (statusText === 'PASS') {
                         cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };

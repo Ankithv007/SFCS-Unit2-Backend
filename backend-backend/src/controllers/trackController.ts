@@ -132,6 +132,7 @@ export const trackBarcode = async (req: Request, res: Response) => {
         // 2. Full scan history from centralized scans log
         const historyResult = await pool.query(`
             SELECT 
+                ps.stage_code,
                 ps.stage_name AS station,
                 ps.stage_order,
                 s.scan_result AS status,
@@ -153,6 +154,7 @@ export const trackBarcode = async (req: Request, res: Response) => {
             const isFailure = row.status === 'REWORK' || row.status === 'DEBUG' || row.status === 'FAILED';
             
             return {
+                stage_code: row.stage_code || null,
                 station: row.station,
                 stage_order: row.stage_order,
                 status: (row.status || '').toUpperCase(),
@@ -442,6 +444,42 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             return stageName === lastStage.stage_name || stageName === lastStage.stage_code;
         };
 
+        // 4. Fetch SMT step statuses for all serials in this WO (for combined report)
+        const smtStepStatusBySerial: { [barcode: string]: { [step: string]: string } } = {};
+        try {
+            const barcodes = serials.map((s: any) => s.barcode);
+            if (barcodes.length > 0) {
+                const smtSerialRes = await smtPool.query(`
+                    SELECT sn.id, sn.serial_number
+                    FROM smt_serial_numbers sn
+                    WHERE sn.serial_number = ANY($1::text[])
+                `, [barcodes]);
+
+                if (smtSerialRes.rows.length > 0) {
+                    const smtSerialIds = smtSerialRes.rows.map((r: any) => r.id);
+                    const smtSerialMap: { [id: number]: string } = {};
+                    smtSerialRes.rows.forEach((r: any) => { smtSerialMap[r.id] = r.serial_number; });
+
+                    const smtInspRes = await smtPool.query(`
+                        SELECT i.serial_id, i.process_step, i.status, i.scanned_at
+                        FROM smt_inspections i
+                        WHERE i.serial_id = ANY($1::int[])
+                        ORDER BY i.scanned_at ASC
+                    `, [smtSerialIds]);
+
+                    smtInspRes.rows.forEach((row: any) => {
+                        const barcode = smtSerialMap[row.serial_id];
+                        if (!barcode) return;
+                        if (!smtStepStatusBySerial[barcode]) smtStepStatusBySerial[barcode] = {};
+                        // Keep latest status for each step
+                        smtStepStatusBySerial[barcode][row.process_step] = (row.status || '').toUpperCase();
+                    });
+                }
+            }
+        } catch (smtErr: any) {
+            console.warn('Failed to fetch SMT step statuses for WO report:', smtErr.message);
+        }
+
         const mappedSerials = serials.map((s: any) => {
             const history = historyBySerial[s.barcode] || [];
             
@@ -479,6 +517,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                 total_debugs: totalDebugs,
                 total_passed: totalPassed,
                 step_status: step_status,
+                smt_step_status: smtStepStatusBySerial[s.barcode] || {},
                 created_at: s.created_at
             };
         });
@@ -489,6 +528,8 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             quantity: wo.quantity,
             line_id: '-',
             total_serials: serials.length,
+            has_smt: wo.has_smt ?? false,
+            has_backend: wo.has_backend ?? true,
             selected_stages: wo.selected_stages,
             active_route: activeRoute.map((s: any) => ({
                 id: s.id,
