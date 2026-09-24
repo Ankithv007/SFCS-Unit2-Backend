@@ -750,12 +750,14 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             }
         }
 
+        const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
+
         // 4. Validate barcode matches a generated serial number for the Work Order (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
              WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
-            [cleanBarcode, session.work_order_id]
+               AND work_order_id = $2`,
+            [cleanBarcode, cleanWoId]
         );
 
         // Case A: INVALID Barcode
@@ -946,12 +948,14 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         }
         const oldRecord = inspectionRes.rows[0];
 
+        const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
+
         // Validate the new barcode exists in serial numbers for this WO (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number FROM smt_serial_numbers 
              WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
-            [cleanBarcode, session.work_order_id]
+               AND work_order_id = $2`,
+            [cleanBarcode, cleanWoId]
         );
         if (serialRes.rows.length === 0) {
             await client.query('ROLLBACK');

@@ -587,12 +587,14 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             });
         }
 
+        const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
+
         // Validate barcode belongs to WO (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
              WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
-            [cleanBarcode, session.work_order_id]
+               AND work_order_id = $2`,
+            [cleanBarcode, cleanWoId]
         );
 
         if (serialRes.rows.length === 0) {
@@ -649,7 +651,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         const latestPostAoiRes = await client.query(
             `SELECT i.status FROM smt_inspections i
              JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-             WHERE UPPER(TRIM(i.work_order_id)) = UPPER(TRIM($1))
+             WHERE i.work_order_id = $1
                AND LOWER(ps.side) = LOWER($2)
                AND (i.serial_id = $3 OR UPPER(TRIM(i.scanned_barcode)) = UPPER(TRIM($4)))
                AND (i.process_step = 'Post AOI' OR i.process_step = 'Post_AOI')

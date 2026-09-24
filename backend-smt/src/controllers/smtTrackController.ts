@@ -227,17 +227,25 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
 
 export const trackWorkOrder = async (req: Request, res: Response) => {
     const { woId } = req.params;
+    const { page = '1', limit = '50', search = '', filterDate = '', filterStatus = '' } = req.query;
 
     if (!woId || woId.trim() === '') {
         return res.status(400).json({ error: 'Work Order ID is required.' });
     }
 
     const inputValue = woId.trim().toUpperCase();
+    const pageNum = parseInt(page as string, 10);
+    const limitNum = parseInt(limit as string, 10);
+    const offset = (pageNum - 1) * limitNum;
+    
+    const searchStr = (search as string).trim() ? `%${(search as string).trim()}%` : null;
+    const dateStr = (filterDate as string).trim() || null;
+    const statusStr = (filterStatus as string).trim() || null;
 
     try {
         // 1. Find the work order record
         const woResult = await pool.query(
-            `SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = $1 OR UPPER(TRIM(po_id)) = $1 LIMIT 1`,
+            `SELECT * FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1`,
             [inputValue]
         );
 
@@ -247,51 +255,86 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
 
         const wo = woResult.rows[0];
 
-        // 2. Fetch all serials for this WO
+        // 2. Fetch all serials and aggregate their history using SQL
         const serialsResult = await pool.query(`
-            SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at
-            FROM smt_serial_numbers sn
-            WHERE sn.work_order_id = $1
-            ORDER BY sn.id ASC
-        `, [wo.id]);
+            WITH latest_overall AS (
+                SELECT DISTINCT ON (serial_id) serial_id, process_step as current_stage, status as current_status
+                FROM smt_inspections
+                WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                ORDER BY serial_id, scanned_at DESC, id DESC
+            ),
+            latest_steps AS (
+                SELECT serial_id, process_step, status
+                FROM (
+                    SELECT serial_id, process_step, status,
+                           row_number() over(partition by serial_id, process_step order by scanned_at desc, id desc) as rn
+                    FROM smt_inspections
+                    WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                ) sub WHERE rn = 1
+            ),
+            stats AS (
+                SELECT serial_id,
+                       count(case when status IN ('REWORK', 'FAIL') then 1 end) as total_failures,
+                       count(case when process_step = 'Rework' then 1 end) as total_reworks,
+                       count(case when process_step = 'Debug' then 1 end) as total_debugs,
+                       count(case when status = 'PASS' then 1 end) as total_passed
+                FROM smt_inspections
+                WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                GROUP BY serial_id
+            ),
+            combined_serials AS (
+                SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at,
+                       lo.current_stage,
+                       lo.current_status,
+                       COALESCE(st.total_failures, 0) as total_failures,
+                       COALESCE(st.total_reworks, 0) as total_reworks,
+                       COALESCE(st.total_debugs, 0) as total_debugs,
+                       COALESCE(st.total_passed, 0) as total_passed,
+                       (
+                           SELECT json_object_agg(ls.process_step, ls.status)
+                           FROM latest_steps ls WHERE ls.serial_id = sn.id
+                       ) as step_statuses,
+                       (
+                           SELECT ls.status FROM latest_steps ls WHERE ls.serial_id = sn.id AND ls.process_step = 'SMT FG'
+                       ) as smt_fg_status
+                FROM smt_serial_numbers sn
+                LEFT JOIN latest_overall lo ON sn.id = lo.serial_id
+                LEFT JOIN stats st ON sn.id = st.serial_id
+                WHERE sn.work_order_id = $1
+            ),
+            filtered_serials AS (
+                SELECT * FROM combined_serials
+                WHERE 
+                    ($2::text IS NULL OR serial_number ILIKE $2)
+                    AND ($3::date IS NULL OR DATE(created_at) = $3)
+                    AND (
+                        $4::text IS NULL 
+                        OR ($4 = 'COMPLETED' AND smt_fg_status = 'PASS')
+                        OR ($4 = 'PENDING' AND (smt_fg_status IS NULL OR smt_fg_status != 'PASS'))
+                    )
+            ),
+            totals AS (
+                SELECT 
+                    COUNT(*) as total_filtered,
+                    COUNT(CASE WHEN smt_fg_status = 'PASS' THEN 1 END) as total_completed,
+                    COUNT(CASE WHEN smt_fg_status IS NULL OR smt_fg_status != 'PASS' THEN 1 END) as total_pending,
+                    (SELECT COUNT(*) FROM combined_serials) as total_all
+                FROM filtered_serials
+            )
+            SELECT f.*, t.total_filtered, t.total_completed, t.total_pending, t.total_all
+            FROM filtered_serials f
+            CROSS JOIN totals t
+            ORDER BY f.id ASC
+            LIMIT $5 OFFSET $6
+        `, [wo.id, searchStr, dateStr, statusStr, limitNum, offset]);
 
-        const serials = serialsResult.rows;
+        const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
 
-        // 3. Fetch all inspections for these serials
-        const historyResult = await pool.query(`
-            SELECT i.serial_id, i.process_step, i.status, i.scanned_by, i.scanned_at, i.rework_reason
-            FROM smt_inspections i
-            JOIN smt_serial_numbers sn ON i.serial_id = sn.id
-            WHERE sn.work_order_id = $1
-            ORDER BY i.scanned_at ASC
-        `, [wo.id]);
-
-        const historyBySerial: { [key: number]: any[] } = {};
-        historyResult.rows.forEach((row: any) => {
-            if (!historyBySerial[row.serial_id]) historyBySerial[row.serial_id] = [];
-            historyBySerial[row.serial_id].push(row);
-        });
-
-        const mappedSerials = serials.map((s: any) => {
-            const history = historyBySerial[s.id] || [];
-            let currentStage = 'Pending';
-            let currentStatus = 'PENDING';
-            if (history.length > 0) {
-                const last = history[history.length - 1];
-                currentStage = last.process_step;
-                currentStatus = last.status;
-            }
-            const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'FAIL').length;
-            const totalReworks = history.filter((h: any) => h.process_step === 'Rework').length;
-            const totalDebugs = history.filter((h: any) => h.process_step === 'Debug').length;
-            const totalPassed = history.filter((h: any) => h.status === 'PASS').length;
-
+        const mappedSerials = serialsResult.rows.map((s: any) => {
             const step_status: { [key: string]: string } = {};
-            const stepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
             stepNames.forEach(step => {
-                const stepHist = history.filter((h: any) => h.process_step === step);
-                if (stepHist.length > 0) {
-                    step_status[step] = stepHist[stepHist.length - 1].status;
+                if (s.step_statuses && s.step_statuses[step]) {
+                    step_status[step] = s.step_statuses[step];
                 } else {
                     step_status[step] = '-';
                 }
@@ -304,17 +347,22 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
 
             return {
                 serial_number: s.serial_number,
-                current_stage: currentStage,
-                current_status: currentStatus,
+                current_stage: s.current_stage || 'Pending',
+                current_status: s.current_status || 'PENDING',
                 final_status_label: finalStatusLabel,
-                total_failures: totalFailures,
-                total_reworks: totalReworks,
-                total_debugs: totalDebugs,
-                total_passed: totalPassed,
+                total_failures: Number(s.total_failures) || 0,
+                total_reworks: Number(s.total_reworks) || 0,
+                total_debugs: Number(s.total_debugs) || 0,
+                total_passed: Number(s.total_passed) || 0,
                 step_status: step_status,
                 created_at: s.created_at
             };
         });
+
+        const totalFiltered = serialsResult.rows.length > 0 ? Number(serialsResult.rows[0].total_filtered) : 0;
+        const totalCompleted = serialsResult.rows.length > 0 ? Number(serialsResult.rows[0].total_completed) : 0;
+        const totalPending = serialsResult.rows.length > 0 ? Number(serialsResult.rows[0].total_pending) : 0;
+        const totalAll = serialsResult.rows.length > 0 ? Number(serialsResult.rows[0].total_all) : 0;
 
         const spLogsResult = await pool.query(
             `SELECT process_step, scanned_by, scanned_at, status, rework_reason
@@ -339,7 +387,12 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             sides: wo.sides || '-',
             has_smt: wo.has_smt ?? true,
             has_backend: wo.has_backend ?? true,
-            total_serials: serials.length,
+            total_serials: totalAll,
+            total_filtered: totalFiltered,
+            completed_count: totalCompleted,
+            pending_count: totalPending,
+            page: pageNum,
+            limit: limitNum,
             serials: mappedSerials,
             solder_paste: {
                 barcode: wo.solder_paste_barcode || '-',
@@ -919,7 +972,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
     try {
         // 1. Fetch Work Order Details
         const woResult = await pool.query(
-            `SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = $1 OR UPPER(TRIM(po_id)) = $1 LIMIT 1`,
+            `SELECT * FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1`,
             [inputValue]
         );
 
@@ -929,30 +982,52 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         const wo = woResult.rows[0];
 
-        // 2. Fetch all serials for this WO
+        // 2. Fetch all serials and aggregate their history using SQL
         const serialsResult = await pool.query(`
-            SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at
+            WITH latest_overall AS (
+                SELECT DISTINCT ON (serial_id) serial_id, process_step as current_stage, status as current_status
+                FROM smt_inspections
+                WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                ORDER BY serial_id, scanned_at DESC, id DESC
+            ),
+            latest_steps AS (
+                SELECT serial_id, process_step, status
+                FROM (
+                    SELECT serial_id, process_step, status,
+                           row_number() over(partition by serial_id, process_step order by scanned_at desc, id desc) as rn
+                    FROM smt_inspections
+                    WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                ) sub WHERE rn = 1
+            ),
+            stats AS (
+                SELECT serial_id,
+                       count(case when status IN ('REWORK', 'FAIL') then 1 end) as total_failures,
+                       count(case when process_step = 'Rework' then 1 end) as total_reworks,
+                       count(case when process_step = 'Debug' then 1 end) as total_debugs,
+                       count(case when status = 'PASS' then 1 end) as total_passed
+                FROM smt_inspections
+                WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                GROUP BY serial_id
+            )
+            SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at,
+                   lo.current_stage,
+                   lo.current_status,
+                   COALESCE(st.total_failures, 0) as total_failures,
+                   COALESCE(st.total_reworks, 0) as total_reworks,
+                   COALESCE(st.total_debugs, 0) as total_debugs,
+                   COALESCE(st.total_passed, 0) as total_passed,
+                   (
+                       SELECT json_object_agg(ls.process_step, ls.status)
+                       FROM latest_steps ls WHERE ls.serial_id = sn.id
+                   ) as step_statuses
             FROM smt_serial_numbers sn
+            LEFT JOIN latest_overall lo ON sn.id = lo.serial_id
+            LEFT JOIN stats st ON sn.id = st.serial_id
             WHERE sn.work_order_id = $1
             ORDER BY sn.id ASC
         `, [wo.id]);
 
         const serials = serialsResult.rows;
-
-        // 3. Fetch all inspections for these serials
-        const historyResult = await pool.query(`
-            SELECT i.serial_id, i.process_step, i.status, i.scanned_by, i.scanned_at, i.rework_reason
-            FROM smt_inspections i
-            JOIN smt_serial_numbers sn ON i.serial_id = sn.id
-            WHERE sn.work_order_id = $1
-            ORDER BY i.scanned_at ASC
-        `, [wo.id]);
-
-        const historyBySerial: { [key: number]: any[] } = {};
-        historyResult.rows.forEach((row: any) => {
-            if (!historyBySerial[row.serial_id]) historyBySerial[row.serial_id] = [];
-            historyBySerial[row.serial_id].push(row);
-        });
 
         const normalizeStatus = (status: string): string => {
             switch ((status || '').toUpperCase()) {
@@ -1000,21 +1075,28 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         const activeBackendStages = backendStagesList.filter(isBackendStageSelected);
 
-        const backendHistoryBySerial: { [key: string]: any[] } = {};
+        const backendHistoryBySerial: { [key: string]: any } = {};
         if (wo.has_backend && serials.length > 0) {
             const serialNumbers = serials.map((s: any) => s.serial_number);
             try {
                 const bHistoryRes = await backendPool.query(`
-                    SELECT s.barcode, ps.stage_code, ps.stage_name as station, s.scan_result as status, s.scanned_at
-                    FROM scans s
-                    JOIN production_stages ps ON s.stage_id = ps.id
-                    WHERE s.barcode = ANY($1)
-                    ORDER BY s.scanned_at ASC
+                    WITH latest_backend_steps AS (
+                        SELECT barcode, stage_code, station, status
+                        FROM (
+                            SELECT s.barcode, ps.stage_code, ps.stage_name as station, s.scan_result as status,
+                                   row_number() over(partition by s.barcode, ps.stage_code order by s.scanned_at desc, s.id desc) as rn
+                            FROM scans s
+                            JOIN production_stages ps ON s.stage_id = ps.id
+                            WHERE s.barcode = ANY($1)
+                        ) sub WHERE rn = 1
+                    )
+                    SELECT barcode, json_object_agg(stage_code, status) as step_statuses, json_object_agg(station, status) as station_statuses
+                    FROM latest_backend_steps
+                    GROUP BY barcode
                 `, [serialNumbers]);
                 
                 bHistoryRes.rows.forEach((row: any) => {
-                    if (!backendHistoryBySerial[row.barcode]) backendHistoryBySerial[row.barcode] = [];
-                    backendHistoryBySerial[row.barcode].push(row);
+                    backendHistoryBySerial[row.barcode] = row;
                 });
             } catch (err: any) {
                 logger.warn('Failed to fetch backend history for excel:', err.message);
@@ -1024,38 +1106,25 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
         const smtStepNames = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
 
         const mappedSerials = serials.map((s: any) => {
-            const history = historyBySerial[s.id] || [];
-            let currentStage = 'Pending';
-            let currentStatus = 'PENDING';
-            if (history.length > 0) {
-                const last = history[history.length - 1];
-                currentStage = last.process_step;
-                currentStatus = normalizeStatus(last.status);
-            }
-            const totalFailures = history.filter((h: any) => h.status === 'REWORK' || h.status === 'FAIL').length;
-            const totalReworks = history.filter((h: any) => h.process_step === 'Rework').length;
-            const totalDebugs = history.filter((h: any) => h.process_step === 'Debug').length;
-            const totalPassed = history.filter((h: any) => normalizeStatus(h.status) === 'PASS').length;
-
             const step_status: { [key: string]: string } = {};
             smtStepNames.forEach(step => {
-                const stepHist = history.filter((h: any) => h.process_step === step);
-                if (stepHist.length > 0) {
-                    step_status[step] = normalizeStatus(stepHist[stepHist.length - 1].status);
+                if (s.step_statuses && s.step_statuses[step]) {
+                    step_status[step] = normalizeStatus(s.step_statuses[step]);
                 } else {
                     step_status[step] = '-';
                 }
             });
 
-            const bHistory = backendHistoryBySerial[s.serial_number] || [];
+            const bHistory = backendHistoryBySerial[s.serial_number] || {};
             activeBackendStages.forEach(st => {
                 const stepKey = st.stage_code;
-                const stepHist = bHistory.filter((h: any) => h.stage_code === stepKey || h.station === st.stage_name);
-                if (stepHist.length > 0) {
-                    step_status[stepKey] = normalizeStatus(stepHist[stepHist.length - 1].status);
-                } else {
-                    step_status[stepKey] = '-';
+                let status = '-';
+                if (bHistory.step_statuses && bHistory.step_statuses[stepKey]) {
+                    status = bHistory.step_statuses[stepKey];
+                } else if (bHistory.station_statuses && bHistory.station_statuses[st.stage_name]) {
+                    status = bHistory.station_statuses[st.stage_name];
                 }
+                step_status[stepKey] = normalizeStatus(status);
             });
 
             let finalStatusLabel = 'Pending';
@@ -1065,13 +1134,13 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
             return {
                 serial_number: s.serial_number,
-                current_stage: currentStage,
-                current_status: currentStatus,
+                current_stage: s.current_stage || 'Pending',
+                current_status: normalizeStatus(s.current_status || 'PENDING'),
                 final_status_label: finalStatusLabel,
-                total_failures: totalFailures,
-                total_reworks: totalReworks,
-                total_debugs: totalDebugs,
-                total_passed: totalPassed,
+                total_failures: Number(s.total_failures) || 0,
+                total_reworks: Number(s.total_reworks) || 0,
+                total_debugs: Number(s.total_debugs) || 0,
+                total_passed: Number(s.total_passed) || 0,
                 step_status: step_status,
                 created_at: s.created_at
             };

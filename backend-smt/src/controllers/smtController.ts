@@ -406,9 +406,10 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
     }
 
     try {
+        const cleanId = id == null ? null : String(id).trim().toUpperCase();
         const result = await pool.query(
-            'SELECT * FROM smt_work_orders WHERE UPPER(TRIM(id)) = UPPER($1) OR UPPER(TRIM(po_id)) = UPPER($1) LIMIT 1',
-            [id.trim()]
+            'SELECT * FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1',
+            [cleanId]
         );
         if (result.rowCount === 0) {
             return res.status(404).json({ success: false, error: 'Work order not found', code: 'WORK_ORDER_NOT_FOUND' });
@@ -744,9 +745,10 @@ export const viewPoDocumentFile = async (req: Request, res: Response) => {
     }
 
     try {
+        const cleanId = id == null ? null : String(id).trim().toUpperCase();
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
-            [id]
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1',
+            [cleanId]
         );
         if (result.rowCount === 0) {
             return res.status(404).json({ success: false, message: "Work Order not found" });
@@ -792,9 +794,10 @@ export const downloadPoDocument = async (req: Request, res: Response) => {
     }
 
     try {
+        const cleanId = id == null ? null : String(id).trim().toUpperCase();
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
-            [id]
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1',
+            [cleanId]
         );
         if (result.rowCount === 0) {
             return res.status(404).json({ success: false, message: "Work Order not found" });
@@ -840,9 +843,10 @@ export const previewPoDocument = async (req: Request, res: Response) => {
     }
 
     try {
+        const cleanId = id == null ? null : String(id).trim().toUpperCase();
         const result = await pool.query(
-            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR UPPER(TRIM(id)) = UPPER(TRIM($1)) OR UPPER(TRIM(po_id)) = UPPER(TRIM($1)) LIMIT 1',
-            [id]
+            'SELECT po_document_name, po_document_path, po_document_type FROM smt_work_orders WHERE id = $1 OR po_id = $1 LIMIT 1',
+            [cleanId]
         );
         if (result.rowCount === 0) {
             return res.status(404).json({ success: false, message: "Work Order not found" });
