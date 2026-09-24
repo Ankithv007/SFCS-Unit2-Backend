@@ -41,12 +41,12 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
     const { woId } = req.params;
     const side = req.query.side as string; // 'Top' or 'Bottom'
     try {
-        // First check smt_stencil_lifecycle for active records tied to this work_order_id
+        // Check smt_stencil_lifecycle for active records tied to this work_order_id
         let queryLc = `
             SELECT 
                 lc.id AS stencil_lifecycle_id,
                 lc.stencil_record_id,
-                COALESCE(lc.stencil_name, srl.stencil_name, srl.job_number) AS stencil_name,
+                COALESCE(lc.stencil_name, srl.stencil_name, srl.job_number, 'Stencil') AS stencil_name,
                 srl.revision AS stencil_version,
                 srl.status AS stencil_status,
                 srl.job_number,
@@ -60,13 +60,13 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
                 NULL AS last_cleaning_date,
                 NULL AS last_inspection_date
             FROM smt_stencil_lifecycle lc
-            JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
+            LEFT JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
             WHERE lc.work_order_id = $1
               AND lc.is_deleted = false
         `;
         const paramsLc: any[] = [woId];
         if (side) {
-            queryLc += ` AND (LOWER(lc.sides) = $2 OR LOWER(lc.sides) IN ('top/bottom', 'top / bottom'))`;
+            queryLc += ` AND (LOWER(lc.sides) = $2 OR LOWER(lc.sides) LIKE '%' || $2 || '%' OR LOWER(lc.sides) IN ('top/bottom', 'top / bottom', 'both'))`;
             paramsLc.push(side.toLowerCase().trim());
         }
         queryLc += ` ORDER BY lc.created_at DESC LIMIT 1`;
@@ -74,40 +74,41 @@ export const getStencilDetailsForWo = async (req: Request, res: Response) => {
         let result = await pool.query(queryLc, paramsLc);
 
         if (result.rows.length === 0) {
-            // Fallback: Check stencil_rack_locations for stencils checked out to this Work Order
-            let queryRack = `
-                SELECT 
-                    COALESCE(lc.id, srl.id) AS stencil_lifecycle_id,
-                    srl.id AS stencil_record_id,
-                    COALESCE(srl.stencil_name, srl.job_number, 'Stencil') AS stencil_name,
+            // Also check if any lifecycle record exists for this WO regardless of side format
+            const fallbackCheck = await pool.query(
+                `SELECT 
+                    lc.id AS stencil_lifecycle_id,
+                    lc.stencil_record_id,
+                    COALESCE(lc.stencil_name, srl.stencil_name, srl.job_number, 'Stencil') AS stencil_name,
                     srl.revision AS stencil_version,
                     srl.status AS stencil_status,
                     srl.job_number,
                     srl.thickness_mills,
-                    COALESCE(lc.qty_life_cycle, 60000) AS qty_life_cycle,
-                    COALESCE(lc.balance_life_cycle, 60000) AS remaining_life,
-                    COALESCE(lc.current_used_life_cycle, 0) AS current_life_count,
-                    COALESCE(srl.checked_out_work_order_side, srl.side) AS stencil_side,
+                    lc.qty_life_cycle,
+                    lc.balance_life_cycle AS remaining_life,
+                    lc.current_used_life_cycle AS current_life_count,
+                    lc.sides AS stencil_side,
                     srl.remarks AS stencil_remarks,
                     srl.manufacturing_date AS stencil_manufacturing_date,
                     NULL AS last_cleaning_date,
                     NULL AS last_inspection_date
-                FROM stencil_rack_locations srl
-                LEFT JOIN smt_stencil_lifecycle lc ON (lc.stencil_record_id = srl.id AND lc.is_deleted = false AND lc.work_order_id = $1)
-                WHERE srl.checked_out_work_order_id = $1
-                  AND srl.status = 'CHECKED_OUT'
-            `;
-            const paramsRack: any[] = [woId];
-            if (side) {
-                queryRack += ` AND (LOWER(srl.checked_out_work_order_side) = $2 OR LOWER(srl.side) = $2 OR LOWER(srl.checked_out_work_order_side) IN ('top/bottom', 'top / bottom') OR LOWER(srl.side) IN ('top/bottom', 'top / bottom'))`;
-                paramsRack.push(side.toLowerCase().trim());
+                FROM smt_stencil_lifecycle lc
+                LEFT JOIN stencil_rack_locations srl ON lc.stencil_record_id = srl.id
+                WHERE lc.work_order_id = $1
+                  AND lc.is_deleted = false
+                ORDER BY lc.created_at DESC LIMIT 1`,
+                [woId]
+            );
+            if (fallbackCheck.rows.length > 0) {
+                result = fallbackCheck;
             }
-            queryRack += ` ORDER BY srl.updated_at DESC LIMIT 1`;
-            result = await pool.query(queryRack, paramsRack);
         }
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'No active stencil lifecycle record found for this Work Order and Side.' });
+            return res.status(404).json({
+                message: 'No active stencil lifecycle record found for this Work Order. Please assign a stencil in Stencil Life Cycle Management first.',
+                code: 'STENCIL_NOT_ASSIGNED'
+            });
         }
         const row = result.rows[0];
         row.stencil_lifecycle_id = await ensureStencilLifecycleId(pool, row.stencil_lifecycle_id, woId, side || row.stencil_side || 'Top');
@@ -623,7 +624,14 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         const existingScanRes = await client.query(
             `SELECT * FROM smt_inspections 
              WHERE printing_session_id = $1
-               AND (scanned_barcode = $2 OR (serial_id IS NOT NULL AND serial_id = (SELECT id FROM smt_serial_numbers WHERE serial_number = $2)))
+               AND (
+                   UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($2)) 
+                   OR (serial_id IS NOT NULL AND serial_id = (
+                       SELECT id FROM smt_serial_numbers 
+                       WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($2)) 
+                       LIMIT 1
+                   ))
+               )
                AND status IN ('PASS', 'FAIL')`,
             [id, cleanBarcode]
         );
@@ -742,24 +750,33 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             }
         }
 
-        // 4. Validate barcode matches a generated serial number for the Work Order
+        // 4. Validate barcode matches a generated serial number for the Work Order (case-insensitive)
         const serialRes = await client.query(
-            `SELECT id, serial_number FROM smt_serial_numbers 
-             WHERE serial_number = $1 AND work_order_id = $2`,
+            `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
+             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
+               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
             [cleanBarcode, session.work_order_id]
         );
 
         // Case A: INVALID Barcode
         if (serialRes.rows.length === 0) {
+            const otherWoRes = await client.query(
+                `SELECT work_order_id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) LIMIT 1`,
+                [cleanBarcode]
+            );
+            const failReason = otherWoRes.rows.length > 0
+                ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
+                : 'Serial Number does not exist or does not belong to selected Work Order';
+
             // Save as INVALID inspection
             const insertInspection = `
                 INSERT INTO smt_inspections (
                     serial_id, process_step, scanned_by, status, rework_reason, work_order_id, printing_session_id, scanned_barcode
-                ) VALUES (NULL, 'Printing', $1, 'INVALID', 'Invalid Serial Number - does not belong to selected Work Order', $2, $3, $4)
+                ) VALUES (NULL, 'Printing', $1, 'INVALID', $2, $3, $4, $5)
                 RETURNING *
             `;
             const insRes = await client.query(insertInspection, [
-                operator.name, session.work_order_id, id, cleanBarcode
+                operator.name, failReason, session.work_order_id, id, cleanBarcode
             ]);
 
             // Log audit
@@ -771,7 +788,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     'PRINTING_SESSION',
                     id,
                     operator.name,
-                    `Invalid barcode scanned: ${cleanBarcode}`,
+                    `Invalid barcode scanned: ${cleanBarcode} (${failReason})`,
                     JSON.stringify(insRes.rows[0])
                 ]
             );
@@ -783,7 +800,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 isValid: false,
                 isCompleted: false,
                 sessionStatus: 'In Progress',
-                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.',
+                message: `Invalid Serial Number: ${failReason}.`,
                 statistics: stats
             });
         }
@@ -814,7 +831,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             RETURNING *
         `;
         const insRes = await client.query(insertInspection, [
-            serialRecord.id, operator.name, session.work_order_id, id, cleanBarcode
+            serialRecord.id, operator.name, session.work_order_id, id, serialRecord.serial_number || cleanBarcode
         ]);
 
         // Log audit
@@ -929,10 +946,11 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         }
         const oldRecord = inspectionRes.rows[0];
 
-        // Validate the new barcode exists in serial numbers for this WO
+        // Validate the new barcode exists in serial numbers for this WO (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number FROM smt_serial_numbers 
-             WHERE serial_number = $1 AND work_order_id = $2`,
+             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
+               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
             [cleanBarcode, session.work_order_id]
         );
         if (serialRes.rows.length === 0) {
@@ -947,7 +965,7 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         const duplicateCheck = await client.query(
             `SELECT id FROM smt_inspections 
              WHERE printing_session_id = $1 AND id <> $2
-               AND (scanned_barcode = $3 OR (serial_id IS NOT NULL AND serial_id = $4))`,
+               AND (UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($3)) OR (serial_id IS NOT NULL AND serial_id = $4))`,
             [id, scanId, cleanBarcode, newSerial.id]
         );
         if (duplicateCheck.rows.length > 0) {

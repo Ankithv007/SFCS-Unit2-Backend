@@ -36,7 +36,8 @@ export const ensureUploadDirectoriesExist = () => {
             'BOM-Split',
             'BOM-Split/Original',
             'BOM-Split/Processed',
-            'BOM-Split/Temp'
+            'BOM-Split/Temp',
+            'RRH-Work-Orders'
         ];
         subdirs.forEach(subdir => {
             const dirPath = path.join(uploadsDir, subdir);

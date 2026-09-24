@@ -345,6 +345,11 @@ export const getEligibleWorkOrdersHelper = async (
         WHERE 
             (wo.has_smt = true OR wo.has_smt IS NULL)
             AND EXISTS (
+                SELECT 1 FROM smt_stencil_lifecycle lc
+                WHERE lc.work_order_id = wo.id
+                  AND lc.is_deleted = false
+            )
+            AND EXISTS (
                 SELECT 1 FROM smt_serial_numbers sn
                 WHERE sn.work_order_id = wo.id
                   AND (sn.batch_id IS NULL OR EXISTS (
@@ -379,8 +384,23 @@ export const getEligibleWorkOrdersHelper = async (
         
         logger.info(`[Eligibility Debug] Processing WO: ${wo.work_order_id} | Sides in DB: ${wo.sides} | Resolved Active Side: ${side}`);
 
-        // For Printing stage, exclude if a session in printing is completed for this side
+        // For Printing stage, ensure assigned stencil covers resolved side, and exclude if a session in printing is completed for this side
         if (stage === 'Printing') {
+            const stencilSideRes = await pool.query(
+                `SELECT sides FROM smt_stencil_lifecycle 
+                 WHERE work_order_id = $1 AND is_deleted = false 
+                 ORDER BY created_at DESC`,
+                [wo.work_order_id]
+            );
+            const sideMatches = stencilSideRes.rows.some((r: any) => {
+                const s = (r.sides || '').trim().toLowerCase();
+                return s === 'both' || s === 'top / bottom' || s.includes(lowerSide);
+            });
+            if (!sideMatches) {
+                logger.info(`[Eligibility Debug] WO ${wo.work_order_id} rejected because assigned stencil does not cover side ${side}`);
+                continue;
+            }
+
             const sessionRes = await pool.query(
                 `SELECT 1 FROM smt_printing_sessions 
                  WHERE work_order_id = $1 
@@ -633,7 +653,13 @@ export const ensureStencilLifecycleId = async (
     // 2. Check if a lifecycle record exists by stencil_record_id or work_order_id & side
     const secondaryCheck = await client.query(
         `SELECT id FROM smt_stencil_lifecycle 
-         WHERE (stencil_record_id = $1 OR (work_order_id = $2 AND LOWER(sides) = LOWER($3)))
+         WHERE (stencil_record_id = $1 OR work_order_id = $2)
+           AND (
+               LOWER(sides) = LOWER($3) 
+               OR LOWER(sides) LIKE '%' || LOWER($3) || '%' 
+               OR LOWER(sides) = 'both'
+               OR LOWER(sides) = 'top / bottom'
+           )
            AND is_deleted = false
          ORDER BY created_at DESC 
          LIMIT 1`,
@@ -643,55 +669,21 @@ export const ensureStencilLifecycleId = async (
         return secondaryCheck.rows[0].id;
     }
 
-    // 3. Fallback: Find stencil from stencil_rack_locations and work order from smt_work_orders
-    const stencilRes = await client.query(
-        `SELECT * FROM stencil_rack_locations WHERE id = $1 OR checked_out_work_order_id = $2 ORDER BY updated_at DESC LIMIT 1`,
-        [inputId, workOrderId]
-    );
-    const woRes = await client.query(
-        `SELECT * FROM smt_work_orders WHERE id = $1`,
+    // 3. Fallback: check if ANY active lifecycle record exists for this work order
+    const fallbackWoCheck = await client.query(
+        `SELECT id FROM smt_stencil_lifecycle 
+         WHERE work_order_id = $1 AND is_deleted = false 
+         ORDER BY created_at DESC LIMIT 1`,
         [workOrderId]
     );
-
-    if (stencilRes.rows.length === 0 || woRes.rows.length === 0) {
-        throw new Error(`Cannot resolve stencil lifecycle for ID ${inputId} and Work Order ${workOrderId}.`);
+    if (fallbackWoCheck.rows.length > 0) {
+        return fallbackWoCheck.rows[0].id;
     }
 
-    const stencil = stencilRes.rows[0];
-    const wo = woRes.rows[0];
-
-    const stencilName = stencil.stencil_name || stencil.job_number || 'Stencil';
-    const stencilIdCode = stencil.stencil_rack_number || stencil.job_number || stencilName;
-    const qty = wo.quantity || 0;
-
-    const insertRes = await client.query(
-        `INSERT INTO smt_stencil_lifecycle (
-            stencil_record_id, stencil_id, stencil_name,
-            work_order_id, work_order_number, product_name, product_description,
-            sides, quantity, target_life_cycle, qty_life_cycle, balance_life_cycle,
-            current_used_life_cycle, status, created_by, created_by_name
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-        RETURNING id`,
-        [
-            stencil.id,
-            stencilIdCode,
-            stencilName,
-            wo.id,
-            wo.id,
-            wo.product_name || 'N/A',
-            wo.product_description || wo.product_name || 'N/A',
-            side || 'Top',
-            qty,
-            60000,
-            qty,
-            60000,
-            0,
-            'Running',
-            operatorName,
-            operatorName
-        ]
+    // No stencil lifecycle record assigned to this work order!
+    throw new Error(
+        `No active Stencil Life Cycle record found for Work Order "${workOrderId}". ` +
+        `The stencil must be checked out and assigned to this Work Order in Stencil Life Cycle Management before starting SMT line printing.`
     );
-
-    return insertRes.rows[0].id;
 };
 

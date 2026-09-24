@@ -578,10 +578,10 @@ router.post('/stencil-rack/locations/:locationId/relocate', [authenticateToken, 
 router.get('/stencil-rack/reports/export', authenticateToken, exportRackReport);
 router.get('/stencil-rack/:id/export/excel', authenticateToken, exportSingleRackExcel);
 
-// Stencil Scan Routes
+// Stencil Scan Routes (Accessible to all authenticated users)
 router.get('/stencil-rack/stencil-info/:jobNumber', authenticateToken, getStencilInfoByJob);
-router.post('/stencil-rack/scan/receive', [authenticateToken, requirePermission('smt_stencil_scan', 'can_edit')], scanReceive);
-router.post('/stencil-rack/scan/return', [authenticateToken, requirePermission('smt_stencil_scan', 'can_edit')], scanReturn);
+router.post('/stencil-rack/scan/receive', authenticateToken, scanReceive);
+router.post('/stencil-rack/scan/return', authenticateToken, scanReturn);
 router.get('/stencil-rack/history/:jobNumber', authenticateToken, getMovementHistory);
 
 export default router;

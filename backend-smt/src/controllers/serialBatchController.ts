@@ -15,10 +15,12 @@ const logger = createLogger('SERIAL_GENERATION_RECORD_CONTROLLER');
 // Helper to extract operator details
 const getOperator = (req: Request) => {
     const user = (req as any).user;
+    const resolvedName = user?.name || user?.employee_code || user?.email || user?.username || 'Unknown Operator';
+    const resolvedUsername = user?.employee_code || user?.username || user?.email || user?.name || 'unknown_operator';
     return {
         id: user?.id || user?.userId || null,
-        username: user?.email || user?.username || 'unknown_operator',
-        name: user?.name || 'Unknown Operator',
+        username: resolvedUsername,
+        name: resolvedName,
         role: user?.role || 'Operator'
     };
 };
@@ -88,6 +90,23 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
             return sendError(res, 400, 'This Work Order is Backend only and cannot generate SMT serial batches.', 'INVALID_PROCESS_TYPE');
         }
 
+        // Enforce Stencil Lifecycle Assignment Gate: Work Order must have an assigned stencil before SMT serial generation
+        const stencilCheck = await client.query(`
+            SELECT id, stencil_id FROM smt_stencil_lifecycle 
+            WHERE work_order_id = $1 AND is_deleted = false 
+            ORDER BY created_at DESC LIMIT 1
+        `, [work_order_id]);
+
+        if (stencilCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return sendError(
+                res, 
+                400, 
+                'Cannot generate SMT serial batch: No stencil is assigned to this Work Order. Please check out and assign a stencil in Stencil Life Cycle Management first.', 
+                'STENCIL_NOT_ASSIGNED'
+            );
+        }
+
         // 3. Calculate Cumulative Quantity & Remaining Quantity
         const activeQtyRes = await client.query(`
             SELECT COALESCE(SUM(generated_quantity), 0) AS total_generated
@@ -153,10 +172,11 @@ export const createSerialGenerationRecord = async (req: Request, res: Response) 
                 serialsToInsert.push(formatSerialNumber(prefix, suffix, separator, i, starting_number, number_length ? parseInt(number_length, 10) : null));
             }
 
-            // Global Duplicity Check
+            // Global Duplicity Check (case-insensitive)
+            const upperSerials = serialsToInsert.map(s => s.toUpperCase());
             const dupCheckRes = await client.query(`
-                SELECT serial_number FROM smt_serial_numbers WHERE serial_number = ANY($1)
-            `, [serialsToInsert]);
+                SELECT serial_number FROM smt_serial_numbers WHERE UPPER(serial_number) = ANY($1)
+            `, [upperSerials]);
 
             if (dupCheckRes.rows.length > 0) {
                 const duplicates = dupCheckRes.rows.map(r => r.serial_number);
@@ -749,7 +769,7 @@ export const checkSerialNumberExists = async (req: Request, res: Response) => {
     const { serialNumber } = req.params;
     try {
         const checkRes = await pool.query(
-            'SELECT id FROM smt_serial_numbers WHERE serial_number = $1',
+            'SELECT id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1))',
             [serialNumber.trim()]
         );
         return res.json({
@@ -846,6 +866,23 @@ export const addScannedBarcode = async (req: Request, res: Response) => {
             return sendError(res, 400, 'Scans can only be appended to Customer Barcode records.', 'VALIDATION_ERROR');
         }
 
+        // Verify Stencil Lifecycle Assignment
+        const stencilCheck = await client.query(`
+            SELECT id FROM smt_stencil_lifecycle 
+            WHERE work_order_id = $1 AND is_deleted = false 
+            ORDER BY created_at DESC LIMIT 1
+        `, [record.work_order_id]);
+
+        if (stencilCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return sendError(
+                res, 
+                400, 
+                'Cannot scan customer barcode: No active stencil is assigned to this Work Order in Stencil Life Cycle Management.', 
+                'STENCIL_NOT_ASSIGNED'
+            );
+        }
+
         // Check current count vs Work Order quantity
         const currentScanned = record.generated_quantity;
         if (currentScanned >= record.work_order_quantity) {
@@ -855,9 +892,9 @@ export const addScannedBarcode = async (req: Request, res: Response) => {
 
         const cleanBarcode = barcode.trim();
 
-        // 1. Global Duplicity Check
+        // 1. Global Duplicity Check (case-insensitive)
         const dupCheckRes = await client.query(
-            'SELECT id FROM smt_serial_numbers WHERE serial_number = $1',
+            'SELECT id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1))',
             [cleanBarcode]
         );
         if (dupCheckRes.rows.length > 0) {
@@ -1057,8 +1094,8 @@ export const updateCustomerBarcode = async (req: Request, res: Response) => {
             return sendError(res, 400, 'No changes detected.', 'NO_CHANGES');
         }
 
-        // 4. Validate: Barcode is unique across all records
-        const queryUnique = `SELECT id FROM smt_serial_numbers WHERE serial_number = $1 AND id <> $2`;
+        // 4. Validate: Barcode is unique across all records (case-insensitive)
+        const queryUnique = `SELECT id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) AND id <> $2`;
         const uniqueRes = await client.query(queryUnique, [customerBarcode, id]);
         if (uniqueRes.rows.length > 0) {
             client.release();
@@ -1279,6 +1316,16 @@ export const exportSerialGenerationExcel = async (req: Request, res: Response) =
             r++;
         };
 
+        const batchOperator = (batch.created_by_name && batch.created_by_name !== 'Unknown Operator' && batch.created_by_name !== 'unknown_operator')
+            ? batch.created_by_name
+            : (batch.created_by && batch.created_by !== 'unknown_operator' && batch.created_by !== 'Unknown Operator')
+                ? batch.created_by
+                : (operator.name && operator.name !== 'Unknown Operator' && operator.name !== 'unknown_operator')
+                    ? operator.name
+                    : (operator.username && operator.username !== 'unknown_operator' && operator.username !== 'Unknown Operator')
+                        ? operator.username
+                        : 'Unknown Operator';
+
         addKVRow('Serial Number Generated Date', formatExcelDate(batch.created_at));
         addKVRow('Work Order Number', batch.work_order_number);
         addKVRow('PO ID', batch.po_id);
@@ -1288,6 +1335,7 @@ export const exportSerialGenerationExcel = async (req: Request, res: Response) =
         addKVRow('Panel Qty', batch.panel_quantity);
         addKVRow('Number of Sides', batch.sides);
         addKVRow('Line ID', batch.line_id);
+        addKVRow('Printed By / Operator Assigned', batchOperator);
         addKVRow('Work Order Remarks', batch.work_order_remarks);
 
         // Spacer
@@ -1338,12 +1386,16 @@ export const exportSerialGenerationExcel = async (req: Request, res: Response) =
                 batch.barcode_source === 'CUSTOMER' ? 'Customer Barcode' :
                 batch.barcode_source === 'LASER' ? 'Laser Machine' : batch.barcode_source;
 
+            const rowOperator = (s.created_by && s.created_by !== 'unknown_operator' && s.created_by !== 'Unknown Operator')
+                ? s.created_by
+                : batchOperator;
+
             setCell('A', idx + 1, { horizontal: 'center' }); // Sl. No. (numeric) - centered
             setCell('B', s.serial_number, { horizontal: 'left', indent: 1 });
             setCell('C', isCust ? s.serial_number : '', { horizontal: 'left', indent: 1 });
             setCell('D', barcodeSrcLabel, { horizontal: 'center' });
             setCell('E', formatExcelDate(s.created_at), { horizontal: 'center' });
-            setCell('F', s.created_by || batch.created_by_name || '', { horizontal: 'left', indent: 1 });
+            setCell('F', rowOperator, { horizontal: 'left', indent: 1 });
 
             r++;
         });

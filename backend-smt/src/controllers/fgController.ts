@@ -587,23 +587,32 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             });
         }
 
-        // Validate barcode belongs to WO
+        // Validate barcode belongs to WO (case-insensitive)
         const serialRes = await client.query(
-            `SELECT id, serial_number FROM smt_serial_numbers 
-             WHERE serial_number = $1 AND work_order_id = $2`,
+            `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
+             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
+               AND UPPER(TRIM(work_order_id)) = UPPER(TRIM($2))`,
             [cleanBarcode, session.work_order_id]
         );
 
         if (serialRes.rows.length === 0) {
+            const otherWoRes = await client.query(
+                `SELECT work_order_id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) LIMIT 1`,
+                [cleanBarcode]
+            );
+            const failReason = otherWoRes.rows.length > 0
+                ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
+                : 'Serial Number does not exist or does not belong to selected Work Order';
+
             // Save as INVALID inspection
             const insertInspection = `
                 INSERT INTO smt_inspections (
                     serial_id, process_step, scanned_by, status, rework_reason, work_order_id, fg_session_id, scanned_barcode
-                ) VALUES (NULL, 'SMT FG', $1, 'INVALID', 'Invalid Serial Number - does not belong to selected Work Order', $2, $3, $4)
+                ) VALUES (NULL, 'SMT FG', $1, 'INVALID', $2, $3, $4, $5)
                 RETURNING *
             `;
             const insRes = await client.query(insertInspection, [
-                operator.name, session.work_order_id, id, cleanBarcode
+                operator.name, failReason, session.work_order_id, id, cleanBarcode
             ]);
 
             await client.query(
@@ -614,7 +623,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     'SMT_FG_SESSION',
                     id,
                     operator.name,
-                    `Invalid barcode scanned in SMT FG: ${cleanBarcode}`,
+                    `Invalid barcode scanned in SMT FG: ${cleanBarcode} (${failReason})`,
                     JSON.stringify(insRes.rows[0])
                 ]
             );
@@ -629,7 +638,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 isValid: false,
                 isCompleted: false,
                 sessionStatus: 'In Progress',
-                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.',
+                message: `Invalid Serial Number: ${failReason}.`,
                 statistics: stats
             });
         }
@@ -640,13 +649,13 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         const latestPostAoiRes = await client.query(
             `SELECT i.status FROM smt_inspections i
              JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-             WHERE i.work_order_id = $1
+             WHERE UPPER(TRIM(i.work_order_id)) = UPPER(TRIM($1))
                AND LOWER(ps.side) = LOWER($2)
-               AND i.serial_id = $3
-               AND i.process_step = 'Post AOI'
+               AND (i.serial_id = $3 OR UPPER(TRIM(i.scanned_barcode)) = UPPER(TRIM($4)))
+               AND (i.process_step = 'Post AOI' OR i.process_step = 'Post_AOI')
              ORDER BY i.scanned_at DESC, i.id DESC
              LIMIT 1`,
-            [session.work_order_id, session.side, serial.id]
+            [session.work_order_id, session.side, serial.id, cleanBarcode]
         );
 
         if (latestPostAoiRes.rows.length === 0 || latestPostAoiRes.rows[0].status !== 'PASS') {

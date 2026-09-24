@@ -8,7 +8,7 @@ const logger = createLogger('MaterialManagement');
 // Helper to get user operator details
 const getOperator = (req: Request): string => {
     const user = (req as any).user;
-    return user?.name || user?.email || 'Unknown Operator';
+    return user?.name || user?.employee_code || user?.email || user?.username || 'Unknown Operator';
 };
 
 interface ParsedBarcode {

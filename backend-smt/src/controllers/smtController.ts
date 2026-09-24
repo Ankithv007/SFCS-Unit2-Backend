@@ -264,8 +264,22 @@ export const getPendingWorkOrders = async (req: Request, res: Response) => {
                         (SELECT COUNT(*) FROM smt_serial_numbers sn WHERE sn.work_order_id = wo.id AND sn.status != 'Cancelled'),
                         (SELECT COALESCE(SUM(sb.generated_quantity), 0) FROM smt_serial_batches sb WHERE sb.work_order_id = wo.id AND sb.is_deleted = false AND sb.status NOT IN ('Cancelled', 'Deleted'))
                     )
-                ), 0)::int as generated_count
+                ), 0)::int as generated_count,
+                lc_info.stencil_id,
+                lc_info.stencil_name,
+                lc_info.stencil_sides,
+                true as has_stencil_assigned
             FROM smt_work_orders wo
+            JOIN (
+                SELECT 
+                    work_order_id,
+                    string_agg(DISTINCT stencil_id, ', ') as stencil_id,
+                    string_agg(DISTINCT stencil_name, ', ') as stencil_name,
+                    string_agg(DISTINCT sides, ', ') as stencil_sides
+                FROM smt_stencil_lifecycle
+                WHERE is_deleted = false
+                GROUP BY work_order_id
+            ) lc_info ON wo.id = lc_info.work_order_id
             WHERE wo.status NOT IN ('Cancelled', 'Deleted', 'Completed')
               AND (wo.has_smt = true OR wo.has_smt IS NULL)
               AND COALESCE((
@@ -949,6 +963,28 @@ export const generateSerials = async (req: Request, res: Response) => {
     // Safety Layer: Aggressive cleaning - preserved dashes for traceability
     const cleanFormat = (format || "").toUpperCase();
     const cleanSerials = (serials || []).map((s: string) => s.toUpperCase());
+
+    if (!work_order_id) {
+        return res.status(400).json({ error: "Work Order ID is required" });
+    }
+
+    try {
+        const stencilCheck = await pool.query(
+            `SELECT id, stencil_id FROM smt_stencil_lifecycle 
+             WHERE work_order_id = $1 AND is_deleted = false 
+             ORDER BY created_at DESC LIMIT 1`,
+            [work_order_id]
+        );
+        if (stencilCheck.rows.length === 0) {
+            return res.status(400).json({
+                error: "Cannot proceed with SMT serial generation: No stencil is assigned to this Work Order. Please check out and assign a stencil in Stencil Life Cycle Management first.",
+                code: "STENCIL_NOT_ASSIGNED"
+            });
+        }
+    } catch (checkErr) {
+        logger.error("Error verifying stencil assignment for generateSerials:", checkErr);
+        return res.status(500).json({ error: "Failed to verify stencil lifecycle assignment" });
+    }
 
     if (!cleanSerials || cleanSerials.length === 0) {
         // If it's "Barcode Already Available", we might just want to register it without serials
