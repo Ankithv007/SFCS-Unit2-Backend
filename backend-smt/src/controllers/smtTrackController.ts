@@ -4,6 +4,40 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('SMT_TRACK_CONTROLLER');
 
+const normalizeStageId = (s: string) => (s || '').toUpperCase().replace(/[\s\-_]/g, '');
+
+const normalizeStatus = (status: string): string => {
+    switch ((status || '').toUpperCase()) {
+        case 'ACCEPTED': return 'PASS';
+        case 'PASS':     return 'PASS';
+        case 'PASSED':   return 'PASS';
+        case 'FAILED':   return 'FAIL';
+        case 'FAIL':     return 'FAIL';
+        case 'REWORK':   return 'REWORK';
+        case 'RESOLVED': return 'RESOLVED';
+        default: return (status || '').toUpperCase();
+    }
+};
+
+const isBackendStageSelected = (stage: any, selectedStages: any): boolean => {
+    if (selectedStages === null || selectedStages === undefined) return true;
+    let list: any[] = [];
+    if (Array.isArray(selectedStages)) {
+        list = selectedStages;
+    } else if (typeof selectedStages === 'string') {
+        try { list = JSON.parse(selectedStages); } catch { list = []; }
+    }
+    if (list.length === 0) return true;
+    const codeNorm = normalizeStageId(stage.stage_code || stage.code || '');
+    const nameNorm = normalizeStageId(stage.stage_name || stage.name || '');
+    const labelNorm = normalizeStageId(stage.stage_label || stage.label || '');
+    return list.some((item: any) => {
+        const s = typeof item === 'string' ? item : (item?.stage_code || item?.stage_name || item?.code || item?.name || '');
+        const sNorm = normalizeStageId(s);
+        return sNorm === codeNorm || sNorm === nameNorm || sNorm === labelNorm;
+    });
+};
+
 export const trackSerialNumber = async (req: Request, res: Response) => {
     const { id } = req.params;
 
@@ -16,7 +50,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
     try {
         // 1. Find the serial number record
         const serialResult = await pool.query(
-            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.selected_stages, wo.created_by as wo_created_by, wo.created_at as wo_created_at
+            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.selected_stages, wo.customer_name, wo.model_name, wo.created_by as wo_created_by, wo.created_at as wo_created_at
              FROM smt_serial_numbers sn
              LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
              WHERE sn.serial_number = $1`,
@@ -69,33 +103,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             side: row.side || null,
         }));
 
-        // 3. Determine current stage (last stage in history)
-        let currentStage = 'Pending';
-        let currentStatus = 'PENDING';
-        if (history.length > 0) {
-            const lastRecord = history[history.length - 1];
-            currentStage = lastRecord.process_step;
-            currentStatus = lastRecord.status;
-        }
-
-        // 4. Compute statistics
-        const totalFailures = history.filter(h => h.status === 'REWORK' || h.status === 'FAIL').length;
-        const totalReworks = history.filter(h => h.process_step === 'Rework').length;
-        const totalPassed = history.filter(h => h.status === 'PASS').length;
-
-        // 5. Determine final status
-        let finalStatusLabel = 'IN PRODUCTION';
-        if (currentStatus === 'PASS' && currentStage === 'SMT FG') {
-            finalStatusLabel = 'COMPLETED';
-        } else if (currentStatus === 'REWORK') {
-            finalStatusLabel = 'IN REWORK';
-        } else if (currentStatus === 'FAIL') {
-            finalStatusLabel = 'FAILED';
-        } else if (currentStatus === 'PASS') {
-            finalStatusLabel = 'IN PRODUCTION';
-        }
-
-        // Fetch Solder Paste details for the work order
+        // 3. Fetch Solder Paste details for the work order
         const spResult = await pool.query(
             `SELECT 
                 solder_paste_barcode, 
@@ -125,30 +133,57 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         );
         const spLogs = spLogsResult.rows.map((row: any) => ({
             process_step: row.process_step || '-',
-            status: (row.status || '').toUpperCase(),
+            status: normalizeStatus(row.status || ''),
             scanned_by: row.scanned_by || '-',
             scanned_at: row.scanned_at,
             rework_reason: row.rework_reason || null
         }));
 
-        // Normalize backend status to production-display values
-        const normalizeBackendStatus = (status: string): string => {
-            switch ((status || '').toUpperCase()) {
-                case 'ACCEPTED': return 'PASS';
-                case 'PASS':     return 'PASS';
-                case 'FAILED':   return 'FAIL';
-                case 'FAIL':     return 'FAIL';
-                case 'REWORK':   return 'REWORK';
-                case 'RESOLVED': return 'RESOLVED';
-                default: return (status || '').toUpperCase();
-            }
-        };
-
-        // Fetch Backend process scan history if applicable
-        let backendScanHistory: any[] = [];
+        // 4. Resolve all Backend unit identifiers (PCB Barcode, Unit Serial Number, etc.)
+        const candidateBarcodes = new Set<string>([serial.serial_number.toUpperCase()]);
         try {
-            const backendRes = await backendPool.query(
+            // Lookup 1: via unit_serial_mapping (handles case where PCB barcode != SMT serial)
+            const mapRes = await backendPool.query(
+                `SELECT barcode, unit_serial_number FROM unit_serial_mapping 
+                 WHERE UPPER(TRIM(unit_serial_number)) = $1 OR UPPER(TRIM(barcode)) = $1`,
+                [serial.serial_number.toUpperCase()]
+            );
+            mapRes.rows.forEach((r: any) => {
+                if (r.barcode) candidateBarcodes.add(r.barcode.toUpperCase());
+                if (r.unit_serial_number) candidateBarcodes.add(r.unit_serial_number.toUpperCase());
+            });
+
+            // Lookup 2: check units table directly in case barcode = SMT serial (no mapping row needed)
+            const unitsRes = await backendPool.query(
+                `SELECT barcode FROM units WHERE UPPER(TRIM(barcode)) = $1 LIMIT 1`,
+                [serial.serial_number.toUpperCase()]
+            );
+            unitsRes.rows.forEach((r: any) => {
+                if (r.barcode) candidateBarcodes.add(r.barcode.toUpperCase());
+            });
+        } catch (mErr: any) {
+            logger.warn('Backend unit identifier lookup warning:', mErr.message);
+        }
+
+        // 5. Dynamic Backend Stages & Scans (Data-Driven for future-proofing)
+        let backendStagesList: any[] = [];
+        let backendScanHistory: any[] = [];
+        let backendStagesResolved: any[] = [];
+
+        try {
+            const bStagesRes = await backendPool.query(
+                `SELECT id, stage_code, stage_name, stage_order, workflow_type 
+                 FROM production_stages 
+                 WHERE is_active = TRUE AND workflow_type = 'STANDARD'
+                 ORDER BY stage_order ASC`
+            );
+            backendStagesList = bStagesRes.rows;
+
+            const bScansRes = await backendPool.query(
                 `SELECT 
+                    s.id,
+                    s.barcode,
+                    s.stage_id,
                     ps.stage_code,
                     ps.stage_name AS station,
                     ps.stage_order,
@@ -158,21 +193,137 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                     s.remarks
                 FROM scans s
                 JOIN production_stages ps ON s.stage_id = ps.id
-                WHERE s.barcode = $1
-                ORDER BY s.scanned_at ASC`,
-                [serial.serial_number]
+                WHERE UPPER(TRIM(s.barcode)) = ANY($1)
+                ORDER BY s.scanned_at ASC, s.id ASC`,
+                [Array.from(candidateBarcodes)]
             );
-            backendScanHistory = backendRes.rows.map((row: any) => ({
+
+            // Audit Log: only ACTUAL scans recorded in database
+            backendScanHistory = bScansRes.rows.map((row: any) => ({
+                id: row.id,
                 stage_code: row.stage_code || null,
-                station: row.station,
+                station: row.station || row.stage_name || row.stage_code,
                 stage_order: row.stage_order,
-                status: normalizeBackendStatus(row.status),
+                status: normalizeStatus(row.status),
                 scanned_by: row.scanned_by || '-',
                 scanned_at: row.scanned_at,
                 remarks: row.remarks || null,
             }));
+
+            // Resolve Pipeline Status for every backend stage
+            backendStagesResolved = backendStagesList.map((stage: any) => {
+                const isSelected = isBackendStageSelected(stage, serial.selected_stages);
+                if (!isSelected) {
+                    return {
+                        code: stage.stage_code,
+                        name: stage.stage_name,
+                        label: stage.stage_label || stage.stage_name,
+                        stage_order: stage.stage_order,
+                        is_selected: false,
+                        status: 'N/A',
+                        scans_count: 0,
+                        scans: []
+                    };
+                }
+
+                const stageScans = backendScanHistory.filter((h: any) => {
+                    const sc = normalizeStageId(h.stage_code || '');
+                    const st = normalizeStageId(h.station || '');
+                    const cn = normalizeStageId(stage.stage_code);
+                    const nn = normalizeStageId(stage.stage_name);
+                    const ln = normalizeStageId(stage.stage_label || '');
+                    return sc === cn || st === cn || st === nn || (ln && st === ln);
+                });
+
+                if (stageScans.length > 0) {
+                    const latest = stageScans[stageScans.length - 1];
+                    const rawSt = latest.status;
+                    const stageStatus = (rawSt === 'PASS' || rawSt === 'ACCEPTED') ? 'PASSED' : (rawSt === 'FAIL' || rawSt === 'FAILED') ? 'FAILED' : rawSt;
+                    return {
+                        code: stage.stage_code,
+                        name: stage.stage_name,
+                        label: stage.stage_label || stage.stage_name,
+                        stage_order: stage.stage_order,
+                        is_selected: true,
+                        status: stageStatus,
+                        scans_count: stageScans.length,
+                        scans: stageScans
+                    };
+                } else {
+                    return {
+                        code: stage.stage_code,
+                        name: stage.stage_name,
+                        label: stage.stage_label || stage.stage_name,
+                        stage_order: stage.stage_order,
+                        is_selected: true,
+                        status: 'PENDING',
+                        scans_count: 0,
+                        scans: []
+                    };
+                }
+            });
+
         } catch (bErr: any) {
-            logger.warn('Failed to fetch backend scan history:', bErr.message);
+            logger.warn('Failed to fetch backend stages/scans:', bErr.message);
+        }
+
+        // 6. Build single COMBINED scan history (SMT + Backend) in true chronological order
+        const combinedHistory = [
+            ...history.map((h: any) => ({
+                id: h.id,
+                source: 'SMT',
+                process_step: h.process_step || '-',
+                status: normalizeStatus(h.status || ''),
+                scanned_by: h.scanned_by || '-',
+                scanned_at: h.scanned_at,
+                remark: h.rework_reason || null,
+                side: h.side || null
+            })),
+            ...backendScanHistory.map((h: any) => ({
+                id: h.id,
+                source: 'Backend',
+                process_step: h.station || h.stage_code || '-',
+                status: normalizeStatus(h.status || ''),
+                scanned_by: h.scanned_by || '-',
+                scanned_at: h.scanned_at,
+                remark: h.remarks || null,
+                side: null
+            }))
+        ].sort((a, b) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime());
+
+        // 7. Determine Current Stage & Status from the latest actual scan across BOTH SMT and Backend
+        let currentStage = 'Pending';
+        let currentStatus = 'PENDING';
+        if (combinedHistory.length > 0) {
+            const lastRecord = combinedHistory[combinedHistory.length - 1];
+            currentStage = lastRecord.process_step;
+            currentStatus = lastRecord.status;
+        }
+
+        // 8. Compute summary statistics from COMBINED SMT + Backend tracking records
+        const totalFailures = combinedHistory.filter(h => h.status === 'REWORK' || h.status === 'FAIL').length;
+        const totalReworks = combinedHistory.filter(h => h.process_step === 'Rework' || h.status === 'REWORK').length;
+        const totalPassed = combinedHistory.filter(h => h.status === 'PASS').length;
+
+        // 9. Determine final overall status
+        let finalStatusLabel = 'IN PRODUCTION';
+        const hasBackend = serial.has_backend ?? true;
+        const hasSmt = serial.has_smt ?? true;
+        const selectedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected).length;
+        const passedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected && s.status === 'PASSED').length;
+
+        if (currentStatus === 'REWORK') {
+            finalStatusLabel = 'IN REWORK';
+        } else if (currentStatus === 'FAIL') {
+            finalStatusLabel = 'FAILED';
+        } else {
+            const smtFgPassed = !hasSmt || history.some(h => (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && h.status === 'PASS');
+            const backendPassed = !hasBackend || selectedBackendCount === 0 || (passedBackendCount === selectedBackendCount);
+            if (smtFgPassed && backendPassed) {
+                finalStatusLabel = 'COMPLETED';
+            } else {
+                finalStatusLabel = 'IN PRODUCTION';
+            }
         }
 
         return res.status(200).json({
@@ -180,6 +331,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             serial_format: serial.serial_format,
             work_order_id: serial.work_order_id,
             product_name: serial.product_name || '-',
+            customer_name: serial.customer_name || '-',
+            model_name: serial.model_name || '-',
             quantity: serial.quantity || '-',
             line_id: serial.line_id || '-',
             sides: serial.sides || '-',
@@ -195,6 +348,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             total_passed: totalPassed,
             scan_history: history,
             backend_scan_history: backendScanHistory,
+            backend_stages: backendStagesResolved,
+            combined_history: combinedHistory,
             solder_paste: {
                 barcode: sp.solder_paste_barcode || '-',
                 status: sp.solder_paste_status || 'Pending',
@@ -1046,7 +1201,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
         let selectedBackendStages: any[] = [];
         if (wo.has_backend) {
             try {
-                const bStagesRes = await backendPool.query('SELECT id, stage_code, stage_name, stage_label FROM production_stages ORDER BY stage_order ASC');
+                const bStagesRes = await backendPool.query('SELECT id, stage_code, stage_name FROM production_stages ORDER BY stage_order ASC');
                 backendStagesList = bStagesRes.rows;
                 if (wo.selected_stages) {
                     try {
@@ -1297,4 +1452,250 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to download Work Order Excel report: ' + err.message });
     }
 };
+
+export const downloadSerialNumberExcel = async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    if (!id || id.trim() === '') {
+        return res.status(400).json({ error: 'Serial Number is required.' });
+    }
+
+    const inputValue = id.trim().toUpperCase();
+
+    try {
+        // 1. Fetch Serial Details
+        let serialResult = await pool.query(
+            `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.selected_stages, wo.customer_name, wo.model_name
+             FROM smt_serial_numbers sn
+             LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
+             WHERE UPPER(TRIM(sn.serial_number)) = $1`,
+            [inputValue]
+        );
+
+        if ((serialResult.rowCount ?? 0) === 0) {
+            try {
+                const mapCheck = await backendPool.query(
+                    `SELECT barcode, unit_serial_number FROM unit_serial_mapping 
+                     WHERE UPPER(TRIM(unit_serial_number)) = $1 OR UPPER(TRIM(barcode)) = $1
+                     LIMIT 1`,
+                    [inputValue]
+                );
+                if (mapCheck.rowCount && mapCheck.rowCount > 0) {
+                    const mappedSn = mapCheck.rows[0].unit_serial_number || mapCheck.rows[0].barcode;
+                    serialResult = await pool.query(
+                        `SELECT sn.*, wo.product_name, wo.quantity, wo.line_id, wo.sides, wo.has_smt, wo.has_backend, wo.selected_stages, wo.customer_name, wo.model_name
+                         FROM smt_serial_numbers sn
+                         LEFT JOIN smt_work_orders wo ON sn.work_order_id = wo.id
+                         WHERE UPPER(TRIM(sn.serial_number)) = $1 OR UPPER(TRIM(sn.serial_number)) = $2`,
+                        [mappedSn.toUpperCase(), (mapCheck.rows[0].barcode || '').toUpperCase()]
+                    );
+                }
+            } catch (mErr: any) {
+                logger.warn('Backend mapping check warning:', mErr.message);
+            }
+        }
+
+        if ((serialResult.rowCount ?? 0) === 0) {
+            return res.status(404).json({ error: `Serial Number "${inputValue}" was not found.` });
+        }
+
+        const serial = serialResult.rows[0];
+
+        // 2. Fetch SMT Inspection History
+        const historyResult = await pool.query(
+            `SELECT i.id, i.process_step, i.scanned_by, i.scanned_at, i.status, i.rework_reason
+             FROM smt_inspections i
+             WHERE i.serial_id = $1
+             ORDER BY i.scanned_at ASC`,
+            [serial.id]
+        );
+
+        const history = historyResult.rows.map((row: any) => ({
+            id: row.id,
+            source: 'SMT',
+            process_step: row.process_step || '-',
+            status: normalizeStatus(row.status || ''),
+            scanned_by: row.scanned_by || '-',
+            scanned_at: row.scanned_at,
+            remark: row.rework_reason || null
+        }));
+
+        // 3. Resolve Backend Scans
+        const candidateBarcodes = new Set<string>([serial.serial_number.toUpperCase()]);
+        try {
+            const mapRes = await backendPool.query(
+                `SELECT barcode, unit_serial_number FROM unit_serial_mapping 
+                 WHERE UPPER(TRIM(unit_serial_number)) = $1 OR UPPER(TRIM(barcode)) = $1`,
+                [serial.serial_number.toUpperCase()]
+            );
+            mapRes.rows.forEach((r: any) => {
+                if (r.barcode) candidateBarcodes.add(r.barcode.toUpperCase());
+                if (r.unit_serial_number) candidateBarcodes.add(r.unit_serial_number.toUpperCase());
+            });
+
+            const unitsRes = await backendPool.query(
+                `SELECT barcode FROM units WHERE UPPER(TRIM(barcode)) = $1 LIMIT 1`,
+                [serial.serial_number.toUpperCase()]
+            );
+            unitsRes.rows.forEach((r: any) => {
+                if (r.barcode) candidateBarcodes.add(r.barcode.toUpperCase());
+            });
+        } catch (mErr: any) {
+            logger.warn('Backend candidate barcode lookup warning:', mErr.message);
+        }
+
+        let backendScanHistory: any[] = [];
+        try {
+            const bScansRes = await backendPool.query(
+                `SELECT s.id, ps.stage_code, ps.stage_name AS station, s.scan_result AS status, s.scanned_by, s.scanned_at, s.remarks
+                 FROM scans s
+                 JOIN production_stages ps ON s.stage_id = ps.id
+                 WHERE UPPER(TRIM(s.barcode)) = ANY($1)
+                 ORDER BY s.scanned_at ASC, s.id ASC`,
+                [Array.from(candidateBarcodes)]
+            );
+            backendScanHistory = bScansRes.rows.map((row: any) => ({
+                id: row.id,
+                source: 'Backend',
+                process_step: row.station || row.stage_name || row.stage_code || '-',
+                status: normalizeStatus(row.status),
+                scanned_by: row.scanned_by || '-',
+                scanned_at: row.scanned_at,
+                remark: row.remarks || null
+            }));
+        } catch (bErr: any) {
+            logger.warn('Failed to fetch backend scans:', bErr.message);
+        }
+
+        // Combined History in Chronological Order
+        const combinedHistory = [...history, ...backendScanHistory].sort(
+            (a, b) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime()
+        );
+
+        let currentStage = 'Pending';
+        let currentStatus = 'PENDING';
+        if (combinedHistory.length > 0) {
+            const lastRecord = combinedHistory[combinedHistory.length - 1];
+            currentStage = lastRecord.process_step;
+            currentStatus = lastRecord.status;
+        }
+
+        const totalFailures = combinedHistory.filter(h => h.status === 'REWORK' || h.status === 'FAIL').length;
+        const totalReworks = combinedHistory.filter(h => h.process_step === 'Rework' || h.status === 'REWORK').length;
+        const totalPassed = combinedHistory.filter(h => h.status === 'PASS').length;
+
+        // Build Excel Workbook
+        const ExcelJS = require('exceljs');
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Serial Traceability');
+
+        const labelStyle = { font: { bold: true, color: { argb: 'FF595959' }, name: 'Segoe UI', size: 10 } };
+        const valueStyle = { font: { bold: true, name: 'Segoe UI', size: 10 } };
+        const borderStyle = {
+            top: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            left: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE0E0E0' } },
+            right: { style: 'thin', color: { argb: 'FFE0E0E0' } }
+        };
+
+        const metadata = [
+            { label: 'Serial Number:', val: serial.serial_number },
+            { label: 'Work Order ID:', val: serial.work_order_id },
+            { label: 'Product Name:', val: serial.product_name || '-' },
+            { label: 'Line ID:', val: serial.line_id || '-' },
+            { label: 'Process Selection:', val: serial.has_smt && serial.has_backend ? 'SMT + Backend' : serial.has_smt ? 'SMT' : 'Backend' },
+            { label: 'Sides:', val: serial.sides || '-' },
+            { label: 'Current Stage:', val: currentStage },
+            { label: 'Overall Status:', val: currentStatus },
+            { label: 'Total Stages Passed:', val: totalPassed },
+            { label: 'Rework Events:', val: totalReworks },
+            { label: 'Total Failures:', val: totalFailures },
+            { label: 'Report Generated:', val: new Date().toLocaleString() }
+        ];
+
+        metadata.forEach((item, index) => {
+            const rowNumber = index + 1;
+            worksheet.getCell(`A${rowNumber}`).value = item.label;
+            worksheet.getCell(`A${rowNumber}`).style = labelStyle;
+            worksheet.getCell(`B${rowNumber}`).value = item.val;
+            worksheet.getCell(`B${rowNumber}`).style = valueStyle;
+        });
+
+        worksheet.addRow([]); // Blank spacer
+
+        const tableHeaders = ['#', 'SOURCE', 'PROCESS STEP', 'STATUS', 'SCANNED BY', 'SCANNED AT', 'REMARK'];
+        const headerRow = worksheet.addRow(tableHeaders);
+        headerRow.height = 24;
+
+        headerRow.eachCell((cell: any) => {
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI', size: 10 };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = borderStyle;
+        });
+
+        combinedHistory.forEach((row: any, idx: number) => {
+            const rowData = [
+                idx + 1,
+                row.source,
+                row.process_step,
+                row.status,
+                row.scanned_by,
+                row.scanned_at ? new Date(row.scanned_at).toLocaleString() : '-',
+                row.remark || '-'
+            ];
+            const dataRow = worksheet.addRow(rowData);
+            dataRow.height = 20;
+
+            dataRow.eachCell((cell: any, colNumber: number) => {
+                cell.font = { name: 'Segoe UI', size: 10 };
+                cell.border = borderStyle;
+                cell.alignment = { horizontal: colNumber === 1 || colNumber === 2 || colNumber === 4 ? 'center' : 'left', vertical: 'middle' };
+
+                if (colNumber === 2) {
+                    cell.font = { bold: true, color: { argb: row.source === 'SMT' ? 'FF2563EB' : 'FF059669' }, name: 'Segoe UI', size: 10 };
+                }
+                if (colNumber === 4) {
+                    const st = row.status.toUpperCase();
+                    if (st === 'PASS') {
+                        cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (st === 'FAIL' || st === 'REWORK') {
+                        cell.font = { color: { argb: 'FFFF0000' }, bold: true, name: 'Segoe UI', size: 10 };
+                    }
+                }
+            });
+        });
+
+        worksheet.columns.forEach((column: any) => {
+            let maxLen = 0;
+            column.eachCell!({ includeEmpty: true }, (cell: any) => {
+                if (cell.row && (cell.row as any).number <= 13) return;
+                const len = cell.value ? cell.value.toString().length : 0;
+                if (len > maxLen) maxLen = len;
+            });
+            column.width = maxLen < 15 ? 15 : maxLen + 5;
+        });
+
+        worksheet.getColumn(1).width = 8;
+        worksheet.getColumn(2).width = 12;
+        worksheet.getColumn(3).width = 25;
+
+        const safeSn = inputValue.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const nowStr = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        const filename = `SMT_Serial_Traceability_${safeSn}_${nowStr}.xlsx`;
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+
+        await workbook.xlsx.write(res);
+        res.end();
+
+    } catch (err: any) {
+        logger.error('❌ Error in downloadSerialNumberExcel:', err);
+        return res.status(500).json({ error: 'Failed to download Serial Number Excel report: ' + err.message });
+    }
+};
+
 

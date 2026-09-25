@@ -258,9 +258,18 @@ import {
     assignOperator,
     getPendingFgJobs
 } from '../controllers/smtFgOperatorController';
-
+import { getPreviousStagePassed } from '../controllers/previousStageController';
 
 const router = express.Router();
+
+// Previous Stage Passed Unified API
+router.get('/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+router.get('/spi/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+router.get('/pre-aoi/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+router.get('/post-aoi/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+router.get('/rework/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+router.get('/smt-fg/previous-stage-passed', authenticateToken, getPreviousStagePassed);
+
 
 
 // Admin Production Dashboard APIs
