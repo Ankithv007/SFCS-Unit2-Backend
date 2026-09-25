@@ -5,18 +5,34 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('AuthMiddleware');
 
 export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-        logger.warn('Unauthorized access attempt: No token provided');
-        return res.status(401).json({ error: 'Unauthorized: No token provided' });
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+            (req as any).user = decoded;
+            return next();
+        } catch (err) {
+            logger.warn('AuthMiddleware: Invalid token provided, checking fallback headers');
+        }
     }
 
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-        (req as any).user = decoded;
-        next();
-    } catch (err) {
-        logger.warn('Unauthorized access attempt: Invalid token');
-        return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    // Fallback: Check custom headers (X-User-Name, X-Username, X-Backend-User-Id)
+    const headerName = (req.headers['x-user-name'] as string)
+        || (req.headers['x-username'] as string)
+        || (req.headers['x-backend-user-id'] as string);
+
+    if (headerName && headerName.trim().length > 0) {
+        (req as any).user = {
+            id: req.headers['x-backend-user-id'] || null,
+            name: headerName.trim(),
+            username: headerName.trim(),
+            role: 'OPERATOR'
+        };
+        return next();
     }
+
+    logger.warn('Unauthorized access attempt: No token or user identity provided');
+    return res.status(401).json({ error: 'Unauthorized: No valid session or token provided' });
 };

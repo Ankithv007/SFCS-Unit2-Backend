@@ -614,7 +614,16 @@ export const getWorkOrders = async (req: Request, res: Response) => {
     let client;
     try {
         const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
-        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit as string, 10) || 15));
+        const limitParam = req.query.limit as string;
+        let limit = 15;
+        if (limitParam === 'all' || limitParam === '-1') {
+            limit = 10000;
+        } else {
+            const parsedLimit = parseInt(limitParam, 10);
+            if (!isNaN(parsedLimit) && parsedLimit > 0) {
+                limit = Math.min(parsedLimit, 10000);
+            }
+        }
         const offset = (page - 1) * limit;
         const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
         const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
@@ -683,13 +692,20 @@ export const getWorkOrders = async (req: Request, res: Response) => {
 export const getWorkOrderById = async (req: Request, res: Response) => {
     let client;
     try {
-        const id = parseInt(req.params.id, 10);
-        if (isNaN(id)) {
+        const paramId = req.params.id;
+        if (!paramId || !paramId.trim()) {
             return res.status(400).json({ success: false, error: 'Invalid Work Order ID.' });
         }
 
         client = await getClient();
-        const woRes = await client.query('SELECT * FROM rrh_work_orders WHERE id = $1', [id]);
+        const numId = parseInt(paramId, 10);
+        let woRes;
+        if (!isNaN(numId) && String(numId) === paramId.trim()) {
+            woRes = await client.query('SELECT * FROM rrh_work_orders WHERE id = $1', [numId]);
+        } else {
+            woRes = await client.query('SELECT * FROM rrh_work_orders WHERE work_order_id = $1', [paramId.trim()]);
+        }
+
         if (woRes.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Work Order not found.' });
         }

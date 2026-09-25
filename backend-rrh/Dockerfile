@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -9,6 +9,9 @@ RUN npm install
 # Copy source code and build
 COPY . .
 RUN npm run build
+
+# Ensure schema.sql is available in the dist folder
+RUN mkdir -p dist/db && cp src/db/schema.sql dist/db/
 
 # Add a non-root user to avoid running as root
 # Using the same standard as backend-smt
