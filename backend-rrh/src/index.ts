@@ -16,8 +16,10 @@ const logger = createLogger('Server');
 app.use(cors());
 app.use(express.json());
 
-// Init Directories
-ensureUploadDirectoriesExist();
+import path from 'path';
+import fs from 'fs';
+import { pool } from './utils/db';
+import { runMigrations } from './db/runMigrations';
 
 // Routes
 app.use('/api/rrh', masterDataRoutes);
@@ -28,7 +30,43 @@ app.get('/api/rrh/health', (req, res) => {
     res.status(200).json({ status: 'RRH Service is healthy.' });
 });
 
-// Start Server
-app.listen(PORT, () => {
-    logger.info(`RRH Microservice running on port ${PORT}`);
-});
+// Initialize Database Tables from schema.sql
+const initDB = async () => {
+    try {
+        logger.info("Initializing RRH database tables...");
+        const schemaPath = path.join(__dirname, 'db/schema.sql');
+
+        if (fs.existsSync(schemaPath)) {
+            const schema = fs.readFileSync(schemaPath, 'utf8');
+            await pool.query(schema);
+            logger.info("RRH Database tables initialized successfully from schema.sql.");
+            
+            // Run enterprise migrations
+            await runMigrations();
+            
+            logger.info("RRH migrations completed.");
+        } else {
+            logger.warn(`schema.sql not found at ${schemaPath}`);
+        }
+    } catch (err: any) {
+        logger.error(`Error initializing RRH database tables: ${err.message}`);
+        // Let the failure bubble up to startServer
+        throw err;
+    }
+};
+
+const startServer = async () => {
+    try {
+        ensureUploadDirectoriesExist();
+        await initDB();
+        
+        app.listen(PORT, () => {
+            logger.info(`RRH Microservice running on port ${PORT}`);
+        });
+    } catch (err: any) {
+        logger.error(`Failed to start RRH Backend Server: ${err.message}`);
+        process.exit(1);
+    }
+};
+
+startServer();

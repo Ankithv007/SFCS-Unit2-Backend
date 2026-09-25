@@ -9,7 +9,7 @@ import {
 import {
     getSessionStats,
     scanBarcode,
-    repairScan,
+    assignUnit,
     getRemainingMasterData,
     failScan,
     editScan,
@@ -32,7 +32,7 @@ router.delete('/sessions/:id', authMiddleware, deleteSession);
 // Session stats & scanning & remaining master data (authenticated)
 router.get('/sessions/:id/stats', authMiddleware, getSessionStats);
 router.post('/sessions/:id/scan', authMiddleware, scanBarcode);
-router.post('/sessions/:id/scan/:scanId/repair', authMiddleware, repairScan);
+router.post('/sessions/:id/assign', authMiddleware, assignUnit);
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingMasterData);
 router.post('/sessions/:id/scan/:scanId/fail', authMiddleware, failScan);
 router.put('/sessions/:id/scan/:scanId', authMiddleware, editScan);

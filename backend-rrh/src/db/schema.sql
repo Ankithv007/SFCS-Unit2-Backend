@@ -131,3 +131,58 @@ CREATE TABLE IF NOT EXISTS rrh_replaced_inventory (
     sfp0_serial_no VARCHAR(255),
     sfp1_serial_no VARCHAR(255)
 );
+
+-- 5. Inward Session and Scanning
+CREATE TABLE IF NOT EXISTS rrh_inward_sessions (
+    id SERIAL PRIMARY KEY,
+    work_order_id VARCHAR(255) NOT NULL,
+    status VARCHAR(50) DEFAULT 'In Progress',
+    duplicate_scan_count INTEGER DEFAULT 0,
+    created_by VARCHAR(255),
+    created_by_name VARCHAR(255),
+    updated_by VARCHAR(255),
+    updated_by_name VARCHAR(255),
+    deleted_by VARCHAR(255),
+    deleted_by_name VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT false,
+    side VARCHAR(50)
+);
+
+CREATE TABLE IF NOT EXISTS rrh_inward_scans (
+    id SERIAL PRIMARY KEY,
+    rrh_inward_session_id INTEGER REFERENCES rrh_inward_sessions(id),
+    work_order_id VARCHAR(255) NOT NULL,
+    serial_number VARCHAR(255) NOT NULL,
+    original_serial_number VARCHAR(255),
+    corrected_serial_number VARCHAR(255),
+    physical_tpn VARCHAR(255),
+    band_serial_no VARCHAR(255),
+    matched_inventory_id INTEGER REFERENCES rrh_inventory(id) ON DELETE SET NULL,
+    status VARCHAR(50) DEFAULT 'PASS',
+    remark TEXT,
+    repair_remark TEXT,
+    repair_time TIMESTAMP,
+    repaired_by VARCHAR(255),
+    scanned_by VARCHAR(255),
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_inward_scans_session_id ON rrh_inward_scans(rrh_inward_session_id);
+CREATE INDEX IF NOT EXISTS idx_inward_scans_serial ON rrh_inward_scans(serial_number);
+
+CREATE TABLE IF NOT EXISTS rrh_inward_session_master_consumption (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES rrh_inward_sessions(id) ON DELETE CASCADE,
+    inventory_id INTEGER NOT NULL REFERENCES rrh_inventory(id) ON DELETE CASCADE,
+    scan_id INTEGER REFERENCES rrh_inward_scans(id) ON DELETE SET NULL,
+    consumed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_session_inventory UNIQUE (session_id, inventory_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inward_consumption_session_id ON rrh_inward_session_master_consumption(session_id);
+CREATE INDEX IF NOT EXISTS idx_inward_consumption_inventory_id ON rrh_inward_session_master_consumption(inventory_id);
+

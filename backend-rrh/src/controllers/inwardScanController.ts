@@ -6,9 +6,8 @@ const logger = createLogger('InwardScanController');
 
 const getSessionUser = (req: Request) => {
     const user = (req as any).user;
-    const headerName = (req.headers['x-user-name'] as string) || (req.headers['x-username'] as string);
-    // Prefer human-readable name first, then employee_code, then email, then header fallback
-    const resolvedName = user?.name || user?.employee_code || user?.email || headerName || 'Unknown User';
+    // Prefer human-readable name first, then employee_code, then email
+    const resolvedName = user?.name || user?.employee_code || user?.email || 'Unknown User';
     return {
         id: user?.id || user?.userId || null,
         name: resolvedName,
@@ -59,7 +58,8 @@ export const getSessionStats = async (req: Request, res: Response) => {
                 s.repair_time, 
                 s.repair_remark,
                 s.repaired_by,
-                i.sl_no
+                i.sl_no,
+                i.remarks_2 as master_remark
              FROM rrh_inward_scans s
              LEFT JOIN rrh_inventory i ON s.matched_inventory_id = i.id
              WHERE s.rrh_inward_session_id = $1 AND s.is_deleted = false
@@ -71,14 +71,15 @@ export const getSessionStats = async (req: Request, res: Response) => {
 
         // 3. Calculate statistics
         const passed = scans.filter((s: any) => s.result === 'PASS').length;
+        const editedPass = scans.filter((s: any) => s.result === 'EDITED PASS').length;
         const failed = scans.filter((s: any) => s.result === 'FAIL').length;
         const invalid = scans.filter((s: any) => s.result === 'INVALID').length;
         const duplicate = session.duplicate_scan_count || 0;
-        const pending = Math.max(0, lotQuantity - passed);
-        const yieldRate = lotQuantity > 0 ? ((passed / lotQuantity) * 100).toFixed(2) : '0.00';
+        const pending = Math.max(0, lotQuantity - passed - editedPass);
+        const yieldRate = lotQuantity > 0 ? (((passed + editedPass) / lotQuantity) * 100).toFixed(2) : '0.00';
 
         // 4. Check if session should be completed (only successful passes count towards lotQuantity)
-        const isCompleted = lotQuantity > 0 && passed >= lotQuantity;
+        const isCompleted = lotQuantity > 0 && (passed + editedPass) >= lotQuantity;
 
         if (isCompleted && session.status === 'In Progress') {
             await pool.query(
@@ -92,6 +93,7 @@ export const getSessionStats = async (req: Request, res: Response) => {
             workOrderQuantity: lotQuantity,
             lotQuantity,
             passed,
+            editedPass,
             failed,
             invalid,
             pending,
@@ -241,7 +243,7 @@ export const scanBarcode = async (req: Request, res: Response) => {
             // Check if this scan completes the session
             const passedCountRes = await client.query(
                 `SELECT COUNT(*)::int as count FROM rrh_inward_scans 
-                 WHERE rrh_inward_session_id = $1 AND status = 'PASS' AND is_deleted = false`,
+                 WHERE rrh_inward_session_id = $1 AND status IN ('PASS', 'EDITED PASS') AND is_deleted = false`,
                 [id]
             );
             const currentPassed = passedCountRes.rows[0]?.count || 0;
@@ -270,30 +272,13 @@ export const scanBarcode = async (req: Request, res: Response) => {
             });
         } else {
             // NO EXACT MATCH = INVALID
-            const insertInvalidRes = await client.query(
-                `INSERT INTO rrh_inward_scans (
-                    rrh_inward_session_id, work_order_id, serial_number, original_serial_number,
-                    physical_tpn, band_serial_no, matched_inventory_id, status, remark,
-                    scanned_by, scanned_at
-                 ) VALUES ($1, $2, $3, $3, NULL, NULL, NULL, 'INVALID', $4, $5, CURRENT_TIMESTAMP)
-                 RETURNING *`,
-                [id, session.work_order_id, cleanBarcode, 'Serial Number does not match Work Order master data.', operator.name]
-            );
-            const invalidScan = insertInvalidRes.rows[0];
-
-            await client.query('COMMIT');
+            // Per new requirement: Invalid scans must never enter Scanned Product Logs.
+            await client.query('ROLLBACK');
 
             return res.status(200).json({
                 isValid: false,
                 result: 'INVALID',
-                message: `Invalid Serial Number "${cleanBarcode}". Serial Number does not belong to the selected Work Order.`,
-                scan: {
-                    ...invalidScan,
-                    id: invalidScan.id,
-                    scan_id: invalidScan.id,
-                    barcode: cleanBarcode,
-                    physical_serial_number: cleanBarcode
-                }
+                message: `Invalid Serial Number "${cleanBarcode}". Serial Number does not belong to the selected Work Order.`
             });
         }
     } catch (err: any) {
@@ -306,25 +291,27 @@ export const scanBarcode = async (req: Request, res: Response) => {
 };
 
 /**
- * POST /api/rrh/inward/sessions/:id/scan/:scanId/repair
- * Revalidates and corrects an INVALID scan (e.g. 0 vs O typo correction).
- * Preserves the original scanned serial and audit fields while consuming matching master data on PASS.
+ * POST /api/rrh/inward/sessions/:id/assign
+ * Assigns a physical serial number to a remaining master data record.
+ * Status becomes 'EDITED PASS'.
  */
-export const repairScan = async (req: Request, res: Response) => {
-    const { id, scanId } = req.params;
-    const correctedSerial = (req.body.correctedSerial || req.body.corrected_serial_number || '').trim();
-    const repairRemark = (req.body.repairRemark || req.body.repair_remark || '').trim();
+export const assignUnit = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { inventoryId, physicalSerialNumber, remark } = req.body;
     const operator = getSessionUser(req);
 
-    if (!correctedSerial) {
-        return res.status(400).json({ message: 'Corrected Serial Number is required.' });
-    }
-    if (!repairRemark) {
-        return res.status(400).json({ message: 'Correction remark is mandatory.' });
-    }
+    const cleanSerial = (physicalSerialNumber || '').trim();
+    const cleanRemark = (remark || '').trim();
 
-    const cleanCorrected = correctedSerial;
-    const cleanRemark = repairRemark;
+    if (!inventoryId) {
+        return res.status(400).json({ message: 'Master Data inventory ID is required.' });
+    }
+    if (!cleanSerial) {
+        return res.status(400).json({ message: 'Physical Serial Number is required.' });
+    }
+    if (!cleanRemark) {
+        return res.status(400).json({ message: 'Assignment remark is mandatory.' });
+    }
 
     const client = await pool.connect();
     try {
@@ -348,47 +335,12 @@ export const repairScan = async (req: Request, res: Response) => {
         const session = sessionRes.rows[0];
         if (session.status !== 'In Progress') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ message: `Cannot repair: session is ${session.status}.` });
+            return res.status(400).json({ message: `Cannot assign: session is ${session.status}.` });
         }
 
         const lotQuantity = parseInt(session.lot_quantity, 10) || 0;
 
-        // 2. Fetch the target scan record to ensure it is currently INVALID
-        const scanRes = await client.query(
-            `SELECT * FROM rrh_inward_scans 
-             WHERE id = $1 AND rrh_inward_session_id = $2 AND is_deleted = false
-             FOR UPDATE`,
-            [scanId, id]
-        );
-
-        if (scanRes.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ message: 'Scan record not found.' });
-        }
-
-        const targetScan = scanRes.rows[0];
-        if (targetScan.status === 'PASS') {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ message: 'This record has already passed.' });
-        }
-
-        // 3. Check if corrected serial is already consumed in this session
-        const consumptionCheck = await client.query(
-            `SELECT c.id FROM rrh_inward_session_master_consumption c
-             JOIN rrh_inventory ri ON c.inventory_id = ri.id
-             WHERE c.session_id = $1 AND TRIM(ri.band_serial_no) = $2
-             LIMIT 1`,
-            [id, cleanCorrected]
-        );
-
-        if (consumptionCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(409).json({
-                message: `Duplicate: Corrected serial "${cleanCorrected}" has already been consumed in this session.`
-            });
-        }
-
-        // 4. Validate corrected serial against Work Order master data
+        // 2. Ensure master data belongs to WO and is unconsumed
         const masterCheck = await client.query(
             `SELECT ri.id, ri.physical_tpn, ri.band_serial_no, ri.sl_no
              FROM rrh_inventory ri
@@ -397,58 +349,71 @@ export const repairScan = async (req: Request, res: Response) => {
                  OR (rwo.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = rwo.id))
              )
              WHERE rwo.work_order_id = $1 
-               AND TRIM(ri.band_serial_no) = $2
+               AND ri.id = $2
                AND ri.id NOT IN (
                    SELECT inventory_id 
                    FROM rrh_inward_session_master_consumption 
                    WHERE session_id = $3
                )
              LIMIT 1`,
-            [session.work_order_id, cleanCorrected, id]
+            [session.work_order_id, inventoryId, id]
         );
 
         if (masterCheck.rows.length === 0) {
-            // Corrected serial does NOT match master data -> Keep INVALID and do not consume master
             await client.query('ROLLBACK');
             return res.status(400).json({
-                success: false,
-                isValid: false,
-                message: `Corrected serial "${cleanCorrected}" does not match any available master record for this Work Order.`
+                message: `Master Data record not found or has already been consumed in this session.`
             });
         }
 
         const matched = masterCheck.rows[0];
 
-        // 5. Update scan record preserving original serial number for full auditability
-        const updateScanRes = await client.query(
-            `UPDATE rrh_inward_scans 
-             SET status = 'PASS',
-                 corrected_serial_number = $1,
-                 physical_tpn = $2,
-                 band_serial_no = $3,
-                 matched_inventory_id = $4,
-                 repair_remark = $5,
-                 repair_time = CURRENT_TIMESTAMP,
-                 repaired_by = $6
-             WHERE id = $7
-             RETURNING *`,
-            [cleanCorrected, matched.physical_tpn, matched.band_serial_no, matched.id, cleanRemark, operator.name, scanId]
+        // 3. Ensure the entered physical serial number hasn't been used yet in this session
+        const passedScanCheck = await client.query(
+            `SELECT id FROM rrh_inward_scans 
+             WHERE rrh_inward_session_id = $1 
+               AND status IN ('PASS', 'EDITED PASS') 
+               AND is_deleted = false
+               AND (
+                   TRIM(serial_number) = $2 
+                   OR TRIM(COALESCE(corrected_serial_number, '')) = $2
+                   OR TRIM(COALESCE(band_serial_no, '')) = $2
+               )
+             LIMIT 1`,
+            [id, cleanSerial]
         );
-        const updatedScan = updateScanRes.rows[0];
 
-        // 6. Record consumption of the master data record
+        if (passedScanCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Duplicate: Serial Number "${cleanSerial}" has already been passed/assigned in this INWARD Session.`
+            });
+        }
+
+        // 4. Insert scan record with status 'EDITED PASS'
+        const insertScanRes = await client.query(
+            `INSERT INTO rrh_inward_scans (
+                rrh_inward_session_id, work_order_id, serial_number, original_serial_number,
+                corrected_serial_number, physical_tpn, band_serial_no, matched_inventory_id, 
+                status, repair_remark, repair_time, repaired_by, scanned_by, scanned_at
+             ) VALUES ($1, $2, $3, $3, $3, $4, $5, $6, 'EDITED PASS', $7, CURRENT_TIMESTAMP, $8, $8, CURRENT_TIMESTAMP)
+             RETURNING *`,
+            [id, session.work_order_id, cleanSerial, matched.physical_tpn, matched.band_serial_no, matched.id, cleanRemark, operator.name]
+        );
+        const scanRecord = insertScanRes.rows[0];
+
+        // 5. Record consumption
         await client.query(
             `INSERT INTO rrh_inward_session_master_consumption (
                 session_id, inventory_id, scan_id, consumed_at
-             ) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-             ON CONFLICT (session_id, inventory_id) DO NOTHING`,
-            [id, matched.id, scanId]
+             ) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+            [id, matched.id, scanRecord.id]
         );
 
-        // 7. Check if this completes the session
+        // 6. Check for completion
         const passedCountRes = await client.query(
             `SELECT COUNT(*)::int as count FROM rrh_inward_scans 
-             WHERE rrh_inward_session_id = $1 AND status = 'PASS' AND is_deleted = false`,
+             WHERE rrh_inward_session_id = $1 AND status IN ('PASS', 'EDITED PASS') AND is_deleted = false`,
             [id]
         );
         const currentPassed = passedCountRes.rows[0]?.count || 0;
@@ -464,21 +429,20 @@ export const repairScan = async (req: Request, res: Response) => {
         return res.status(200).json({
             success: true,
             isValid: true,
-            result: 'PASS',
-            message: `Serial Number successfully corrected to "${cleanCorrected}": PASS.`,
+            result: 'EDITED PASS',
+            message: `Serial Number "${cleanSerial}" manually assigned to master record: EDITED PASS.`,
             scan: {
-                ...updatedScan,
-                id: updatedScan.id,
-                scan_id: updatedScan.id,
-                barcode: cleanCorrected,
-                physical_serial_number: cleanCorrected,
-                original_serial_number: updatedScan.original_serial_number || targetScan.serial_number
+                ...scanRecord,
+                id: scanRecord.id,
+                scan_id: scanRecord.id,
+                barcode: cleanSerial,
+                physical_serial_number: cleanSerial
             }
         });
     } catch (err: any) {
         await client.query('ROLLBACK');
-        logger.error('Error repairing scan: ' + err);
-        return res.status(500).json({ message: 'Internal server error while repairing scan.' });
+        logger.error('Error assigning unit: ' + err);
+        return res.status(500).json({ message: 'Internal server error while assigning unit.' });
     } finally {
         client.release();
     }
@@ -595,7 +559,7 @@ export const getRemainingMasterData = async (req: Request, res: Response) => {
                 ri.pr_no,
                 ri.invoice_rma_no,
                 ri.lot,
-                ri.remarks,
+                ri.remarks_2 AS remarks,
                 ri.failure_description,
                 awi.global_row_number
             FROM rrh_inventory ri
