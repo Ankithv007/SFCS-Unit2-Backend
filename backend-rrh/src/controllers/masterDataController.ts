@@ -9,7 +9,7 @@ import { getUploadsDir } from '../utils/uploads';
 const logger = createLogger('MasterDataController');
 
 // Helper to sanitize Work Order ID for filenames
-const sanitizeWorkOrderId = (woId: string): string => {
+export const sanitizeWorkOrderId = (woId: string): string => {
     return woId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
 };
 
@@ -825,13 +825,16 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
  */
 export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
     try {
-        const id = parseInt(req.params.id, 10);
-        if (isNaN(id)) {
-            return res.status(400).json({ success: false, error: 'Invalid Work Order ID.' });
+        const rawId = (req.params.id || '').trim();
+        if (!rawId) {
+            return res.status(400).json({ success: false, error: 'Work Order identifier is required.' });
         }
 
         const client = await getClient();
-        const woRes = await client.query('SELECT work_order_id, excel_filename FROM rrh_work_orders WHERE id = $1', [id]);
+        const woRes = await client.query(
+            'SELECT work_order_id, excel_filename FROM rrh_work_orders WHERE id::text = $1 OR work_order_id = $1 LIMIT 1',
+            [rawId]
+        );
         client.release();
 
         if (woRes.rows.length === 0) {

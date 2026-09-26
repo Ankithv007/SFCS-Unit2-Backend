@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { pool } from '../utils/db';
 import { createLogger } from '../utils/logger';
+import ExcelJS from 'exceljs';
 
 const logger = createLogger('InwardScanController');
 
@@ -59,6 +60,7 @@ export const getSessionStats = async (req: Request, res: Response) => {
                 s.repair_remark,
                 s.repaired_by,
                 i.sl_no,
+                i.lot,
                 i.remarks_2 as master_remark
              FROM rrh_inward_scans s
              LEFT JOIN rrh_inventory i ON s.matched_inventory_id = i.id
@@ -690,3 +692,252 @@ export const deleteSession = async (req: Request, res: Response) => {
         return res.status(500).json({ message: 'Internal server error while deleting session.' });
     }
 };
+
+/**
+ * GET /api/rrh/inward/sessions/:id/export/excel
+ * Exports scanned products logs for this session to an Excel spreadsheet (.xlsx).
+ */
+export const exportSessionScansExcel = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const sessionRes = await pool.query(
+            `SELECT s.*, w.work_order_id, w.lot_quantity
+             FROM rrh_inward_sessions s
+             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             WHERE s.id = $1 AND s.is_deleted = false`,
+            [id]
+        );
+
+        if (sessionRes.rows.length === 0) {
+            return res.status(404).json({ message: 'INWARD session not found.' });
+        }
+
+        const session = sessionRes.rows[0];
+
+        const scansRes = await pool.query(
+            `SELECT 
+                s.id as scan_id, 
+                s.serial_number as barcode, 
+                COALESCE(s.original_serial_number, s.serial_number) as original_serial_number,
+                s.corrected_serial_number,
+                COALESCE(s.corrected_serial_number, s.serial_number) as physical_serial_number,
+                s.physical_tpn,
+                s.band_serial_no,
+                s.status as result, 
+                s.remark, 
+                s.scanned_by, 
+                s.scanned_at, 
+                s.repair_time, 
+                s.repair_remark,
+                s.repaired_by,
+                i.sl_no,
+                i.lot,
+                i.remarks_2 as master_remark
+             FROM rrh_inward_scans s
+             LEFT JOIN rrh_inventory i ON s.matched_inventory_id = i.id
+             WHERE s.rrh_inward_session_id = $1 AND s.is_deleted = false
+             ORDER BY s.scanned_at ASC, s.id ASC`,
+            [id]
+        );
+
+        const scans = scansRes.rows;
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'SFCS System';
+        workbook.created = new Date();
+
+        const sheet = workbook.addWorksheet('Scanned Products Logs');
+
+        sheet.columns = [
+            { header: 'S.No.', key: 's_no', width: 10 },
+            { header: 'Scanned By', key: 'scanned_by', width: 20 },
+            { header: 'Date & Time', key: 'scanned_at', width: 22 },
+            { header: 'Physical TPN', key: 'physical_tpn', width: 20 },
+            { header: 'Band Serial Number', key: 'band_serial_no', width: 22 },
+            { header: 'Physical Serial Number', key: 'physical_serial_number', width: 24 },
+            { header: 'Status', key: 'status', width: 15 },
+            { header: 'Remark', key: 'remark', width: 25 },
+            { header: 'Assignment Remark', key: 'repair_remark', width: 25 },
+            { header: 'Edited By', key: 'repaired_by', width: 20 }
+        ];
+
+        const headerRow = sheet.getRow(1);
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        headerRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF1F4E79' }
+        };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+        headerRow.height = 24;
+
+        scans.forEach((scan, index) => {
+            const row = sheet.addRow({
+                s_no: scan.sl_no || index + 1,
+                scanned_by: scan.scanned_by || '—',
+                scanned_at: scan.scanned_at ? new Date(scan.scanned_at).toLocaleString() : '—',
+                physical_tpn: scan.physical_tpn || '—',
+                band_serial_no: scan.band_serial_no || '—',
+                physical_serial_number: scan.physical_serial_number || scan.barcode || '—',
+                status: scan.result || scan.status || '—',
+                remark: scan.remark || scan.master_remark || '—',
+                repair_remark: scan.repair_remark || '—',
+                repaired_by: scan.repaired_by || '—'
+            });
+
+            row.alignment = { vertical: 'middle' };
+            row.getCell('s_no').alignment = { vertical: 'middle', horizontal: 'center' };
+            row.getCell('status').alignment = { vertical: 'middle', horizontal: 'center' };
+
+            const statusCell = row.getCell('status');
+            const stUpper = String(scan.result || scan.status || '').toUpperCase();
+            if (stUpper === 'PASS' || stUpper === 'EDITED PASS') {
+                statusCell.font = { color: { argb: 'FF16A34A' }, bold: true };
+            } else if (stUpper === 'INVALID' || stUpper === 'FAIL') {
+                statusCell.font = { color: { argb: 'FFDC2626' }, bold: true };
+            }
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename=RRH_INWARD_Scan_Logs_${session.work_order_id}.xlsx`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err: any) {
+        logger.error('Error exporting session scans to Excel: ' + err);
+        return res.status(500).json({ message: 'Failed to export scanned products logs to Excel.' });
+    }
+};
+
+/**
+ * GET /api/rrh/inward/sessions/:id/remaining-master-data/export/excel
+ * Exports remaining unscanned master data for this session to an Excel spreadsheet (.xlsx).
+ */
+export const exportRemainingMasterDataExcel = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    try {
+        const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+        const sessionRes = await pool.query(
+            `SELECT s.work_order_id, w.id as wo_db_id, w.active_import_id
+             FROM rrh_inward_sessions s
+             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             WHERE s.id = $1 AND s.is_deleted = false`,
+            [id]
+        );
+
+        if (sessionRes.rows.length === 0) {
+            return res.status(404).json({ message: 'INWARD session not found.' });
+        }
+
+        const session = sessionRes.rows[0];
+
+        const baseJoin = `
+            JOIN rrh_work_orders rwo ON (
+                (rwo.active_import_id IS NOT NULL AND ri.import_id = rwo.active_import_id)
+                OR (rwo.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = rwo.id))
+            )
+        `;
+        const remainingParams: any[] = [session.work_order_id, id];
+        let searchFilter = '';
+        if (search) {
+            remainingParams.push(`%${search}%`);
+            searchFilter = `AND (ri.band_serial_no ILIKE $${remainingParams.length} OR ri.physical_tpn ILIKE $${remainingParams.length} OR ri.sl_no ILIKE $${remainingParams.length} OR ri.tejas_dc_no ILIKE $${remainingParams.length} OR ri.tejas_obd_no ILIKE $${remainingParams.length})`;
+        }
+
+        const dataQuery = `
+            WITH all_wo_inventory AS (
+                SELECT ri.id,
+                       ROW_NUMBER() OVER (ORDER BY ri.id ASC) AS global_row_number
+                FROM rrh_inventory ri
+                ${baseJoin}
+                WHERE rwo.work_order_id = $1
+            )
+            SELECT
+                ri.id,
+                ri.sl_no,
+                ri.physical_tpn,
+                ri.band_serial_no,
+                ri.tejas_dc_no,
+                ri.tejas_obd_no,
+                ri.pr_no,
+                ri.invoice_rma_no,
+                ri.lot,
+                ri.remarks_2 AS remarks,
+                ri.failure_description,
+                awi.global_row_number
+            FROM rrh_inventory ri
+            ${baseJoin}
+            JOIN all_wo_inventory awi ON awi.id = ri.id
+            WHERE rwo.work_order_id = $1
+              AND ri.id NOT IN (
+                  SELECT inventory_id
+                  FROM rrh_inward_session_master_consumption
+                  WHERE session_id = $2
+              )
+              ${searchFilter}
+            ORDER BY ri.id ASC
+        `;
+
+        const dataRes = await pool.query(dataQuery, remainingParams);
+        const rows = dataRes.rows;
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'SFCS System';
+        workbook.created = new Date();
+
+        const sheet = workbook.addWorksheet('Remaining Master Data');
+
+        sheet.columns = [
+            { header: 'S.No.', key: 's_no', width: 10 },
+            { header: 'Physical TPN', key: 'physical_tpn', width: 22 },
+            { header: 'Band Serial Number', key: 'band_serial_no', width: 24 },
+            { header: 'Tejas DC No', key: 'tejas_dc_no', width: 20 },
+            { header: 'Tejas OBD No', key: 'tejas_obd_no', width: 20 },
+            { header: 'Lot', key: 'lot', width: 16 },
+            { header: 'Remarks', key: 'remarks', width: 30 },
+            { header: 'PR No', key: 'pr_no', width: 18 },
+            { header: 'Invoice / RMA No', key: 'invoice_rma_no', width: 20 },
+            { header: 'Failure Description', key: 'failure_description', width: 30 }
+        ];
+
+        const headerRow = sheet.getRow(1);
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        headerRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FF0F766E' }
+        };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+        headerRow.height = 24;
+
+        rows.forEach((item, index) => {
+            const row = sheet.addRow({
+                s_no: item.global_row_number || index + 1,
+                physical_tpn: item.physical_tpn || '—',
+                band_serial_no: item.band_serial_no || '—',
+                tejas_dc_no: item.tejas_dc_no || '—',
+                tejas_obd_no: item.tejas_obd_no || '—',
+                lot: item.lot || '—',
+                remarks: item.remarks || '—',
+                pr_no: item.pr_no || '—',
+                invoice_rma_no: item.invoice_rma_no || '—',
+                failure_description: item.failure_description || '—'
+            });
+
+            row.alignment = { vertical: 'middle' };
+            row.getCell('s_no').alignment = { vertical: 'middle', horizontal: 'center' };
+            row.getCell('lot').alignment = { vertical: 'middle', horizontal: 'center' };
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename=RRH_Remaining_Master_Data_${session.work_order_id}.xlsx`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err: any) {
+        logger.error('Error exporting remaining master data to Excel: ' + err);
+        return res.status(500).json({ message: 'Failed to export remaining master data to Excel.' });
+    }
+};
+

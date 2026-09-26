@@ -93,3 +93,15 @@ export const runMigrations = async (): Promise<void> => {
         client.release();
     }
 };
+
+if (require.main === module) {
+    runMigrations()
+        .then(() => {
+            logger.info('Migrations execution finished.');
+            process.exit(0);
+        })
+        .catch(err => {
+            logger.error(`Migration execution failed: ${err}`);
+            process.exit(1);
+        });
+}

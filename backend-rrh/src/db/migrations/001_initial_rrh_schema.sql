@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS rrh_excel_imports (
 );
 
 -- Add active import FK
+ALTER TABLE rrh_work_orders ADD COLUMN IF NOT EXISTS active_import_id INTEGER;
+
+ALTER TABLE rrh_work_orders
+DROP CONSTRAINT IF EXISTS fk_active_import;
+
 ALTER TABLE rrh_work_orders
 DROP CONSTRAINT IF EXISTS fk_active_import;
 

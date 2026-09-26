@@ -4,7 +4,8 @@ import {
     getInwardSessions, 
     getSessionById, 
     updateSessionStatus,
-    checkBottom
+    checkBottom,
+    downloadSessionFile
 } from '../controllers/inwardController';
 import {
     getSessionStats,
@@ -13,7 +14,9 @@ import {
     getRemainingMasterData,
     failScan,
     editScan,
-    deleteSession
+    deleteSession,
+    exportSessionScansExcel,
+    exportRemainingMasterDataExcel
 } from '../controllers/inwardScanController';
 import { authMiddleware } from '../middleware/auth';
 
@@ -26,6 +29,7 @@ router.get('/work-orders/:woId/check-bottom', checkBottom);
 router.post('/sessions', authMiddleware, createInwardSession);
 router.get('/sessions', authMiddleware, getInwardSessions);
 router.get('/sessions/:id', authMiddleware, getSessionById);
+router.get('/sessions/:id/file', authMiddleware, downloadSessionFile);
 router.patch('/sessions/:id/status', authMiddleware, updateSessionStatus);
 router.delete('/sessions/:id', authMiddleware, deleteSession);
 
@@ -34,6 +38,8 @@ router.get('/sessions/:id/stats', authMiddleware, getSessionStats);
 router.post('/sessions/:id/scan', authMiddleware, scanBarcode);
 router.post('/sessions/:id/assign', authMiddleware, assignUnit);
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingMasterData);
+router.get('/sessions/:id/remaining-master-data/export/excel', authMiddleware, exportRemainingMasterDataExcel);
+router.get('/sessions/:id/export/excel', authMiddleware, exportSessionScansExcel);
 router.post('/sessions/:id/scan/:scanId/fail', authMiddleware, failScan);
 router.put('/sessions/:id/scan/:scanId', authMiddleware, editScan);
 

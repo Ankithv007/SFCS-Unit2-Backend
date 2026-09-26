@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { Request, Response } from 'express';
 import { pool } from '../utils/db';
 import { createLogger } from '../utils/logger';
+import { downloadWorkOrderExcel } from './masterDataController';
 
 const logger = createLogger('InwardController');
 
@@ -167,8 +168,22 @@ export const getInwardSessions = async (req: Request, res: Response) => {
             WHERE ps.is_deleted = false
         `;
         let selectQuery = `
-            SELECT ps.*
+            SELECT 
+                ps.*,
+                w.id as work_order_db_id,
+                w.excel_filename,
+                w.lot_quantity,
+                COALESCE(
+                    (SELECT ri.lot 
+                     FROM rrh_inventory ri 
+                     WHERE (ri.import_id = w.active_import_id 
+                            OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id)))
+                       AND ri.lot IS NOT NULL AND ri.lot != '' 
+                     LIMIT 1),
+                    w.lot_quantity::text
+                ) as lot_number
             FROM rrh_inward_sessions ps
+            LEFT JOIN rrh_work_orders w ON w.work_order_id = ps.work_order_id
             WHERE ps.is_deleted = false
         `;
 
@@ -221,8 +236,22 @@ export const getSessionById = async (req: Request, res: Response) => {
     const { id } = req.params;
     try {
         const query = `
-            SELECT ps.*
+            SELECT 
+                ps.*,
+                w.id as work_order_db_id,
+                w.excel_filename,
+                w.lot_quantity,
+                COALESCE(
+                    (SELECT ri.lot 
+                     FROM rrh_inventory ri 
+                     WHERE (ri.import_id = w.active_import_id 
+                            OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id)))
+                       AND ri.lot IS NOT NULL AND ri.lot != '' 
+                     LIMIT 1),
+                    w.lot_quantity::text
+                ) as lot_number
             FROM rrh_inward_sessions ps
+            LEFT JOIN rrh_work_orders w ON w.work_order_id = ps.work_order_id
             WHERE ps.id = $1 AND ps.is_deleted = false
         `;
         const result = await pool.query(query, [id]);
@@ -276,5 +305,22 @@ export const updateSessionStatus = async (req: Request, res: Response) => {
         return res.status(500).json({ message: 'Internal server error while updating session status.' });
     } finally {
         client.release();
+    }
+};
+
+export const downloadSessionFile = async (req: Request, res: Response) => {
+    try {
+        const sessionRes = await pool.query(
+            `SELECT work_order_id FROM rrh_inward_sessions WHERE id = $1 AND is_deleted = false`,
+            [req.params.id]
+        );
+        if (sessionRes.rows.length === 0) {
+            return res.status(404).json({ message: 'INWARD session not found.' });
+        }
+        req.params.id = sessionRes.rows[0].work_order_id;
+        return downloadWorkOrderExcel(req, res);
+    } catch (err: any) {
+        logger.error('Error in downloadSessionFile: ' + err);
+        return res.status(500).json({ message: 'Failed to download file.' });
     }
 };
