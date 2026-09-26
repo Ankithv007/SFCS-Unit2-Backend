@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS rrh_excel_imports (
 
 -- Add active import FK
 ALTER TABLE rrh_work_orders
+DROP CONSTRAINT IF EXISTS fk_active_import;
+
+ALTER TABLE rrh_work_orders
 ADD CONSTRAINT fk_active_import
 FOREIGN KEY (active_import_id)
 REFERENCES rrh_excel_imports(id) ON DELETE SET NULL;
