@@ -17,7 +17,7 @@ export const getSessionUser = (req: Request) => {
             try {
                 user = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
                 (req as any).user = user;
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 

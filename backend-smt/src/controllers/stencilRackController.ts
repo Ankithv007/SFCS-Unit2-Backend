@@ -781,21 +781,43 @@ export const clearLocation = async (req: Request, res: Response) => {
 
 /**
  * GET /api/stencil-rack/stencil-info/:jobNumber
- * Operator scanner query: gets details, location, active holder, timeline
+ * Operator scanner query: gets details, location, active holder, timeline by Rack Number, Job Number, or Stencil / Model Name
  */
 export const getStencilInfoByJob = async (req: Request, res: Response) => {
-    const jobNumber = req.params.jobNumber;
+    const rawParam = req.params.jobNumber || (req.query.q as string) || '';
+    const queryTerm = (rawParam || '').trim();
+
+    if (!queryTerm) {
+        return res.status(400).json({ success: false, message: 'Search term is required.' });
+    }
 
     try {
         const result = await pool.query(`
             SELECT l.*, r.name as rack_name, r.status as rack_status
             FROM stencil_rack_locations l
             JOIN stencil_racks r ON l.rack_id = r.id
-            WHERE (l.job_number = $1 OR l.stencil_rack_number = $1) AND l.status <> 'EMPTY'
-        `, [jobNumber.trim()]);
+            WHERE (
+                UPPER(TRIM(COALESCE(l.stencil_rack_number, ''))) = UPPER(TRIM($1))
+                OR UPPER(TRIM(COALESCE(l.job_number, ''))) = UPPER(TRIM($1))
+                OR UPPER(TRIM(COALESCE(l.stencil_name, ''))) = UPPER(TRIM($1))
+                OR l.stencil_name ILIKE '%' || $1 || '%'
+            ) AND l.status <> 'EMPTY'
+            ORDER BY 
+                CASE 
+                    WHEN UPPER(TRIM(COALESCE(l.stencil_rack_number, ''))) = UPPER(TRIM($1)) THEN 1
+                    WHEN UPPER(TRIM(COALESCE(l.job_number, ''))) = UPPER(TRIM($1)) THEN 2
+                    WHEN UPPER(TRIM(COALESCE(l.stencil_name, ''))) = UPPER(TRIM($1)) THEN 3
+                    ELSE 4
+                END,
+                l.id ASC
+            LIMIT 1
+        `, [queryTerm]);
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: `Stencil identifier '${jobNumber}' not found in any active rack location.` });
+            return res.status(404).json({ 
+                success: false, 
+                message: `No matching stencil record found for '${queryTerm}'.` 
+            });
         }
         const stencil = result.rows[0];
 
@@ -810,7 +832,7 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
             LEFT JOIN stencil_racks r_to ON h.to_rack_id = r_to.id
             WHERE h.job_number = $1 OR h.stencil_rack_number = $1 OR h.job_number = $2 OR h.stencil_rack_number = $2
             ORDER BY h.created_at DESC
-        `, [jobNumber.trim(), stencil.job_number]);
+        `, [queryTerm, stencil.job_number]);
 
         // Calculate elapsed checkout duration if checked out
         let elapsedTime = null;
@@ -858,8 +880,8 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
             history: historyQuery.rows
         });
     } catch (err: any) {
-        logger.error('Error fetching stencil info by job:', err);
-        return res.status(500).json({ message: 'Internal server error while retrieving scan details.' });
+        logger.error('Error fetching stencil info by search query:', err);
+        return res.status(500).json({ success: false, message: 'Internal server error while retrieving stencil details.' });
     }
 };
 
