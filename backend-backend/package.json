@@ -1,36 +1,48 @@
 {
-    "name": "backend-backend",
-    "version": "1.0.0",
-    "description": "Microservice for Backend Processing Module",
-    "main": "src/index.ts",
-    "scripts": {
-        "start": "node dist/index.js",
-        "dev": "nodemon src/index.ts",
-        "build": "tsc && copyfiles -u 1 \"src/db/**/*.sql\" \"src/db/*.sql\" dist/"
-    },
-    "keywords": [],
-    "author": "",
-    "license": "ISC",
-    "dependencies": {
-        "@types/jsonwebtoken": "^9.0.10",
-        "@types/node-fetch": "^2.6.13",
-        "bcryptjs": "^3.0.3",
-        "cors": "^2.8.5",
-        "exceljs": "^4.4.0",
-        "express": "^4.19.2",
-        "jsonwebtoken": "^9.0.3",
-        "node-fetch": "^2.7.0",
-        "pg": "^8.11.5"
-    },
-    "devDependencies": {
-        "@types/bcryptjs": "^2.4.6",
-        "@types/cors": "^2.8.17",
-        "@types/express": "^4.17.21",
-        "@types/node": "^20.12.7",
-        "@types/pg": "^8.11.5",
-        "copyfiles": "^2.4.1",
-        "nodemon": "^3.1.0",
-        "ts-node": "^10.9.2",
-        "typescript": "^5.4.5"
-    }
+  "name": "backend-backend",
+  "version": "1.0.0",
+  "description": "Microservice for Backend Processing Module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "nodemon src/index.ts",
+    "build": "tsc && copyfiles -u 1 \"src/db/**/*.sql\" \"src/db/*.sql\" dist/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node-fetch": "^2.6.13",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0",
+    "node-fetch": "^2.7.0",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.7",
+    "@types/pg": "^8.11.5",
+    "copyfiles": "^2.4.1",
+    "nodemon": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "overrides": {
+    "multer": "^2.4.0",
+    "brace-expansion": "^2.1.4",
+    "ip-address": "^10.5.1",
+    "picomatch": "^4.0.4",
+    "pacote": "^21.5.1",
+    "sigstore": "^4.1.1",
+    "uuid": "^11.1.1",
+    "@sigstore/core": "^3.2.1",
+    "postcss-selector-parser": "^7.1.3"
+  }
 }

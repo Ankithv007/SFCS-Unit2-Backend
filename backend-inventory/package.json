@@ -1,33 +1,45 @@
 {
-    "name": "backend-inventory",
-    "version": "1.0.0",
-    "main": "index.js",
-    "scripts": {
-        "test": "echo \"Error: no test specified\" && exit 1",
-        "start": "node dist/index.js",
-        "dev": "nodemon src/index.ts",
-        "build": "tsc && copyfiles -u 1 \"src/db/**/*.sql\" \"src/db/*.sql\" dist/"
-    },
-    "keywords": [],
-    "author": "",
-    "license": "ISC",
-    "description": "",
-    "dependencies": {
-        "axios": "^1.13.2",
-        "cors": "^2.8.5",
-        "express": "^5.2.1",
-        "express-http-proxy": "^2.1.2",
-        "pg": "^8.16.3"
-    },
-    "devDependencies": {
-        "@types/cors": "^2.8.19",
-        "@types/express": "^5.0.6",
-        "@types/express-http-proxy": "^1.6.7",
-        "@types/node": "^24.10.1",
-        "@types/pg": "^8.15.6",
-        "copyfiles": "^2.4.1",
-        "nodemon": "^3.1.11",
-        "ts-node": "^10.9.2",
-        "typescript": "^5.9.3"
-    }
+  "name": "backend-inventory",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node dist/index.js",
+    "dev": "nodemon src/index.ts",
+    "build": "tsc && copyfiles -u 1 \"src/db/**/*.sql\" \"src/db/*.sql\" dist/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "express-http-proxy": "^2.1.2",
+    "multer": "^2.4.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/express-http-proxy": "^1.6.7",
+    "@types/node": "^24.10.1",
+    "@types/pg": "^8.15.6",
+    "copyfiles": "^2.4.1",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "multer": "^2.4.0",
+    "brace-expansion": "^2.1.4",
+    "ip-address": "^10.5.1",
+    "picomatch": "^4.0.4",
+    "pacote": "^21.5.1",
+    "sigstore": "^4.1.1",
+    "uuid": "^11.1.1",
+    "@sigstore/core": "^3.2.1",
+    "postcss-selector-parser": "^7.1.3"
+  }
 }
