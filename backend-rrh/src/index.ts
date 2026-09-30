@@ -5,6 +5,7 @@ import { ensureUploadDirectoriesExist } from './utils/uploads';
 import { createLogger } from './utils/logger';
 import masterDataRoutes from './routes/masterDataRoutes';
 import inwardRoutes from './routes/inwardRoutes';
+import iviRoutes from './routes/iviRoutes';
 
 dotenv.config();
 
@@ -24,6 +25,7 @@ import { runMigrations } from './db/runMigrations';
 // Routes
 app.use('/api/rrh', masterDataRoutes);
 app.use('/api/rrh/inward', inwardRoutes);
+app.use('/api/rrh/ivi', iviRoutes);
 
 // Health check
 app.get('/api/rrh/health', (req, res) => {

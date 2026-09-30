@@ -168,11 +168,14 @@ CREATE TABLE IF NOT EXISTS rrh_inward_scans (
     repaired_by VARCHAR(255),
     scanned_by VARCHAR(255),
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sl_no VARCHAR(255),
     is_deleted BOOLEAN DEFAULT false
 );
 
+ALTER TABLE rrh_inward_scans ADD COLUMN IF NOT EXISTS sl_no VARCHAR(255);
 CREATE INDEX IF NOT EXISTS idx_inward_scans_session_id ON rrh_inward_scans(rrh_inward_session_id);
 CREATE INDEX IF NOT EXISTS idx_inward_scans_serial ON rrh_inward_scans(serial_number);
+CREATE INDEX IF NOT EXISTS idx_inward_scans_sl_no ON rrh_inward_scans(sl_no);
 
 CREATE TABLE IF NOT EXISTS rrh_inward_session_master_consumption (
     id SERIAL PRIMARY KEY,
@@ -185,4 +188,56 @@ CREATE TABLE IF NOT EXISTS rrh_inward_session_master_consumption (
 
 CREATE INDEX IF NOT EXISTS idx_inward_consumption_session_id ON rrh_inward_session_master_consumption(session_id);
 CREATE INDEX IF NOT EXISTS idx_inward_consumption_inventory_id ON rrh_inward_session_master_consumption(inventory_id);
+
+-- 6. Initial Visual Inspection (IVI)
+CREATE TABLE IF NOT EXISTS rrh_ivi_sessions (
+    id SERIAL PRIMARY KEY,
+    work_order_id VARCHAR(255) NOT NULL,
+    status VARCHAR(50) DEFAULT 'In Progress',
+    created_by VARCHAR(255),
+    created_by_name VARCHAR(255),
+    updated_by VARCHAR(255),
+    updated_by_name VARCHAR(255),
+    deleted_by VARCHAR(255),
+    deleted_by_name VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    is_deleted BOOLEAN DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS rrh_ivi_inspections (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER REFERENCES rrh_ivi_sessions(id) ON DELETE CASCADE,
+    work_order_id VARCHAR(255) NOT NULL,
+    serial_number VARCHAR(255) NOT NULL,
+    tejas_dc_no VARCHAR(255),
+    tejas_obd_no VARCHAR(255),
+    bat_lot_no VARCHAR(255),
+    physical_tpn VARCHAR(255),
+    band VARCHAR(255),
+    wo_date VARCHAR(255),
+    duplexer_main VARCHAR(255) NOT NULL,
+    duplexer_part_no VARCHAR(255) NOT NULL,
+    rrh_unit VARCHAR(255),
+    image_urls JSONB DEFAULT '[]'::jsonb,
+    status VARCHAR(50) NOT NULL DEFAULT 'PASS',
+    remarks TEXT,
+    scanned_by VARCHAR(255),
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    inward_scan_id INTEGER REFERENCES rrh_inward_scans(id) ON DELETE SET NULL,
+    band_serial_no VARCHAR(255),
+    sl_no VARCHAR(255),
+    is_deleted BOOLEAN DEFAULT false
+);
+
+ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS sl_no VARCHAR(255);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_sessions_wo ON rrh_ivi_sessions(work_order_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_sessions_status ON rrh_ivi_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session ON rrh_ivi_inspections(session_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_serial ON rrh_ivi_inspections(serial_number);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_band_serial ON rrh_ivi_inspections(band_serial_no);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_wo ON rrh_ivi_inspections(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_inward_scan_id ON rrh_ivi_inspections(inward_scan_id);
+CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_sl_no ON rrh_ivi_inspections(sl_no);
 

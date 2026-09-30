@@ -30,7 +30,8 @@ export const ensureUploadDirectoriesExist = () => {
         logger.info(`[Uploads] Centralized initialization in: ${uploadsDir}`);
         const subdirs = [
             'rrh', 
-            'rrh/temp'
+            'rrh/temp',
+            'rrh/ivi'
         ];
         subdirs.forEach(subdir => {
             const dirPath = path.join(uploadsDir, subdir);

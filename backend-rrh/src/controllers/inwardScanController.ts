@@ -59,7 +59,7 @@ export const getSessionStats = async (req: Request, res: Response) => {
                 s.repair_time, 
                 s.repair_remark,
                 s.repaired_by,
-                i.sl_no,
+                COALESCE(s.sl_no, i.sl_no) as sl_no,
                 i.lot,
                 i.remarks_2 as master_remark
              FROM rrh_inward_scans s
@@ -226,10 +226,10 @@ export const scanBarcode = async (req: Request, res: Response) => {
                 `INSERT INTO rrh_inward_scans (
                     rrh_inward_session_id, work_order_id, serial_number, original_serial_number,
                     physical_tpn, band_serial_no, matched_inventory_id, status, remark,
-                    scanned_by, scanned_at
-                 ) VALUES ($1, $2, $3, $3, $4, $5, $6, 'PASS', NULL, $7, CURRENT_TIMESTAMP)
+                    scanned_by, scanned_at, sl_no
+                 ) VALUES ($1, $2, $3, $3, $4, $5, $6, 'PASS', NULL, $7, CURRENT_TIMESTAMP, $8)
                  RETURNING *`,
-                [id, session.work_order_id, cleanBarcode, matched.physical_tpn, matched.band_serial_no, matched.id, operator.name]
+                [id, session.work_order_id, cleanBarcode, matched.physical_tpn, matched.band_serial_no, matched.id, operator.name, matched.sl_no || null]
             );
             const scanRecord = insertScanRes.rows[0];
 
@@ -397,10 +397,10 @@ export const assignUnit = async (req: Request, res: Response) => {
             `INSERT INTO rrh_inward_scans (
                 rrh_inward_session_id, work_order_id, serial_number, original_serial_number,
                 corrected_serial_number, physical_tpn, band_serial_no, matched_inventory_id, 
-                status, repair_remark, repair_time, repaired_by, scanned_by, scanned_at
-             ) VALUES ($1, $2, $3, $3, $3, $4, $5, $6, 'EDITED PASS', $7, CURRENT_TIMESTAMP, $8, $8, CURRENT_TIMESTAMP)
+                status, repair_remark, repair_time, repaired_by, scanned_by, scanned_at, sl_no
+             ) VALUES ($1, $2, $3, $3, $3, $4, $5, $6, 'EDITED PASS', $7, CURRENT_TIMESTAMP, $8, $8, CURRENT_TIMESTAMP, $9)
              RETURNING *`,
-            [id, session.work_order_id, cleanSerial, matched.physical_tpn, matched.band_serial_no, matched.id, cleanRemark, operator.name]
+            [id, session.work_order_id, cleanSerial, matched.physical_tpn, matched.band_serial_no, matched.id, cleanRemark, operator.name, matched.sl_no || null]
         );
         const scanRecord = insertScanRes.rows[0];
 
