@@ -79,6 +79,37 @@ export const getSessionUser = (req: Request) => {
 };
 
 /**
+ * GET /api/rrh/ivi/eligible-work-orders
+ * Return RRH work orders that are NOT currently active in IVI (In Progress, Pending, Paused)
+ * and NOT completed in IVI (Completed).
+ */
+export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                w.id,
+                w.work_order_id,
+                COALESCE(w.work_order_date, w.date) as work_order_date,
+                w.lot_quantity,
+                w.status,
+                w.created_at
+            FROM rrh_work_orders w
+            WHERE w.work_order_id NOT IN (
+                SELECT DISTINCT work_order_id
+                FROM rrh_ivi_sessions
+                WHERE is_deleted = false
+                  AND status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+            )
+            ORDER BY w.created_at DESC, w.id DESC
+        `);
+        return res.status(200).json({ success: true, data: result.rows });
+    } catch (err: any) {
+        logger.error('Error in getEligibleIviWorkOrders: ' + err.message);
+        return res.status(500).json({ message: 'Failed to fetch eligible work orders.', error: err.message });
+    }
+};
+
+/**
  * POST /api/rrh/ivi/sessions
  * Start or resume an IVI session
  */
@@ -537,7 +568,15 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
             FROM rrh_inward_scans ins
             LEFT JOIN rrh_inventory ri ON ri.id = ins.matched_inventory_id
             LEFT JOIN rrh_work_orders rwo ON rwo.work_order_id = ins.work_order_id
-            WHERE (UPPER(TRIM(ins.serial_number)) = $1 OR UPPER(TRIM(ins.band_serial_no)) = $1)
+            WHERE (
+                UPPER(TRIM(ins.serial_number)) = $1 
+                OR UPPER(TRIM(ins.band_serial_no)) = $1
+                OR UPPER(TRIM(COALESCE(ins.original_serial_number, ''))) = $1
+                OR UPPER(TRIM(COALESCE(ins.corrected_serial_number, ''))) = $1
+                OR UPPER(TRIM(COALESCE(ins.sl_no, ''))) = $1
+                OR UPPER(TRIM(COALESCE(ri.band_serial_no, ''))) = $1
+                OR UPPER(TRIM(COALESCE(ri.sl_no, ''))) = $1
+            )
               AND ins.is_deleted = false
         `;
         const inwardParams: any[] = [cleanSerial];
@@ -564,7 +603,15 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                  FROM rrh_inward_scans ins
                  LEFT JOIN rrh_inventory ri ON ri.id = ins.matched_inventory_id
                  LEFT JOIN rrh_work_orders rwo ON rwo.work_order_id = ins.work_order_id
-                 WHERE (UPPER(TRIM(ins.serial_number)) = $1 OR UPPER(TRIM(ins.band_serial_no)) = $1)
+                 WHERE (
+                     UPPER(TRIM(ins.serial_number)) = $1 
+                     OR UPPER(TRIM(ins.band_serial_no)) = $1
+                     OR UPPER(TRIM(COALESCE(ins.original_serial_number, ''))) = $1
+                     OR UPPER(TRIM(COALESCE(ins.corrected_serial_number, ''))) = $1
+                     OR UPPER(TRIM(COALESCE(ins.sl_no, ''))) = $1
+                     OR UPPER(TRIM(COALESCE(ri.band_serial_no, ''))) = $1
+                     OR UPPER(TRIM(COALESCE(ri.sl_no, ''))) = $1
+                 )
                    AND ins.is_deleted = false
                  ORDER BY ins.id DESC LIMIT 1`,
                 [cleanSerial]
@@ -724,9 +771,14 @@ export const submitInspection = async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'Status must be PASS or FAIL.' });
     }
 
+    const cleanSerial = serial_number.toString().trim().toUpperCase();
+    const cleanBandNo = (req.body.band_serial_no ? req.body.band_serial_no.toString().trim() : cleanSerial).toUpperCase();
+    const safeBandNo = cleanBandNo.replace(/[/\\?%*:|"<>]/g, '_');
+
     // Process uploaded images (max 600 KB each)
+    // Naming rule: if 1 image: bandNo.ext; if multiple: bandNo/1.ext, bandNo/2.ext, etc.
     const imageUrls: string[] = [];
-    if (req.files && Array.isArray(req.files)) {
+    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
         for (const file of req.files) {
             if (file.size > 600 * 1024) {
                 // Clean up any files saved to disk
@@ -735,12 +787,36 @@ export const submitInspection = async (req: Request, res: Response) => {
                 }
                 return res.status(400).json({ message: 'Upload image under 600 KB.' });
             }
-            const relPath = `/uploads/rrh/ivi/${path.basename(file.path)}`;
-            imageUrls.push(relPath);
+        }
+
+        const count = req.files.length;
+        if (count === 1) {
+            // "if only 1 image uploaded then only band no"
+            const file = req.files[0];
+            const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+            const fileName = `${safeBandNo}${ext}`;
+            const targetPath = path.join(getUploadsDir(), 'rrh', 'ivi', fileName);
+            fs.copyFileSync(file.path, targetPath);
+            try { fs.unlinkSync(file.path); } catch {}
+            imageUrls.push(`/uploads/rrh/ivi/${fileName}`);
+        } else {
+            // "like if 3 images are uploaded for the same band no then bandNo/1 , bandNo/2, bandNo/3"
+            const bandDir = path.join(getUploadsDir(), 'rrh', 'ivi', safeBandNo);
+            if (!fs.existsSync(bandDir)) {
+                fs.mkdirSync(bandDir, { recursive: true });
+            }
+            for (let idx = 0; idx < count; idx++) {
+                const file = req.files[idx];
+                const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+                const order = idx + 1;
+                const fileName = `${order}${ext}`;
+                const targetPath = path.join(bandDir, fileName);
+                fs.copyFileSync(file.path, targetPath);
+                try { fs.unlinkSync(file.path); } catch {}
+                imageUrls.push(`/uploads/rrh/ivi/${safeBandNo}/${fileName}`);
+            }
         }
     }
-
-    const cleanSerial = serial_number.toString().trim().toUpperCase();
 
     try {
         const client = await pool.connect();
@@ -773,7 +849,78 @@ export const submitInspection = async (req: Request, res: Response) => {
                 }
             }
 
-            // Insert inspection
+            let formattedCheckpoints = null;
+            if (req.body.checkpoints) {
+                try {
+                    formattedCheckpoints = typeof req.body.checkpoints === 'string'
+                        ? JSON.parse(req.body.checkpoints)
+                        : req.body.checkpoints;
+                } catch {
+                    formattedCheckpoints = req.body.checkpoints;
+                }
+            }
+
+            // Check if this serial previously had a FAIL in this session
+            const prevFailCheck = await client.query(
+                `SELECT id, rrh_unit, checkpoints, remarks, image_urls FROM rrh_ivi_inspections
+                 WHERE session_id = $1 
+                   AND (
+                     UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(band_serial_no)) = $2
+                     OR UPPER(TRIM(serial_number)) = $3 OR UPPER(TRIM(band_serial_no)) = $3
+                   )
+                   AND status = 'FAIL'
+                   AND is_deleted = false
+                 ORDER BY id DESC`,
+                [id, cleanSerial, cleanBandNo]
+            );
+
+            const isReinspected = prevFailCheck.rows.length > 0 && cleanStatus === 'PASS';
+            let defectFixedText: string | null = null;
+
+            if (isReinspected) {
+                // If no new images uploaded during re-inspection, import/inherit images from the previous failed inspection
+                if (imageUrls.length === 0) {
+                    for (const prevRow of prevFailCheck.rows) {
+                        let prevImgs: string[] = [];
+                        if (Array.isArray(prevRow.image_urls)) {
+                            prevImgs = prevRow.image_urls;
+                        } else if (typeof prevRow.image_urls === 'string') {
+                            try {
+                                const parsed = JSON.parse(prevRow.image_urls);
+                                if (Array.isArray(parsed)) prevImgs = parsed;
+                            } catch {}
+                        }
+                        if (prevImgs.length > 0) {
+                            imageUrls.push(...prevImgs);
+                            break;
+                        }
+                    }
+                }
+
+                // Collect defect remarks that were fixed
+                if (Array.isArray(formattedCheckpoints)) {
+                    const fixed = formattedCheckpoints
+                        .filter((c: any) => c.previousFailureRemark && c.previousFailureRemark.trim())
+                        .map((c: any) => `Point ${c.id}: ${c.previousFailureRemark.trim()}`);
+                    if (fixed.length > 0) {
+                        defectFixedText = fixed.join('; ');
+                    }
+                }
+                if (!defectFixedText && prevFailCheck.rows.length > 0) {
+                    const prevRow = prevFailCheck.rows[0];
+                    defectFixedText = (prevRow.rrh_unit && prevRow.rrh_unit !== 'no defect') ? prevRow.rrh_unit : prevRow.remarks;
+                }
+
+                // Remove previous FAIL record(s) so it is removed from the failed inspection table!
+                await client.query(
+                    `UPDATE rrh_ivi_inspections 
+                     SET is_deleted = true
+                     WHERE id = ANY($1::int[])`,
+                    [prevFailCheck.rows.map(r => r.id)]
+                );
+            }
+
+            // Insert inspection with is_reinspected flag and defect_fixed text
             const insertRes = await client.query(
                 `INSERT INTO rrh_ivi_inspections (
                     session_id,
@@ -794,14 +941,17 @@ export const submitInspection = async (req: Request, res: Response) => {
                     remarks,
                     scanned_by,
                     inward_scan_id,
-                    sl_no
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                    sl_no,
+                    checkpoints,
+                    is_reinspected,
+                    defect_fixed
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                 RETURNING *`,
                 [
                     id,
                     work_order_id || '',
                     cleanSerial,
-                    req.body.band_serial_no ? req.body.band_serial_no.toString().trim() : cleanSerial,
+                    cleanBandNo,
                     tejas_dc_no || null,
                     tejas_obd_no || null,
                     bat_lot_no || null,
@@ -816,7 +966,10 @@ export const submitInspection = async (req: Request, res: Response) => {
                     remarks ? remarks.toString().trim() : null,
                     operator.name,
                     inwardScanId,
-                    inwardSlNo
+                    inwardSlNo,
+                    formattedCheckpoints ? JSON.stringify(formattedCheckpoints) : null,
+                    isReinspected && cleanStatus === 'PASS',
+                    defectFixedText
                 ]
             );
 
@@ -875,6 +1028,10 @@ export const getRecentInspections = async (req: Request, res: Response) => {
  */
 export const exportIviExcel = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const statusFilter = (req.query.status as string)?.trim().toUpperCase();
+    const idsStr = (req.query.ids as string)?.trim();
+    const isFailedOnly = statusFilter === 'FAIL';
+    const isPassOnly = statusFilter === 'PASS';
 
     try {
         const sessionRes = await pool.query(
@@ -883,23 +1040,62 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         );
         const woId = sessionRes.rows[0]?.work_order_id || `Session_${id}`;
 
-        const inspectionsRes = await pool.query(
-            `SELECT 
+        const params: any[] = [id];
+
+        let query = `SELECT 
                 rii.*,
                 COALESCE(rii.sl_no, ins.sl_no, ri.sl_no) as sl_no
              FROM rrh_ivi_inspections rii
              LEFT JOIN rrh_inward_scans ins ON ins.id = rii.inward_scan_id 
                  OR (rii.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(rii.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(rii.serial_number))))
              LEFT JOIN rrh_inventory ri ON ri.id = ins.matched_inventory_id
-             WHERE rii.session_id = $1 AND rii.is_deleted = false
-             ORDER BY rii.scanned_at DESC, rii.id DESC`,
-            [id]
-        );
+             WHERE rii.session_id = $1 AND rii.is_deleted = false`;
 
-        const rows = inspectionsRes.rows;
+        if (idsStr) {
+            const idList = idsStr.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n) && n > 0);
+            if (idList.length > 0) {
+                params.push(idList);
+                query += ` AND rii.id = ANY($${params.length}::int[])`;
+            }
+        }
+
+        if (isFailedOnly) {
+            query += ` AND rii.status = 'FAIL'
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ivi_inspections p 
+                  WHERE p.session_id = rii.session_id 
+                    AND p.is_deleted = false 
+                    AND p.status = 'PASS' 
+                    AND (
+                        (p.serial_number IS NOT NULL AND rii.serial_number IS NOT NULL AND UPPER(TRIM(p.serial_number)) = UPPER(TRIM(rii.serial_number)))
+                        OR (p.band_serial_no IS NOT NULL AND rii.band_serial_no IS NOT NULL AND UPPER(TRIM(p.band_serial_no)) = UPPER(TRIM(rii.band_serial_no)))
+                        OR (p.serial_number IS NOT NULL AND rii.band_serial_no IS NOT NULL AND UPPER(TRIM(p.serial_number)) = UPPER(TRIM(rii.band_serial_no)))
+                        OR (p.band_serial_no IS NOT NULL AND rii.serial_number IS NOT NULL AND UPPER(TRIM(p.band_serial_no)) = UPPER(TRIM(rii.serial_number)))
+                    )
+              )`;
+        } else if (isPassOnly) {
+            query += ` AND rii.status = 'PASS'`;
+        }
+
+        query += ` ORDER BY rii.scanned_at DESC, rii.id DESC`;
+
+        const inspectionsRes = await pool.query(query, params);
+        let rows = inspectionsRes.rows;
+
+        if (isFailedOnly) {
+            // Deduplicate to only keep the latest failure per serial (matching UI Failed Inspections table)
+            const seenSerials = new Set<string>();
+            rows = rows.filter((r: any) => {
+                const sn = (r.band_serial_no || r.serial_number || '').trim().toUpperCase();
+                if (sn && seenSerials.has(sn)) return false;
+                if (sn) seenSerials.add(sn);
+                return true;
+            });
+        }
 
         const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Recent Inspections');
+        const sheetTitle = isFailedOnly ? 'Failed Inspections' : 'Recent Inspections';
+        const sheet = workbook.addWorksheet(sheetTitle);
 
         // Determine maximum number of images in any row to dynamically adjust column width
         let maxImgsInAnyRow = 1;
@@ -922,7 +1118,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         const totalNeededPx = (leftPad * 2) + (maxImgsInAnyRow * singleImgW) + ((maxImgsInAnyRow - 1) * imgGap);
         const defectColWidth = Math.max(28, Math.ceil(totalNeededPx / 7.2) + 2);
 
-        sheet.columns = [
+        const sheetColumns: any[] = [
             { header: 'S.No', key: 'sno', width: 8 },
             { header: 'Band Serial No', key: 'serial_number', width: 22 },
             { header: 'Work Order No', key: 'work_order_id', width: 18 },
@@ -932,13 +1128,22 @@ export const exportIviExcel = async (req: Request, res: Response) => {
             { header: 'Band', key: 'band', width: 12 },
             { header: 'Duplexer Make', key: 'duplexer_main', width: 20 },
             { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 22 },
-            { header: 'RRH Unit Defect', key: 'rrh_unit', width: 22 },
+            { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect', key: 'rrh_unit', width: 30 },
+        ];
+
+        if (!isFailedOnly) {
+            sheetColumns.push({ header: 'Defect Fixed', key: 'defect_fixed', width: 34 });
+        }
+
+        sheetColumns.push(
             { header: 'Status', key: 'status', width: 12 },
-            { header: 'Defect Images', key: 'photos', width: defectColWidth },
-            { header: 'Remarks', key: 'remarks', width: 25 },
+            { header: 'Images', key: 'photos', width: defectColWidth },
+            { header: 'Remarks', key: 'remarks', width: 28 },
             { header: 'Scanned By', key: 'scanned_by', width: 20 },
             { header: 'Date & Time', key: 'scanned_at', width: 22 }
-        ];
+        );
+
+        sheet.columns = sheetColumns;
 
         // Style header row (Dark Navy #0E3A5D to match defect report reference)
         const headerRow = sheet.getRow(1);
@@ -966,9 +1171,13 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         const resolveImageDiskPath = (imgUrl: string): string | null => {
             if (!imgUrl) return null;
             const filename = path.basename(imgUrl);
+            const cleanRel = imgUrl.replace(/^\/?uploads\//, '');
             const candidates = [
+                path.join(getUploadsDir(), cleanRel),
+                path.join(getUploadsDir(), 'rrh', 'ivi', cleanRel.replace(/^rrh\/ivi\//, '')),
                 path.join(getUploadsDir(), 'rrh', 'ivi', filename),
-                path.join(getUploadsDir(), imgUrl.replace(/^\/+/, '')),
+                path.join('/app/uploads', cleanRel),
+                path.join('/app/uploads/rrh/ivi', cleanRel.replace(/^rrh\/ivi\//, '')),
                 path.join('/app/uploads/rrh/ivi', filename),
                 path.join(process.cwd(), 'uploads', 'rrh', 'ivi', filename),
                 path.resolve(imgUrl)
@@ -981,6 +1190,41 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 } catch {}
             }
             return null;
+        };
+
+        const getDefectFixedText = (r: any): string => {
+            if (!r.is_reinspected) return '-';
+            if (r.defect_fixed && r.defect_fixed.trim()) return r.defect_fixed.trim();
+            let cps = r.checkpoints;
+            if (typeof cps === 'string') {
+                try { cps = JSON.parse(cps); } catch { cps = null; }
+            }
+            if (Array.isArray(cps)) {
+                const fixed = cps
+                    .filter((c: any) => c.previousFailureRemark && c.previousFailureRemark.trim())
+                    .map((c: any) => `Point ${c.id}: ${c.previousFailureRemark.trim()}`);
+                if (fixed.length > 0) return fixed.join('; ');
+            }
+            return '-';
+        };
+
+        // Helper to estimate the number of visual lines a text will take given column width
+        const estimateTextLines = (text: any, colWidth: number): number => {
+            if (!text || text === '—' || text === '-') return 1;
+            const str = String(text).trim();
+            if (!str) return 1;
+            const effectiveWidth = Math.max(12, colWidth - 4);
+            const paragraphs = str.split('\n');
+            let totalLines = 0;
+            for (const p of paragraphs) {
+                const cleanP = p.trim();
+                if (!cleanP) {
+                    totalLines += 1;
+                } else {
+                    totalLines += Math.max(1, Math.ceil(cleanP.length / effectiveWidth));
+                }
+            }
+            return Math.max(1, totalLines);
         };
 
         rows.forEach((r, idx) => {
@@ -997,7 +1241,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 }
             }
 
-            const row = sheet.addRow({
+            const rowData: any = {
                 sno: r.sl_no || (idx + 1),
                 serial_number: r.band_serial_no || r.serial_number,
                 work_order_id: r.work_order_id,
@@ -1013,15 +1257,37 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 remarks: r.remarks || '—',
                 scanned_by: r.scanned_by || '—',
                 scanned_at: r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-IN') : '—'
-            });
+            };
+
+            if (!isFailedOnly) {
+                rowData.defect_fixed = getDefectFixedText(r);
+            }
+
+            const row = sheet.addRow(rowData);
 
             // Status color highlight
             const statusCell = row.getCell('status');
             if (r.status === 'PASS') {
-                statusCell.font = { bold: true, color: { argb: 'FF15803D' } }; // Green
+                if (r.is_reinspected) {
+                    statusCell.font = { bold: true, color: { argb: 'FFC2410C' } }; // Orange for re-inspected PASS
+                } else {
+                    statusCell.font = { bold: true, color: { argb: 'FF15803D' } }; // Green for standard PASS
+                }
             } else {
-                statusCell.font = { bold: true, color: { argb: 'FFDC2626' } }; // Red
+                statusCell.font = { bold: true, color: { argb: 'FFDC2626' } }; // Red for FAIL
             }
+
+            // Calculate required row height dynamically based on wrapped text across all text columns
+            const maxLines = Math.max(
+                estimateTextLines(rowData.defect_fixed, 34),
+                estimateTextLines(rowData.rrh_unit, 30),
+                estimateTextLines(rowData.remarks, 28),
+                estimateTextLines(rowData.duplexer_part_no, 22),
+                estimateTextLines(rowData.serial_number, 22),
+                1
+            );
+            // 1 line ~ 26pt; each additional line requires ~20pt + 8pt padding so no text is clipped
+            const calculatedTextHeight = Math.max(26, maxLines * 20 + 8);
 
             // Defect Images: embed all uploaded images side-by-side into cell
             const photoCell = row.getCell('photos');
@@ -1041,6 +1307,8 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                     const imgW = numImgs === 1 ? 120 : (numImgs === 2 ? 108 : 96);
                     const imgH = 60;
 
+                    const photoColIndex = sheet.columns.findIndex(c => c.key === 'photos');
+
                     validImgPaths.forEach((imgDiskPath, imgIdx) => {
                         try {
                             const extRaw = path.extname(imgDiskPath).toLowerCase().replace('.', '');
@@ -1051,17 +1319,16 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                                 extension
                             });
 
-                            // 0-based column index 11 is 'photos'
-                            const rowIdx0 = idx + 1; // 0-based row index (Row 1 is header = 0, first data row = 1)
+                            const rowIdx0 = idx + 1; // 0-based row index
                             const colOffsetPx = leftPad + (imgIdx * (imgW + imgGap));
                             const colOffsetEmu = Math.round(colOffsetPx * 9525);
                             const rowOffsetEmu = Math.round(5 * 9525);
 
                             sheet.addImage(imageId, {
                                 tl: {
-                                    col: 11,
+                                    col: photoColIndex,
                                     row: rowIdx0,
-                                    nativeCol: 11,
+                                    nativeCol: photoColIndex,
                                     nativeColOff: colOffsetEmu,
                                     nativeRow: rowIdx0,
                                     nativeRowOff: rowOffsetEmu
@@ -1077,33 +1344,39 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                     });
 
                     if (imageEmbedded) {
-                        row.height = 70;
+                        row.height = Math.max(70, calculatedTextHeight);
                         photoCell.value = '';
                     }
                 }
             }
 
+            // Center-align specific columns
+            row.getCell('sno').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+            row.getCell('status').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+            row.getCell('scanned_at').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+            row.getCell('band').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+
             if (!imageEmbedded) {
                 photoCell.value = imgs.length === 0 ? '—' : 'Photo Attached';
                 photoCell.font = { color: { argb: 'FF94A3B8' } };
-                photoCell.alignment = { vertical: 'middle', horizontal: 'center' };
-                if (!row.height || row.height < 24) {
-                    row.height = 24;
-                }
+                photoCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+                row.height = calculatedTextHeight;
             }
 
-            // Apply borders & middle vertical alignment across all cells
+            // Apply borders, middle vertical alignment & text wrap across all cells
             row.eachCell({ includeEmpty: true }, (cell) => {
                 cell.border = borderStyle;
-                cell.alignment = cell.alignment || { vertical: 'middle' };
-                if (!cell.alignment.vertical) {
-                    cell.alignment.vertical = 'middle';
-                }
+                cell.alignment = {
+                    vertical: 'middle',
+                    horizontal: cell.alignment?.horizontal || 'left',
+                    wrapText: true
+                };
             });
         });
 
+        const filename = isFailedOnly ? `RRH_IVI_Failed_Inspections_${woId}.xlsx` : `RRH_IVI_Inspections_${woId}.xlsx`;
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=RRH_IVI_Inspections_${woId}.xlsx`);
+        res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
 
         await workbook.xlsx.write(res);
         res.end();
@@ -1445,8 +1718,9 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
         <!-- Photo Grid -->
         <div class="gallery-grid">
             ${images.map((imgUrl, idx) => {
+                const cleanRel = imgUrl.replace(/^\/?uploads\/rrh\/ivi\//, '');
                 const fname = path.basename(imgUrl);
-                const dlUrl = `/api/rrh/ivi/photos/download/${fname}`;
+                const dlUrl = `/api/rrh/ivi/photos/download/${cleanRel}`;
                 return `
                     <div class="photo-card">
                         <div class="photo-wrapper" onclick="openModal('${imgUrl}')" title="Click to view full size">
@@ -1511,18 +1785,23 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
 };
 
 /**
+ * GET /api/rrh/ivi/photos/download/*
  * GET /api/rrh/ivi/photos/download/:filename
  * Directly download an uploaded inspection photo with Content-Disposition: attachment
  */
 export const downloadInspectionPhoto = async (req: Request, res: Response) => {
-    const { filename } = req.params;
-    const safeFilename = path.basename(filename);
-    const filePath = path.join(getUploadsDir(), 'rrh', 'ivi', safeFilename);
+    const rawSubpath = (req.params[0] || req.params.filename || '').toString().trim();
+    const safeSubpath = path.normalize(rawSubpath).replace(/^(\.\.[\/\\])+/, '');
+    const filePath = path.join(getUploadsDir(), 'rrh', 'ivi', safeSubpath);
 
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        const fallbackPath = path.join(getUploadsDir(), 'rrh', 'ivi', path.basename(safeSubpath));
+        if (fs.existsSync(fallbackPath) && fs.statSync(fallbackPath).isFile()) {
+            return res.download(fallbackPath, path.basename(fallbackPath));
+        }
         return res.status(404).send('Image file not found.');
     }
 
-    return res.download(filePath, safeFilename);
+    return res.download(filePath, path.basename(safeSubpath));
 };
 

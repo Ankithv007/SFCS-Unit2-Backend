@@ -16,7 +16,8 @@ import {
     exportIviExcel,
     getRemainingInwardMasterData,
     viewInspectionPhotos,
-    downloadInspectionPhoto
+    downloadInspectionPhoto,
+    getEligibleIviWorkOrders
 } from '../controllers/iviController';
 
 const router = Router();
@@ -53,10 +54,14 @@ const upload = multer({
 
 // Inspection photo viewer & direct download (public for Excel exports & browser access)
 router.get('/inspections/:id/photos', viewInspectionPhotos as (req: Request, res: Response) => void);
+router.get('/photos/download/*', downloadInspectionPhoto as (req: Request, res: Response) => void);
 router.get('/photos/download/:filename', downloadInspectionPhoto as (req: Request, res: Response) => void);
 
 // Serial lookup (authenticated)
 router.get('/lookup', authMiddleware, lookupSerialDetails as (req: Request, res: Response) => void);
+
+// Eligible work orders for IVI (excluding active & completed IVI sessions)
+router.get('/eligible-work-orders', authMiddleware, getEligibleIviWorkOrders as (req: Request, res: Response) => void);
 
 // Session management (authenticated)
 router.post('/sessions', authMiddleware, createIviSession as (req: Request, res: Response) => void);

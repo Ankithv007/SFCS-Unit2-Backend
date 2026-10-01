@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS rrh_ivi_inspections (
 );
 
 ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS sl_no VARCHAR(255);
+ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS defect_fixed TEXT;
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_sessions_wo ON rrh_ivi_sessions(work_order_id) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_sessions_status ON rrh_ivi_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session ON rrh_ivi_inspections(session_id) WHERE is_deleted = false;
