@@ -32,6 +32,9 @@
   "overrides": {
     "multer": "^2.4.0",
     "brace-expansion": "^2.1.4",
+    "braces": "^3.0.3",
+    "cross-spawn": "^7.0.6",
+    "micromatch": "^4.0.8",
     "ip-address": "^10.5.1",
     "picomatch": "^4.0.4",
     "pacote": "^21.5.1",

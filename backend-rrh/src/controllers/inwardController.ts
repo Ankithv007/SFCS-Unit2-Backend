@@ -124,6 +124,24 @@ export const createInwardSession = async (req: Request, res: Response) => {
         return res.status(201).json(session);
     } catch (err: any) {
         await client.query('ROLLBACK');
+        if (err.code === '23505') {
+            try {
+                const fallbackCheck = await pool.query(
+                    `SELECT * FROM rrh_inward_sessions 
+                     WHERE work_order_id = $1
+                       AND status IN ('Pending', 'In Progress', 'Paused') 
+                       AND is_deleted = false
+                     ORDER BY created_at DESC
+                     LIMIT 1`,
+                    [work_order_id]
+                );
+                if (fallbackCheck.rows.length > 0) {
+                    return res.status(200).json(fallbackCheck.rows[0]);
+                }
+            } catch (fallbackErr) {
+                logger.error('Error during fallback query after 23505: ' + fallbackErr);
+            }
+        }
         logger.error('Error starting INWARD session: ' + err);
         return res.status(500).json({ message: 'Internal server error while starting INWARD session.' });
     } finally {

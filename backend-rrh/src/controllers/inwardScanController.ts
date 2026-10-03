@@ -602,7 +602,7 @@ export const getRemainingMasterData = async (req: Request, res: Response) => {
 
 /**
  * POST /api/rrh/inward/sessions/:id/scan/:scanId/fail
- * Mark a scan as FAIL with a remark. (Maintained for backward compatibility)
+ * Mark a scan as FAIL with a remark and release master consumption so unit can be corrected/re-scanned.
  */
 export const failScan = async (req: Request, res: Response) => {
     const { id, scanId } = req.params;
@@ -613,8 +613,11 @@ export const failScan = async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'Failure remark is required.' });
     }
 
+    const client = await pool.connect();
     try {
-        const result = await pool.query(
+        await client.query('BEGIN');
+
+        const result = await client.query(
             `UPDATE rrh_inward_scans 
              SET status = 'FAIL', remark = $1, scanned_by = $2, scanned_at = CURRENT_TIMESTAMP
              WHERE id = $3 AND rrh_inward_session_id = $4 AND is_deleted = false
@@ -623,45 +626,189 @@ export const failScan = async (req: Request, res: Response) => {
         );
 
         if (result.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Scan record not found.' });
         }
 
-        return res.status(200).json(result.rows[0]);
+        const scan = result.rows[0];
+
+        // Release master consumption for this scan so the master data unit can be corrected/re-scanned
+        await client.query(
+            `DELETE FROM rrh_inward_session_master_consumption 
+             WHERE session_id = $1 AND scan_id = $2`,
+            [id, scanId]
+        );
+
+        if (scan.matched_inventory_id) {
+            await client.query(
+                `DELETE FROM rrh_inward_session_master_consumption 
+                 WHERE session_id = $1 AND inventory_id = $2`,
+                [id, scan.matched_inventory_id]
+            );
+        }
+
+        await client.query('COMMIT');
+        return res.status(200).json(scan);
     } catch (err: any) {
+        await client.query('ROLLBACK');
         logger.error('Error failing scan: ' + err);
         return res.status(500).json({ message: 'Internal server error while updating scan status.' });
+    } finally {
+        client.release();
     }
 };
 
 /**
  * PUT /api/rrh/inward/sessions/:id/scan/:scanId
- * Edit a scanned barcode value. (Maintained for backward compatibility)
+ * Edit a scanned barcode value with master data re-validation and consumption update.
  */
 export const editScan = async (req: Request, res: Response) => {
     const { id, scanId } = req.params;
-    const { newBarcode } = req.body;
+    const { newBarcode, remark } = req.body;
+    const operator = getSessionUser(req);
 
     if (!newBarcode || !newBarcode.trim()) {
         return res.status(400).json({ message: 'New barcode value is required.' });
     }
 
+    const cleanBarcode = newBarcode.trim();
+    const cleanRemark = (remark || '').trim();
+
+    const client = await pool.connect();
     try {
-        const result = await pool.query(
-            `UPDATE rrh_inward_scans 
-             SET serial_number = $1, scanned_at = CURRENT_TIMESTAMP
-             WHERE id = $2 AND rrh_inward_session_id = $3 AND is_deleted = false
-             RETURNING *`,
-            [newBarcode.trim(), scanId, id]
+        await client.query('BEGIN');
+
+        // 1. Get existing scan record and session
+        const scanCheck = await client.query(
+            `SELECT s.*, sess.work_order_id, sess.status as session_status
+             FROM rrh_inward_scans s
+             JOIN rrh_inward_sessions sess ON sess.id = s.rrh_inward_session_id
+             WHERE s.id = $1 AND s.rrh_inward_session_id = $2 AND s.is_deleted = false AND sess.is_deleted = false
+             FOR UPDATE OF s`,
+            [scanId, id]
         );
 
-        if (result.rows.length === 0) {
+        if (scanCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Scan record not found.' });
         }
 
-        return res.status(200).json(result.rows[0]);
+        const existingScan = scanCheck.rows[0];
+
+        // 2. Check if newBarcode is already used by another active scan in this session
+        const duplicateCheck = await client.query(
+            `SELECT id FROM rrh_inward_scans 
+             WHERE rrh_inward_session_id = $1 
+               AND id != $2
+               AND status IN ('PASS', 'EDITED PASS')
+               AND is_deleted = false
+               AND (
+                   TRIM(serial_number) = $3 
+                   OR TRIM(COALESCE(corrected_serial_number, '')) = $3
+                   OR TRIM(COALESCE(band_serial_no, '')) = $3
+               )
+             LIMIT 1`,
+            [id, scanId, cleanBarcode]
+        );
+
+        if (duplicateCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Duplicate: Serial Number "${cleanBarcode}" is already in use by another scan in this session.`
+            });
+        }
+
+        // 3. Validate newBarcode against Master Inventory for this Work Order
+        const masterCheck = await client.query(
+            `SELECT ri.id, ri.physical_tpn, ri.band_serial_no, ri.sl_no
+             FROM rrh_inventory ri
+             JOIN rrh_work_orders rwo ON (
+                 (rwo.active_import_id IS NOT NULL AND ri.import_id = rwo.active_import_id)
+                 OR (rwo.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = rwo.id))
+             )
+             WHERE rwo.work_order_id = $1 
+               AND (TRIM(ri.band_serial_no) = $2 OR TRIM(COALESCE(ri.physical_tpn, '')) = $2)
+             LIMIT 1`,
+            [existingScan.work_order_id, cleanBarcode]
+        );
+
+        if (masterCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                message: `Invalid Serial Number "${cleanBarcode}". Serial Number does not belong to the selected Work Order.`
+            });
+        }
+
+        const matched = masterCheck.rows[0];
+
+        // 4. Check if matched inventory item is consumed by another scan
+        const consumptionCheck = await client.query(
+            `SELECT id, scan_id FROM rrh_inward_session_master_consumption 
+             WHERE session_id = $1 AND inventory_id = $2 AND scan_id != $3
+             LIMIT 1`,
+            [id, matched.id, scanId]
+        );
+
+        if (consumptionCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Master Data record for Serial Number "${cleanBarcode}" has already been consumed by another scan in this session.`
+            });
+        }
+
+        // 5. Update the scan record
+        const updateResult = await client.query(
+            `UPDATE rrh_inward_scans 
+             SET serial_number = $1,
+                 corrected_serial_number = $1,
+                 physical_tpn = $2,
+                 band_serial_no = $3,
+                 matched_inventory_id = $4,
+                 sl_no = $5,
+                 status = 'EDITED PASS',
+                 repaired_by = $6,
+                 repair_remark = COALESCE(NULLIF($7, ''), repair_remark, 'Barcode edited'),
+                 repair_time = CURRENT_TIMESTAMP,
+                 scanned_at = CURRENT_TIMESTAMP
+             WHERE id = $8 AND rrh_inward_session_id = $9 AND is_deleted = false
+             RETURNING *`,
+            [
+                cleanBarcode,
+                matched.physical_tpn,
+                matched.band_serial_no,
+                matched.id,
+                matched.sl_no || null,
+                operator.name,
+                cleanRemark,
+                scanId,
+                id
+            ]
+        );
+
+        const updatedScan = updateResult.rows[0];
+
+        // 6. Refresh master consumption for this scan
+        await client.query(
+            `DELETE FROM rrh_inward_session_master_consumption WHERE session_id = $1 AND (scan_id = $2 OR inventory_id = $3)`,
+            [id, scanId, existingScan.matched_inventory_id]
+        );
+
+        await client.query(
+            `INSERT INTO rrh_inward_session_master_consumption (
+                session_id, inventory_id, scan_id, consumed_at
+             ) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+             ON CONFLICT (session_id, inventory_id) DO UPDATE SET scan_id = EXCLUDED.scan_id, consumed_at = EXCLUDED.consumed_at`,
+            [id, matched.id, scanId]
+        );
+
+        await client.query('COMMIT');
+        return res.status(200).json(updatedScan);
     } catch (err: any) {
+        await client.query('ROLLBACK');
         logger.error('Error editing scan: ' + err);
         return res.status(500).json({ message: 'Internal server error while editing scan.' });
+    } finally {
+        client.release();
     }
 };
 

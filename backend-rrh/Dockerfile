@@ -9,7 +9,7 @@ RUN npm install
 # Copy source code and build
 COPY . .
 RUN npm run build
-RUN mkdir -p dist/db/migrations && cp src/db/schema.sql dist/db/ && cp -r src/db/migrations/* dist/db/migrations/
+RUN mkdir -p dist/db/migrations && cp -r src/db/migrations/* dist/db/migrations/
 # Add a non-root user to avoid running as root
 # Using the same standard as backend-smt
 EXPOSE 5007

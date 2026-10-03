@@ -31,7 +31,8 @@ export const ensureUploadDirectoriesExist = () => {
         const subdirs = [
             'rrh', 
             'rrh/temp',
-            'rrh/ivi'
+            'rrh/ivi',
+            'rrh/work-orders'
         ];
         subdirs.forEach(subdir => {
             const dirPath = path.join(uploadsDir, subdir);

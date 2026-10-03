@@ -1,4 +1,3 @@
-import jwt from 'jsonwebtoken';
 import { Request, Response } from 'express';
 import { pool } from '../utils/db';
 import { createLogger } from '../utils/logger';
@@ -30,19 +29,7 @@ export function getBandFromTpn(tpn: string | null | undefined): string {
 }
 
 export const getSessionUser = (req: Request) => {
-    let user = (req as any).user;
-
-    if (!user) {
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.split(' ')[1];
-            try {
-                user = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
-                (req as any).user = user;
-            } catch (e) {}
-        }
-    }
-
+    const user = (req as any).user;
     const headerName = (req.headers['x-user-name'] as string)
         || (req.headers['x-username'] as string)
         || (req.headers['x-backend-user-id'] as string);

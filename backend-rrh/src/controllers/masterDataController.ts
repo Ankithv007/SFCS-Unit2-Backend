@@ -146,6 +146,179 @@ export const deleteTempFile = async (req: Request, res: Response) => {
 };
 
 /**
+ * Unified batch insertion helper for Master Data.
+ * Uses UNNEST and pre-allocated sequence IDs to guarantee 100% deterministic
+ * row-to-cell and parent-to-child foreign key mappings.
+ */
+export const insertMasterDataIntoDb = async (
+    client: any,
+    importId: number,
+    sheetId: number,
+    parsedData: ParsedSheet
+) => {
+    // 1. Insert Merged Cells
+    if (parsedData.merges.length > 0) {
+        const mRange = parsedData.merges.map(m => m.rangeReference);
+        const mStartRow = parsedData.merges.map(m => m.startRow);
+        const mStartCol = parsedData.merges.map(m => m.startColumn);
+        const mEndRow = parsedData.merges.map(m => m.endRow);
+        const mEndCol = parsedData.merges.map(m => m.endColumn);
+        const mRowSpan = parsedData.merges.map(m => m.rowSpan);
+        const mColSpan = parsedData.merges.map(m => m.colSpan);
+        const mSheetIds = parsedData.merges.map(() => sheetId);
+
+        await client.query(
+            `INSERT INTO rrh_excel_merged_cells 
+             (sheet_id, range_reference, start_row, start_column, end_row, end_column, row_span, column_span)
+             SELECT * FROM UNNEST($1::int[], $2::text[], $3::int[], $4::int[], $5::int[], $6::int[], $7::int[], $8::int[])`,
+            [mSheetIds, mRange, mStartRow, mStartCol, mEndRow, mEndCol, mRowSpan, mColSpan]
+        );
+    }
+
+    // 2. Batch Insert Rows with explicit row_number mapping
+    const rowParams = {
+        sheetId: parsedData.rows.map(() => sheetId),
+        rowNumber: parsedData.rows.map(r => r.rowNumber),
+        rowType: parsedData.rows.map(r => r.rowType)
+    };
+
+    const rowsInsertRes = await client.query(
+        `INSERT INTO rrh_excel_rows (sheet_id, row_number, row_type)
+         SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[])
+         RETURNING id, row_number`,
+        [rowParams.sheetId, rowParams.rowNumber, rowParams.rowType]
+    );
+
+    // Explicit Map: row_number -> DB row_id
+    const rowIdMap = new Map<number, number>();
+    for (const row of rowsInsertRes.rows) {
+        rowIdMap.set(parseInt(row.row_number, 10), parseInt(row.id, 10));
+    }
+
+    // 3. Batch Insert Cells (attached strictly to dbRowId resolved by row_number)
+    const allCellRowIds: number[] = [];
+    const allCellColNums: number[] = [];
+    const allCellColLetters: string[] = [];
+    const allCellRawValues: (string | null)[] = [];
+    const allCellDisplayValues: (string | null)[] = [];
+    const allCellDataTypes: string[] = [];
+
+    for (const r of parsedData.rows) {
+        const dbRowId = rowIdMap.get(r.rowNumber);
+        if (!dbRowId) continue;
+        for (const c of r.cells) {
+            allCellRowIds.push(dbRowId);
+            allCellColNums.push(c.columnNumber);
+            allCellColLetters.push(c.columnLetter);
+            allCellRawValues.push(c.rawValue !== undefined ? c.rawValue : null);
+            allCellDisplayValues.push(c.displayValue !== undefined ? c.displayValue : null);
+            allCellDataTypes.push(c.dataType || 'string');
+        }
+    }
+
+    if (allCellRowIds.length > 0) {
+        const CHUNK = 5000;
+        for (let i = 0; i < allCellRowIds.length; i += CHUNK) {
+            const s = <T>(arr: T[]): T[] => arr.slice(i, i + CHUNK);
+            await client.query(
+                `INSERT INTO rrh_excel_cells (row_id, column_number, column_letter, raw_value, display_value, data_type)
+                 SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[])`,
+                [s(allCellRowIds), s(allCellColNums), s(allCellColLetters), s(allCellRawValues), s(allCellDisplayValues), s(allCellDataTypes)]
+            );
+        }
+    }
+
+    // 4. Batch Insert Normalized Inventory Data (Row 3+)
+    const dataRows = parsedData.rows.filter(r => r.rowType === 'DATA');
+    if (dataRows.length > 0) {
+        const getVal = (r: any, colNum: number) => {
+            const cell = r.cells.find((cl: any) => cl.columnNumber === colNum);
+            return cell && cell.displayValue ? cell.displayValue.trim() : null;
+        };
+
+        // Pre-allocate inventory IDs from the sequence to guarantee 1-to-1 deterministic relationship
+        const idRes = await client.query(
+            "SELECT nextval('public.rrh_inventory_id_seq')::int AS id FROM generate_series(1, $1)",
+            [dataRows.length]
+        );
+        const inventoryIds = idRes.rows.map((row: any) => parseInt(row.id, 10));
+
+        // Log warning if any data row's value equals column header names (without changing ingestion behavior)
+        for (const r of dataRows) {
+            const sl = getVal(r, 1);
+            const band = getVal(r, 5);
+            if (sl && (sl.toLowerCase() === 'sl no' || sl.toLowerCase() === 'sl_no' || sl.toLowerCase() === 'sl.no.')) {
+                logger.warn(`[HeaderCollisionWarning] Row ${r.rowNumber} has sl_no equal to header text: '${sl}'. Ingesting per protocol.`);
+            }
+            if (band && (band.toLowerCase() === 'band serial no' || band.toLowerCase() === 'band_serial_no')) {
+                logger.warn(`[HeaderCollisionWarning] Row ${r.rowNumber} has band_serial_no equal to header text: '${band}'. Ingesting per protocol.`);
+            }
+        }
+
+        await client.query(
+            `INSERT INTO rrh_inventory 
+             (id, import_id, sl_no, tejas_dc_no, tejas_obd_no, physical_tpn, band_serial_no, pr_no, 
+              invoice_rma_no, vendor_name_for_rework, coordinator_name, issued_date, lot, remarks, failure_description, remarks_2)
+             SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::date[], $13::text[], $14::text[], $15::text[], $16::text[])`,
+            [
+                inventoryIds,
+                dataRows.map(() => importId),
+                dataRows.map(r => getVal(r, 1)),
+                dataRows.map(r => getVal(r, 2)),
+                dataRows.map(r => getVal(r, 3)),
+                dataRows.map(r => getVal(r, 4)),
+                dataRows.map(r => getVal(r, 5)),
+                dataRows.map(r => getVal(r, 6)),
+                dataRows.map(r => getVal(r, 7)),
+                dataRows.map(r => getVal(r, 8)),
+                dataRows.map(r => getVal(r, 9)),
+                dataRows.map(r => parseSafeDate(getVal(r, 10))),
+                dataRows.map(r => getVal(r, 11)),
+                dataRows.map(r => getVal(r, 12)),
+                dataRows.map(r => getVal(r, 13)),
+                dataRows.map(r => getVal(r, 14))
+            ]
+        );
+
+        await client.query(
+            `INSERT INTO rrh_existing_inventory 
+             (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, rfpc_model_no, sw_version, sfp0_serial_no, sfp1_serial_no)
+             SELECT * FROM UNNEST($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[])`,
+            [
+                inventoryIds,
+                dataRows.map(r => getVal(r, 15)),
+                dataRows.map(r => getVal(r, 16)),
+                dataRows.map(r => getVal(r, 17)),
+                dataRows.map(r => getVal(r, 18)),
+                dataRows.map(r => getVal(r, 19)),
+                dataRows.map(r => getVal(r, 20)),
+                dataRows.map(r => getVal(r, 21)),
+                dataRows.map(r => getVal(r, 22)),
+                dataRows.map(r => getVal(r, 23)),
+                dataRows.map(r => getVal(r, 24))
+            ]
+        );
+
+        await client.query(
+            `INSERT INTO rrh_replaced_inventory 
+             (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, sfp0_serial_no, sfp1_serial_no)
+             SELECT * FROM UNNEST($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])`,
+            [
+                inventoryIds,
+                dataRows.map(r => getVal(r, 25)),
+                dataRows.map(r => getVal(r, 26)),
+                dataRows.map(r => getVal(r, 27)),
+                dataRows.map(r => getVal(r, 28)),
+                dataRows.map(r => getVal(r, 29)),
+                dataRows.map(r => getVal(r, 30)),
+                dataRows.map(r => getVal(r, 31)),
+                dataRows.map(r => getVal(r, 32))
+            ]
+        );
+    }
+};
+
+/**
  * POST /api/rrh/work-orders
  * Creates or updates a Work Order, supporting optional direct upload or previewed temp file.
  */
@@ -226,6 +399,17 @@ export const createWorkOrder = async (req: Request, res: Response) => {
 
             // Re-upload rule: Completely remove previous master data for this work order
             if (isExisting) {
+                const scanCheck = await client.query(
+                    'SELECT 1 FROM rrh_inward_scans WHERE work_order_id = $1 AND is_deleted = false LIMIT 1',
+                    [cleanWoId]
+                );
+                if (scanCheck.rows.length > 0) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        success: false,
+                        error: `Cannot overwrite master data for work order "${cleanWoId}" because inward scans have already been recorded.`
+                    });
+                }
                 logger.info(`Work Order "${cleanWoId}" already exists. Completely replacing previous master data.`);
                 await client.query('DELETE FROM rrh_excel_imports WHERE work_order_id = $1', [woId]);
             }
@@ -251,88 +435,8 @@ export const createWorkOrder = async (req: Request, res: Response) => {
             );
             const sheetId = sheetRes.rows[0].id;
 
-            // 3. Insert Merged Cells
-            for (const m of parsedData.merges) {
-                await client.query(
-                    `INSERT INTO rrh_excel_merged_cells 
-                     (sheet_id, range_reference, start_row, start_column, end_row, end_column, row_span, column_span)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-                    [sheetId, m.rangeReference, m.startRow, m.startColumn, m.endRow, m.endColumn, m.rowSpan, m.colSpan]
-                );
-            }
-
-            // 4. Batch Insert Rows & Cells & Normalized Data
-            for (const r of parsedData.rows) {
-                const rowRes = await client.query(
-                    `INSERT INTO rrh_excel_rows (sheet_id, row_number, row_type)
-                     VALUES ($1, $2, $3) RETURNING id`,
-                    [sheetId, r.rowNumber, r.rowType]
-                );
-                const rowId = rowRes.rows[0].id;
-
-                for (const c of r.cells) {
-                    await client.query(
-                        `INSERT INTO rrh_excel_cells (row_id, column_number, column_letter, raw_value, display_value, data_type)
-                         VALUES ($1, $2, $3, $4, $5, $6)`,
-                        [rowId, c.columnNumber, c.columnLetter, c.rawValue, c.displayValue, c.dataType]
-                    );
-                }
-
-                // Populate Normalized Business Tables for DATA rows (Row 3+)
-                if (r.rowType === 'DATA') {
-                    const getVal = (colNum: number) => {
-                        const cell = r.cells.find(cl => cl.columnNumber === colNum);
-                        return cell && cell.displayValue ? cell.displayValue.trim() : null;
-                    };
-
-                    const invRes = await client.query(
-                        `INSERT INTO rrh_inventory 
-                         (import_id, sl_no, tejas_dc_no, tejas_obd_no, physical_tpn, band_serial_no, pr_no, 
-                          invoice_rma_no, vendor_name_for_rework, coordinator_name, issued_date, lot, remarks, failure_description, remarks_2)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
-                        [
-                            importId,
-                            getVal(1), // SL NO
-                            getVal(2), // TEJAS DC NO
-                            getVal(3), // TEJAS OBD NO
-                            getVal(4), // Physical TPN
-                            getVal(5), // Band Serial No
-                            getVal(6), // PR No
-                            getVal(7), // Invoice / RMA No
-                            getVal(8), // Vendor Name for Rework
-                            getVal(9), // Coordinator Name
-                            parseSafeDate(getVal(10)), // Issued Date (safely parsed)
-                            getVal(11), // Lot
-                            getVal(12), // Remarks
-                            getVal(13), // Failure Description
-                            getVal(14)  // Remarks 2
-                        ]
-                    );
-                    const invId = invRes.rows[0].id;
-
-                    await client.query(
-                        `INSERT INTO rrh_existing_inventory 
-                         (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, rfpc_model_no, sw_version, sfp0_serial_no, sfp1_serial_no)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-                        [
-                            invId,
-                            getVal(15), getVal(16), getVal(17), getVal(18), getVal(19),
-                            getVal(20), getVal(21), getVal(22), getVal(23), getVal(24)
-                        ]
-                    );
-
-                    await client.query(
-                        `INSERT INTO rrh_replaced_inventory 
-                         (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, sfp0_serial_no, sfp1_serial_no)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-                        [
-                            invId,
-                            getVal(25), getVal(26), getVal(27), getVal(28), getVal(29),
-                            getVal(30), getVal(31), getVal(32)
-                        ]
-                    );
-                }
-            }
+            // 3. Insert Master Data rows/cells/inventory using shared helper
+            await insertMasterDataIntoDb(client, importId!, sheetId, parsedData);
 
             // Update Work Order with Master references
             await client.query(
@@ -460,6 +564,18 @@ export const confirmMasterData = async (req: Request, res: Response) => {
         } else {
             woId = woRes.rows[0].id;
             finalWoStr = woRes.rows[0].work_order_id;
+            // Guard: Check if active inward scans exist for this work order
+            const scanCheck = await client.query(
+                'SELECT 1 FROM rrh_inward_scans WHERE work_order_id = $1 AND is_deleted = false LIMIT 1',
+                [finalWoStr]
+            );
+            if (scanCheck.rows.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({
+                    success: false,
+                    error: `Cannot overwrite master data for work order "${finalWoStr}" because inward scans have already been recorded.`
+                });
+            }
             // Complete replacement: delete previous import cascade
             await client.query('DELETE FROM rrh_excel_imports WHERE work_order_id = $1', [woId]);
         }
@@ -485,76 +601,8 @@ export const confirmMasterData = async (req: Request, res: Response) => {
         );
         const sheetId = sheetRes.rows[0].id;
 
-        // 3. Insert Merges
-        for (const m of parsedData.merges) {
-            await client.query(
-                `INSERT INTO rrh_excel_merged_cells 
-                 (sheet_id, range_reference, start_row, start_column, end_row, end_column, row_span, column_span)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-                [sheetId, m.rangeReference, m.startRow, m.startColumn, m.endRow, m.endColumn, m.rowSpan, m.colSpan]
-            );
-        }
-
-        // 4. Batch Insert Rows & Cells & Normalized Data
-        for (const r of parsedData.rows) {
-            const rowRes = await client.query(
-                `INSERT INTO rrh_excel_rows (sheet_id, row_number, row_type) VALUES ($1, $2, $3) RETURNING id`,
-                [sheetId, r.rowNumber, r.rowType]
-            );
-            const rowId = rowRes.rows[0].id;
-
-            for (const c of r.cells) {
-                await client.query(
-                    `INSERT INTO rrh_excel_cells (row_id, column_number, column_letter, raw_value, display_value, data_type)
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [rowId, c.columnNumber, c.columnLetter, c.rawValue, c.displayValue, c.dataType]
-                );
-            }
-
-            if (r.rowType === 'DATA') {
-                const getVal = (colNum: number) => {
-                    const cell = r.cells.find(cl => cl.columnNumber === colNum);
-                    return cell && cell.displayValue ? cell.displayValue.trim() : null;
-                };
-
-                const invRes = await client.query(
-                    `INSERT INTO rrh_inventory 
-                     (import_id, sl_no, tejas_dc_no, tejas_obd_no, physical_tpn, band_serial_no, pr_no, 
-                      invoice_rma_no, vendor_name_for_rework, coordinator_name, issued_date, lot, remarks, failure_description, remarks_2)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
-                    [
-                        importId,
-                        getVal(1), getVal(2), getVal(3), getVal(4), getVal(5), getVal(6),
-                        getVal(7), getVal(8), getVal(9),
-                        parseSafeDate(getVal(10)),
-                        getVal(11), getVal(12), getVal(13), getVal(14)
-                    ]
-                );
-                const invId = invRes.rows[0].id;
-
-                await client.query(
-                    `INSERT INTO rrh_existing_inventory 
-                     (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, rfpc_model_no, sw_version, sfp0_serial_no, sfp1_serial_no)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-                    [
-                        invId,
-                        getVal(15), getVal(16), getVal(17), getVal(18), getVal(19),
-                        getVal(20), getVal(21), getVal(22), getVal(23), getVal(24)
-                    ]
-                );
-
-                await client.query(
-                    `INSERT INTO rrh_replaced_inventory 
-                     (inventory_id, rfpc_no, pam0_sl_no, pam1_sl_no, pam2_sl_no, pam3_sl_no, lna_sl_no, sfp0_serial_no, sfp1_serial_no)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-                    [
-                        invId,
-                        getVal(25), getVal(26), getVal(27), getVal(28), getVal(29),
-                        getVal(30), getVal(31), getVal(32)
-                    ]
-                );
-            }
-        }
+        // 3. Insert Master Data rows/cells/inventory using shared helper
+        await insertMasterDataIntoDb(client, importId, sheetId, parsedData);
 
         // Update Work Order
         await client.query(
