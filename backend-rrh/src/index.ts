@@ -10,6 +10,7 @@ import { runMigrations } from './db/runMigrations';
 import masterDataRoutes from './routes/masterDataRoutes';
 import inwardRoutes from './routes/inwardRoutes';
 import iviRoutes from './routes/iviRoutes';
+import ipqcRoutes from './routes/ipqcRoutes';
 
 dotenv.config();
 
@@ -43,6 +44,7 @@ app.get('/api/rrh/ready', async (req, res) => {
 app.use('/api/rrh', masterDataRoutes);
 app.use('/api/rrh/inward', inwardRoutes);
 app.use('/api/rrh/ivi', iviRoutes);
+app.use('/api/rrh/ipqc', ipqcRoutes);
 
 // Central Error Handler Middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

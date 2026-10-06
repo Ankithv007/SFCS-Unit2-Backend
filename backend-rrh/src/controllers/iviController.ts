@@ -65,6 +65,22 @@ export const getSessionUser = (req: Request) => {
     };
 };
 
+// ─── Helper to clean defect text (removes 'Point 1:', 'Point 1 -', 'point2:', etc.) ─────────
+export const cleanDefectDescription = (text: string | null | undefined): string => {
+    if (!text || text === '—' || text === '-' || text === 'no defect') return text || '—';
+    const parts = String(text).split(/;\s*|\n+/);
+    const cleaned = parts
+        .map((p) => {
+            let s = p.trim();
+            // Remove variations of point prefixes: "Point 1:", "Point 1 -", "point1:", "1: ", "Point: ", etc.
+            s = s.replace(/^(?:point\s*\d+[\s:\-–.]*|point[\s:\-–.]*|:?\s*\d+\s*[:\-–.]\s*)/i, '').trim();
+            return s;
+        })
+        .filter((p) => p.length > 0 && p !== '—' && p !== '-');
+
+    return cleaned.length > 0 ? cleaned.join('; ') : (text ? String(text).trim() : '—');
+};
+
 /**
  * GET /api/rrh/ivi/eligible-work-orders
  * Return RRH work orders that are NOT currently active in IVI (In Progress, Pending, Paused)
@@ -888,14 +904,16 @@ export const submitInspection = async (req: Request, res: Response) => {
                 if (Array.isArray(formattedCheckpoints)) {
                     const fixed = formattedCheckpoints
                         .filter((c: any) => c.previousFailureRemark && c.previousFailureRemark.trim())
-                        .map((c: any) => `Point ${c.id}: ${c.previousFailureRemark.trim()}`);
+                        .map((c: any) => cleanDefectDescription(c.previousFailureRemark.trim()))
+                        .filter((s: string) => s && s !== '—' && s !== '-');
                     if (fixed.length > 0) {
                         defectFixedText = fixed.join('; ');
                     }
                 }
                 if (!defectFixedText && prevFailCheck.rows.length > 0) {
                     const prevRow = prevFailCheck.rows[0];
-                    defectFixedText = (prevRow.rrh_unit && prevRow.rrh_unit !== 'no defect') ? prevRow.rrh_unit : prevRow.remarks;
+                    const rawDefect = (prevRow.rrh_unit && prevRow.rrh_unit !== 'no defect') ? prevRow.rrh_unit : prevRow.remarks;
+                    defectFixedText = cleanDefectDescription(rawDefect);
                 }
 
                 // Remove previous FAIL record(s) so it is removed from the failed inspection table!
@@ -1181,7 +1199,10 @@ export const exportIviExcel = async (req: Request, res: Response) => {
 
         const getDefectFixedText = (r: any): string => {
             if (!r.is_reinspected) return '-';
-            if (r.defect_fixed && r.defect_fixed.trim()) return r.defect_fixed.trim();
+            if (r.defect_fixed && r.defect_fixed.trim()) {
+                const cleaned = cleanDefectDescription(r.defect_fixed.trim());
+                if (cleaned && cleaned !== '—' && cleaned !== '-') return cleaned;
+            }
             let cps = r.checkpoints;
             if (typeof cps === 'string') {
                 try { cps = JSON.parse(cps); } catch { cps = null; }
@@ -1189,8 +1210,12 @@ export const exportIviExcel = async (req: Request, res: Response) => {
             if (Array.isArray(cps)) {
                 const fixed = cps
                     .filter((c: any) => c.previousFailureRemark && c.previousFailureRemark.trim())
-                    .map((c: any) => `Point ${c.id}: ${c.previousFailureRemark.trim()}`);
+                    .map((c: any) => cleanDefectDescription(c.previousFailureRemark.trim()))
+                    .filter((s: string) => s && s !== '—' && s !== '-');
                 if (fixed.length > 0) return fixed.join('; ');
+            }
+            if (r.rrh_unit && r.rrh_unit !== 'no defect') {
+                return cleanDefectDescription(r.rrh_unit);
             }
             return '-';
         };
@@ -1200,7 +1225,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
             if (!text || text === '—' || text === '-') return 1;
             const str = String(text).trim();
             if (!str) return 1;
-            const effectiveWidth = Math.max(12, colWidth - 4);
+            const effectiveWidth = Math.max(10, colWidth - 2);
             const paragraphs = str.split('\n');
             let totalLines = 0;
             for (const p of paragraphs) {
@@ -1238,7 +1263,9 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 band: r.band || '—',
                 duplexer_main: r.duplexer_main || '—',
                 duplexer_part_no: r.duplexer_part_no || '—',
-                rrh_unit: r.rrh_unit || '—',
+                rrh_unit: isFailedOnly
+                    ? cleanDefectDescription(r.rrh_unit || r.remarks || '—')
+                    : (r.rrh_unit && r.rrh_unit !== 'no defect' ? cleanDefectDescription(r.rrh_unit) : (r.rrh_unit || '—')),
                 status: r.status,
                 photos: '',
                 remarks: r.remarks || '—',
@@ -1266,15 +1293,15 @@ export const exportIviExcel = async (req: Request, res: Response) => {
 
             // Calculate required row height dynamically based on wrapped text across all text columns
             const maxLines = Math.max(
-                estimateTextLines(rowData.defect_fixed, 34),
+                estimateTextLines(rowData.defect_fixed, isFailedOnly ? 30 : 34),
                 estimateTextLines(rowData.rrh_unit, 30),
                 estimateTextLines(rowData.remarks, 28),
                 estimateTextLines(rowData.duplexer_part_no, 22),
                 estimateTextLines(rowData.serial_number, 22),
                 1
             );
-            // 1 line ~ 26pt; each additional line requires ~20pt + 8pt padding so no text is clipped
-            const calculatedTextHeight = Math.max(26, maxLines * 20 + 8);
+            // 1 line ~ 26pt; each additional line requires ~19pt + 10pt padding so no text is clipped
+            const calculatedTextHeight = Math.max(26, maxLines * 19 + 10);
 
             // Defect Images: embed all uploaded images side-by-side into cell
             const photoCell = row.getCell('photos');
