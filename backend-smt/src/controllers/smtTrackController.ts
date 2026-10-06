@@ -6,6 +6,12 @@ const logger = createLogger('SMT_TRACK_CONTROLLER');
 
 const normalizeStageId = (s: string) => (s || '').toUpperCase().replace(/[\s\-_]/g, '');
 
+export const isTopBottomWo = (sides: string | null | undefined): boolean => {
+    if (!sides) return false;
+    const s = sides.toLowerCase().trim();
+    return s.includes('+') || s.includes('/') || s.includes('both') || (s.includes('top') && s.includes('bottom'));
+};
+
 const normalizeStatus = (status: string): string => {
     switch ((status || '').toUpperCase()) {
         case 'ACCEPTED': return 'PASS';
@@ -312,17 +318,78 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         const selectedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected).length;
         const passedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected && s.status === 'PASSED').length;
 
-        if (currentStatus === 'REWORK') {
+        const isDoubleSided = isTopBottomWo(serial.sides);
+
+        // Check latest status of each side to see if anything is currently FAIL or REWORK
+        const latestStatusByStepAndSide = new Map<string, string>();
+        for (const h of history) {
+            const sideKey = (h.side || '').toUpperCase();
+            const key = `${h.process_step.toUpperCase()}__${sideKey}`;
+            latestStatusByStepAndSide.set(key, h.status);
+        }
+
+        const anyFail = Array.from(latestStatusByStepAndSide.values()).some(st => st === 'FAIL');
+        const anyRework = Array.from(latestStatusByStepAndSide.values()).some(st => st === 'REWORK');
+        const hasPostAoiPass = history.some(h => 
+            (h.process_step === 'Post AOI' || h.process_step === 'Post_AOI') && 
+            h.status === 'PASS'
+        );
+
+        if (anyRework || currentStatus === 'REWORK') {
             finalStatusLabel = 'IN REWORK';
-        } else if (currentStatus === 'FAIL') {
+            currentStatus = 'REWORK';
+        } else if (anyFail || currentStatus === 'FAIL') {
             finalStatusLabel = 'FAILED';
+            currentStatus = 'FAIL';
         } else {
-            const smtFgPassed = !hasSmt || history.some(h => (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && h.status === 'PASS');
+            let smtFgPassed = false;
+            if (!hasSmt) {
+                smtFgPassed = true;
+            } else if (isDoubleSided) {
+                smtFgPassed = history.some(h => 
+                    (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && 
+                    h.status === 'PASS'
+                ) || hasPostAoiPass;
+            } else {
+                smtFgPassed = history.some(h => 
+                    (h.process_step === 'SMT FG' || h.process_step === 'SMT_FG') && 
+                    h.status === 'PASS'
+                );
+            }
+
             const backendPassed = !hasBackend || selectedBackendCount === 0 || (passedBackendCount === selectedBackendCount);
             if (smtFgPassed && backendPassed) {
                 finalStatusLabel = 'COMPLETED';
+                currentStatus = 'PASS';
             } else {
                 finalStatusLabel = 'IN PRODUCTION';
+                if (currentStatus !== 'REWORK' && currentStatus !== 'FAIL') {
+                    currentStatus = 'PENDING';
+                }
+            }
+        }
+
+        const smtSteps = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+        const stepStatusTop: Record<string, string> = Object.fromEntries(smtSteps.map(s => [s, s === 'Rework' ? '-' : 'PENDING']));
+        const stepStatusBottom: Record<string, string> = Object.fromEntries(smtSteps.map(s => [s, s === 'Rework' ? '-' : 'PENDING']));
+        let hasSmtFgPass = false;
+        for (const h of history) {
+            const step = smtSteps.find(s => s.toUpperCase() === h.process_step.toUpperCase());
+            if (step) {
+                const side = (h.side || '').toUpperCase();
+                if (side === 'TOP') stepStatusTop[step] = normalizeStatus(h.status);
+                else if (side === 'BOTTOM') stepStatusBottom[step] = normalizeStatus(h.status);
+                if (step === 'SMT FG' && h.status === 'PASS') {
+                    hasSmtFgPass = true;
+                }
+            }
+        }
+        if (hasSmtFgPass || (isDoubleSided && hasPostAoiPass)) {
+            stepStatusTop['SMT FG'] = 'PASS';
+            if (isDoubleSided) {
+                stepStatusBottom['SMT FG'] = '-';
+            } else if (hasSmtFgPass) {
+                stepStatusBottom['SMT FG'] = 'PASS';
             }
         }
 
@@ -336,6 +403,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             quantity: serial.quantity || '-',
             line_id: serial.line_id || '-',
             sides: serial.sides || '-',
+            is_double_sided: isDoubleSided,
             has_smt: serial.has_smt ?? true,
             has_backend: serial.has_backend ?? true,
             selected_stages: serial.selected_stages || null,
@@ -346,6 +414,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             total_failures: totalFailures,
             total_reworks: totalReworks,
             total_passed: totalPassed,
+            step_status_top: stepStatusTop,
+            step_status_bottom: stepStatusBottom,
             scan_history: history,
             backend_scan_history: backendScanHistory,
             backend_stages: backendStagesResolved,
@@ -409,6 +479,7 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
         }
 
         const wo = woResult.rows[0];
+        const isDoubleSided = isTopBottomWo(wo.sides);
 
         // 2. Fetch all serials and aggregate their history using SQL
         const serialsResult = await pool.query(`
@@ -418,6 +489,23 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                 WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
                 ORDER BY serial_id, scanned_at DESC, id DESC
             ),
+            inspection_with_side AS (
+                SELECT 
+                    i.id,
+                    i.serial_id,
+                    i.process_step,
+                    i.status,
+                    i.scanned_at,
+                    UPPER(TRIM(COALESCE(ps.side, spis.side, pas.side, poas.side, rs.side, fgs.side))) AS side
+                FROM smt_inspections i
+                LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+                LEFT JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
+                LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
+                LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
+                LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+                LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
+                WHERE i.serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+            ),
             latest_steps AS (
                 SELECT serial_id, process_step, status
                 FROM (
@@ -426,6 +514,30 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                     FROM smt_inspections
                     WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
                 ) sub WHERE rn = 1
+            ),
+            latest_side_steps AS (
+                SELECT serial_id, process_step, COALESCE(side, 'NONE') as step_side, status
+                FROM (
+                    SELECT serial_id, process_step, side, status,
+                           row_number() over(partition by serial_id, process_step, side order by scanned_at desc, id desc) as rn
+                    FROM inspection_with_side
+                ) sub WHERE rn = 1
+            ),
+            agg_steps AS (
+                SELECT serial_id,
+                       json_object_agg(process_step, status) FILTER (WHERE step_side = 'TOP') as step_statuses_top,
+                       json_object_agg(process_step, status) FILTER (WHERE step_side = 'BOTTOM') as step_statuses_bottom,
+                       MAX(status) FILTER (WHERE step_side = 'TOP' AND process_step = 'SMT FG') as smt_fg_status_top,
+                       MAX(status) FILTER (WHERE step_side = 'BOTTOM' AND process_step = 'SMT FG') as smt_fg_status_bottom
+                FROM latest_side_steps
+                GROUP BY serial_id
+            ),
+            agg_overall AS (
+                SELECT serial_id,
+                       json_object_agg(process_step, status) as step_statuses,
+                       MAX(status) FILTER (WHERE process_step = 'SMT FG') as smt_fg_status
+                FROM latest_steps
+                GROUP BY serial_id
             ),
             stats AS (
                 SELECT serial_id,
@@ -445,16 +557,25 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                        COALESCE(st.total_reworks, 0) as total_reworks,
                        COALESCE(st.total_debugs, 0) as total_debugs,
                        COALESCE(st.total_passed, 0) as total_passed,
-                       (
-                           SELECT json_object_agg(ls.process_step, ls.status)
-                           FROM latest_steps ls WHERE ls.serial_id = sn.id
-                       ) as step_statuses,
-                       (
-                           SELECT ls.status FROM latest_steps ls WHERE ls.serial_id = sn.id AND ls.process_step = 'SMT FG'
-                       ) as smt_fg_status
+                       ao.step_statuses,
+                       COALESCE(
+                           CASE WHEN ao.smt_fg_status = 'PASS' THEN jsonb_set(COALESCE(ast.step_statuses_top::jsonb, '{}'::jsonb), '{SMT FG}', '"PASS"')
+                           ELSE ast.step_statuses_top::jsonb END, 
+                           '{}'::jsonb
+                       ) as step_statuses_top,
+                       COALESCE(
+                           CASE WHEN ao.smt_fg_status = 'PASS' THEN jsonb_set(COALESCE(ast.step_statuses_bottom::jsonb, '{}'::jsonb), '{SMT FG}', '"-"')
+                           ELSE ast.step_statuses_bottom::jsonb END, 
+                           '{}'::jsonb
+                       ) as step_statuses_bottom,
+                       ao.smt_fg_status,
+                       CASE WHEN ao.smt_fg_status = 'PASS' THEN 'PASS' ELSE ast.smt_fg_status_top END as smt_fg_status_top,
+                       CASE WHEN ao.smt_fg_status = 'PASS' THEN '-' ELSE ast.smt_fg_status_bottom END as smt_fg_status_bottom
                 FROM smt_serial_numbers sn
                 LEFT JOIN latest_overall lo ON sn.id = lo.serial_id
                 LEFT JOIN stats st ON sn.id = st.serial_id
+                LEFT JOIN agg_steps ast ON sn.id = ast.serial_id
+                LEFT JOIN agg_overall ao ON sn.id = ao.serial_id
                 WHERE sn.work_order_id = $1
             ),
             filtered_serials AS (
@@ -465,14 +586,14 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                     AND (
                         $4::text IS NULL 
                         OR ($4 = 'COMPLETED' AND smt_fg_status = 'PASS')
-                        OR ($4 = 'PENDING' AND (smt_fg_status IS NULL OR smt_fg_status != 'PASS'))
+                        OR ($4 = 'PENDING' AND COALESCE(smt_fg_status, '') != 'PASS')
                     )
             ),
             totals AS (
                 SELECT 
                     COUNT(*) as total_filtered,
                     COUNT(CASE WHEN smt_fg_status = 'PASS' THEN 1 END) as total_completed,
-                    COUNT(CASE WHEN smt_fg_status IS NULL OR smt_fg_status != 'PASS' THEN 1 END) as total_pending,
+                    COUNT(CASE WHEN COALESCE(smt_fg_status, '') != 'PASS' THEN 1 END) as total_pending,
                     (SELECT COUNT(*) FROM combined_serials) as total_all
                 FROM filtered_serials
             )
@@ -487,18 +608,28 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
 
         const mappedSerials = serialsResult.rows.map((s: any) => {
             const step_status: { [key: string]: string } = {};
+            const step_status_top: { [key: string]: string } = {};
+            const step_status_bottom: { [key: string]: string } = {};
+
             stepNames.forEach(step => {
-                if (s.step_statuses && s.step_statuses[step]) {
-                    step_status[step] = s.step_statuses[step];
-                } else {
-                    step_status[step] = '-';
-                }
+                step_status[step] = (s.step_statuses && s.step_statuses[step]) ? normalizeStatus(s.step_statuses[step]) : '-';
+                step_status_top[step] = (s.step_statuses_top && s.step_statuses_top[step]) ? normalizeStatus(s.step_statuses_top[step]) : (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
+                step_status_bottom[step] = (s.step_statuses_bottom && s.step_statuses_bottom[step]) ? normalizeStatus(s.step_statuses_bottom[step]) : (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
             });
 
-            let finalStatusLabel = 'Pending';
-            if (step_status['SMT FG'] === 'PASS') {
-                finalStatusLabel = 'Completed';
+            const topPostAoiPass = step_status_top['Post AOI'] === 'PASS';
+            const botPostAoiPass = step_status_bottom['Post AOI'] === 'PASS';
+            const postAoiPass = topPostAoiPass || botPostAoiPass || step_status['Post AOI'] === 'PASS';
+            const topFgPass = step_status_top['SMT FG'] === 'PASS';
+            const fgPass = s.smt_fg_status === 'PASS' || step_status['SMT FG'] === 'PASS';
+
+            if (isDoubleSided && (postAoiPass || topFgPass || fgPass)) {
+                step_status_top['SMT FG'] = 'PASS';
+                step_status_bottom['SMT FG'] = '-';
             }
+
+            const isCompleted = topFgPass || fgPass || (isDoubleSided && postAoiPass);
+            const finalStatusLabel = isCompleted ? 'Completed' : 'Pending';
 
             return {
                 serial_number: s.serial_number,
@@ -510,6 +641,8 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
                 total_debugs: Number(s.total_debugs) || 0,
                 total_passed: Number(s.total_passed) || 0,
                 step_status: step_status,
+                step_status_top: step_status_top,
+                step_status_bottom: step_status_bottom,
                 created_at: s.created_at
             };
         });
@@ -1136,6 +1269,7 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
         }
 
         const wo = woResult.rows[0];
+        const isDoubleSided = isTopBottomWo(wo.sides);
 
         // 2. Fetch all serials and aggregate their history using SQL
         const serialsResult = await pool.query(`
@@ -1145,6 +1279,23 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
                 ORDER BY serial_id, scanned_at DESC, id DESC
             ),
+            inspection_with_side AS (
+                SELECT 
+                    i.id,
+                    i.serial_id,
+                    i.process_step,
+                    i.status,
+                    i.scanned_at,
+                    UPPER(TRIM(COALESCE(ps.side, spis.side, pas.side, poas.side, rs.side, fgs.side))) AS side
+                FROM smt_inspections i
+                LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+                LEFT JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
+                LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
+                LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
+                LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+                LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
+                WHERE i.serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+            ),
             latest_steps AS (
                 SELECT serial_id, process_step, status
                 FROM (
@@ -1152,6 +1303,24 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                            row_number() over(partition by serial_id, process_step order by scanned_at desc, id desc) as rn
                     FROM smt_inspections
                     WHERE serial_id IN (SELECT id FROM smt_serial_numbers WHERE work_order_id = $1)
+                ) sub WHERE rn = 1
+            ),
+            latest_top_steps AS (
+                SELECT serial_id, process_step, status
+                FROM (
+                    SELECT serial_id, process_step, status,
+                           row_number() over(partition by serial_id, process_step order by scanned_at desc, id desc) as rn
+                    FROM inspection_with_side
+                    WHERE side = 'TOP'
+                ) sub WHERE rn = 1
+            ),
+            latest_bottom_steps AS (
+                SELECT serial_id, process_step, status
+                FROM (
+                    SELECT serial_id, process_step, status,
+                           row_number() over(partition by serial_id, process_step order by scanned_at desc, id desc) as rn
+                    FROM inspection_with_side
+                    WHERE side = 'BOTTOM'
                 ) sub WHERE rn = 1
             ),
             stats AS (
@@ -1174,7 +1343,15 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                    (
                        SELECT json_object_agg(ls.process_step, ls.status)
                        FROM latest_steps ls WHERE ls.serial_id = sn.id
-                   ) as step_statuses
+                   ) as step_statuses,
+                   (
+                       SELECT json_object_agg(lts.process_step, lts.status)
+                       FROM latest_top_steps lts WHERE lts.serial_id = sn.id
+                   ) as step_statuses_top,
+                   (
+                       SELECT json_object_agg(lbs.process_step, lbs.status)
+                       FROM latest_bottom_steps lbs WHERE lbs.serial_id = sn.id
+                   ) as step_statuses_bottom
             FROM smt_serial_numbers sn
             LEFT JOIN latest_overall lo ON sn.id = lo.serial_id
             LEFT JOIN stats st ON sn.id = st.serial_id
@@ -1263,7 +1440,17 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
         const mappedSerials = serials.map((s: any) => {
             const step_status: { [key: string]: string } = {};
             smtStepNames.forEach(step => {
-                if (s.step_statuses && s.step_statuses[step]) {
+                if (isDoubleSided) {
+                    const topSt = (s.step_statuses_top && s.step_statuses_top[step]) ? normalizeStatus(s.step_statuses_top[step]) : '-';
+                    const btmSt = (s.step_statuses_bottom && s.step_statuses_bottom[step]) ? normalizeStatus(s.step_statuses_bottom[step]) : '-';
+                    const postAoiPass = (s.step_statuses_top && normalizeStatus(s.step_statuses_top['Post AOI']) === 'PASS') || 
+                                        (s.step_statuses_bottom && normalizeStatus(s.step_statuses_bottom['Post AOI']) === 'PASS');
+                    if (step === 'SMT FG' && (postAoiPass || topSt === 'PASS')) {
+                        step_status[step] = `TOP: ${topSt === '-' ? 'PASS' : topSt}`;
+                    } else {
+                        step_status[step] = `TOP: ${topSt} / BTM: ${btmSt}`;
+                    }
+                } else if (s.step_statuses && s.step_statuses[step]) {
                     step_status[step] = normalizeStatus(s.step_statuses[step]);
                 } else {
                     step_status[step] = '-';
@@ -1282,10 +1469,12 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 step_status[stepKey] = normalizeStatus(status);
             });
 
-            let finalStatusLabel = 'Pending';
-            if (step_status['SMT FG'] === 'PASS') {
-                finalStatusLabel = 'Completed';
-            }
+            const topFg = s.step_statuses_top && normalizeStatus(s.step_statuses_top['SMT FG']) === 'PASS';
+            const postAoiPass = (s.step_statuses_top && normalizeStatus(s.step_statuses_top['Post AOI']) === 'PASS') || 
+                                (s.step_statuses_bottom && normalizeStatus(s.step_statuses_bottom['Post AOI']) === 'PASS');
+            const fgPass = (s.step_statuses && normalizeStatus(s.step_statuses['SMT FG']) === 'PASS') || topFg;
+            const isCompleted = isDoubleSided ? (fgPass || postAoiPass) : (step_status['SMT FG'] === 'PASS');
+            const finalStatusLabel = isCompleted ? 'Completed' : 'Pending';
 
             return {
                 serial_number: s.serial_number,
