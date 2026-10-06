@@ -310,13 +310,15 @@ export const getPrintingSessions = async (req: Request, res: Response) => {
     const search = req.query.search as string;
 
     try {
-        let countQuery = `
-            SELECT COUNT(ps.id) 
-            FROM smt_printing_sessions ps
-            JOIN smt_work_orders wo ON ps.work_order_id = wo.id
-            JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-            WHERE ps.is_deleted = false
-        `;
+        let countQuery = search
+            ? `SELECT COUNT(ps.id) 
+               FROM smt_printing_sessions ps
+               JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+               JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
+               WHERE ps.is_deleted = false`
+            : `SELECT COUNT(ps.id) 
+               FROM smt_printing_sessions ps
+               WHERE ps.is_deleted = false`;
         let selectQuery = `
             SELECT 
                 ps.*,
@@ -583,9 +585,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
     }
 
     const cleanBarcode = barcode.trim();
+    let client: any = null;
 
-    const client = await pool.connect();
     try {
+        client = await pool.connect();
         await client.query('BEGIN');
 
         // 1. Lock the session
@@ -619,145 +622,14 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         );
         const workOrderQty = woRes.rows[0]?.quantity || 0;
         const workOrderSides = (woRes.rows[0]?.sides || '').trim().toLowerCase();
-
-        // 3. Fetch existing scans for this barcode in this session to check for duplicate/repair
-        const existingScanRes = await client.query(
-            `SELECT * FROM smt_inspections 
-             WHERE printing_session_id = $1
-               AND (
-                   UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($2)) 
-                   OR (serial_id IS NOT NULL AND serial_id = (
-                       SELECT id FROM smt_serial_numbers 
-                       WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($2)) 
-                       LIMIT 1
-                   ))
-               )
-               AND status IN ('PASS', 'FAIL')`,
-            [id, cleanBarcode]
-        );
-
-        if (existingScanRes.rows.length > 0) {
-            const existingScan = existingScanRes.rows[0];
-            if (existingScan.status === 'FAIL') {
-                // Rework / Repair lifecycle!
-                const { repairRemark } = req.body;
-                if (!repairRemark || repairRemark.trim() === '') {
-                    await client.query('COMMIT');
-                    return res.status(200).json({
-                        needsRepairRemark: true,
-                        message: 'Barcode has a FAIL status. Repair remark is required to complete repair.'
-                    });
-                }
-
-                // Repair remark is provided! Update the record to PASS, set repair_time and repair_remark
-                const updateRes = await client.query(
-                    `UPDATE smt_inspections 
-                     SET status = 'PASS', 
-                         repair_time = CURRENT_TIMESTAMP, 
-                         repair_remark = $1,
-                         scanned_by = $2
-                     WHERE id = $3
-                     RETURNING *`,
-                    [repairRemark.trim(), operator.name, existingScan.id]
-                );
-
-                // Audit log the repair
-                await client.query(
-                    `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [
-                        'REPAIR_INSPECTION',
-                        'PRINTING_SESSION',
-                        id,
-                        operator.name,
-                        `PCB Barcode ${cleanBarcode} repaired (FAIL -> PASS) with remark: ${repairRemark.trim()}`,
-                        JSON.stringify(updateRes.rows[0])
-                    ]
-                );
-
-                // Recalculate unique Passed scans to see if session is completed (Passed Quantity = Work Order Quantity)
-                const passRes = await client.query(
-                    `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-                     FROM smt_inspections 
-                     WHERE printing_session_id = $1 AND status = 'PASS'`,
-                    [id]
-                );
-                const passCount = parseInt(passRes.rows[0].count, 10);
-
-                let completed = false;
-                if (passCount >= workOrderQty) {
-                    completed = true;
-                    await client.query(
-                        `UPDATE smt_printing_sessions SET status = 'Completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                        [id]
-                    );
-
-                    await client.query(
-                        `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
-                         VALUES ($1, $2, $3, $4, $5)`,
-                        [
-                            'SESSION_COMPLETED',
-                            'PRINTING_SESSION',
-                            id,
-                            'System',
-                            `Printing Session automatically completed. Passed Count (${passCount}) reached Work Order quantity (${workOrderQty}).`
-                        ]
-                    );
-                }
-
-                const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
-                await client.query('COMMIT');
-                notifySmtDashboardUpdate(session.work_order_id);
-                return res.status(200).json({
-                    success: true,
-                    isValid: true,
-                    isRepair: true,
-                    isCompleted: completed,
-                    sessionStatus: completed ? 'Completed' : 'In Progress',
-                    statistics: stats
-                });
-            } else {
-                // If it is 'PASS', then it's a real duplicate!
-                // Increment duplicate_scan_count
-                await client.query(
-                    `UPDATE smt_printing_sessions SET duplicate_scan_count = duplicate_scan_count + 1 WHERE id = $1`,
-                    [id]
-                );
-
-                // Audit log duplicate
-                await client.query(
-                    `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
-                     VALUES ($1, $2, $3, $4, $5)`,
-                    [
-                        'DUPLICATE_SCAN',
-                        'PRINTING_SESSION',
-                        id,
-                        operator.name,
-                        `Duplicate scan attempt blocked for barcode: ${cleanBarcode}`
-                    ]
-                );
-
-                const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
-                await client.query('COMMIT');
-                return res.status(409).json({ 
-                    success: false,
-                    isValid: true,
-                    isCompleted: false,
-                    sessionStatus: 'In Progress',
-                    message: 'This barcode has already been scanned in this Printing Session.',
-                    statistics: stats
-                });
-            }
-        }
-
         const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
 
-        // 4. Validate barcode matches a generated serial number for the Work Order (case-insensitive)
+        // 3. Validate barcode matches a generated serial number for the Work Order (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
-             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND work_order_id = $2`,
-            [cleanBarcode, cleanWoId]
+             WHERE work_order_id = $1
+               AND UPPER(TRIM(serial_number)) = UPPER(TRIM($2))`,
+            [cleanWoId, cleanBarcode]
         );
 
         // Case A: INVALID Barcode
@@ -807,11 +679,126 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             });
         }
 
-        // Case B: Valid Barcode
+        // Case B: Valid Barcode for this Work Order
         const serialRecord = serialRes.rows[0];
 
+        // 4. Fetch existing scans for this barcode in this session to check for duplicate/repair
+        const existingScanRes = await client.query(
+            `SELECT id, status, scanned_barcode, serial_id FROM smt_inspections 
+             WHERE printing_session_id = $1
+               AND (serial_id = $2 OR UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($3)))
+               AND status IN ('PASS', 'FAIL')
+             LIMIT 1`,
+            [id, serialRecord.id, cleanBarcode]
+        );
+
+        if (existingScanRes.rows.length > 0) {
+            const existingScan = existingScanRes.rows[0];
+            if (existingScan.status === 'FAIL') {
+                // Rework / Repair lifecycle
+                const { repairRemark } = req.body;
+                if (!repairRemark || repairRemark.trim() === '') {
+                    await client.query('COMMIT');
+                    return res.status(200).json({
+                        needsRepairRemark: true,
+                        message: 'Barcode has a FAIL status. Repair remark is required to complete repair.'
+                    });
+                }
+
+                // Repair remark is provided! Update the record to PASS, set repair_time and repair_remark
+                const updateRes = await client.query(
+                    `UPDATE smt_inspections 
+                     SET status = 'PASS', 
+                         repair_time = CURRENT_TIMESTAMP, 
+                         repair_remark = $1,
+                         scanned_by = $2
+                     WHERE id = $3
+                     RETURNING *`,
+                    [repairRemark.trim(), operator.name, existingScan.id]
+                );
+
+                // Audit log the repair
+                await client.query(
+                    `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        'REPAIR_INSPECTION',
+                        'PRINTING_SESSION',
+                        id,
+                        operator.name,
+                        `PCB Barcode ${cleanBarcode} repaired (FAIL -> PASS) with remark: ${repairRemark.trim()}`,
+                        JSON.stringify(updateRes.rows[0])
+                    ]
+                );
+
+                const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
+                const passCount = stats.passed;
+
+                let completed = false;
+                if (passCount >= workOrderQty) {
+                    completed = true;
+                    await client.query(
+                        `UPDATE smt_printing_sessions SET status = 'Completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                        [id]
+                    );
+
+                    await client.query(
+                        `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
+                         VALUES ($1, $2, $3, $4, $5)`,
+                        [
+                            'SESSION_COMPLETED',
+                            'PRINTING_SESSION',
+                            id,
+                            'System',
+                            `Printing Session automatically completed. Passed Count (${passCount}) reached Work Order quantity (${workOrderQty}).`
+                        ]
+                    );
+                }
+
+                await client.query('COMMIT');
+                notifySmtDashboardUpdate(session.work_order_id);
+                return res.status(200).json({
+                    success: true,
+                    isValid: true,
+                    isRepair: true,
+                    isCompleted: completed,
+                    sessionStatus: completed ? 'Completed' : 'In Progress',
+                    statistics: stats
+                });
+            } else {
+                // If it is 'PASS', duplicate
+                await client.query(
+                    `UPDATE smt_printing_sessions SET duplicate_scan_count = duplicate_scan_count + 1 WHERE id = $1`,
+                    [id]
+                );
+
+                // Audit log duplicate
+                await client.query(
+                    `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [
+                        'DUPLICATE_SCAN',
+                        'PRINTING_SESSION',
+                        id,
+                        operator.name,
+                        `Duplicate scan attempt blocked for barcode: ${cleanBarcode}`
+                    ]
+                );
+
+                const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
+                await client.query('COMMIT');
+                return res.status(409).json({ 
+                    success: false,
+                    isValid: true,
+                    isCompleted: false,
+                    sessionStatus: 'In Progress',
+                    message: 'This barcode has already been scanned in this Printing Session.',
+                    statistics: stats
+                });
+            }
+        }
+
         // For double-sided (TOP/BOTTOM) Work Orders, Top side Printing scan requires this SPECIFIC barcode to have completed Bottom side.
-        // Uses workOrderSides already fetched at the top of the function — no extra DB round-trip.
         if (session.side.toLowerCase() === 'top') {
             const isDoubleSided = workOrderSides === 'top / bottom' || workOrderSides.includes('/');
             if (isDoubleSided) {
@@ -825,7 +812,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             }
         }
 
-        // Insert PASS inspection
+        // 5. Insert PASS inspection
         const insertInspection = `
             INSERT INTO smt_inspections (
                 serial_id, process_step, scanned_by, status, work_order_id, printing_session_id, scanned_barcode
@@ -850,15 +837,9 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             ]
         );
 
-        // Recalculate unique Passed scans to see if session is completed (Passed Quantity = Work Order Quantity)
-        const passRes = await client.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passCount = parseInt(passRes.rows[0].count, 10);
-        // processedCount is no longer separately queried; stats helper covers it
+        // Fetch stats first (single FILTER aggregate — includes passed count).
+        const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
+        const passCount = stats.passed;
 
         let completed = false;
         if (passCount >= workOrderQty) {
@@ -881,7 +862,6 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             );
         }
 
-        const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
         notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({
@@ -893,11 +873,15 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             statistics: stats
         });
     } catch (err: any) {
-        await client.query('ROLLBACK');
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         logger.error('Error scanning barcode:', err);
         return res.status(500).json({ message: 'Internal server error while processing barcode scan.' });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 };
 
@@ -1189,34 +1173,8 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         const session = sessionRes.rows[0];
         const workOrderQty = session.work_order_quantity;
 
-        // Passed: unique serials with status PASS
-        const passedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passed = parseInt(passedRes.rows[0].count);
-
-        // Failed: total failed occurrences
-        const failedRes = await pool.query(
-            `SELECT COUNT(id) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status = 'FAIL'`,
-            [id]
-        );
-        const failed = parseInt(failedRes.rows[0].count);
-
-        const pending = Math.max(0, workOrderQty - passed);
-
-        // Invalid: total invalid scan attempts
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status = 'INVALID'`,
-            [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
+        const stats = await fetchPrintingSessionStatsHelper(pool, id, workOrderQty, session);
+        const { passed, failed, pending, invalid, duplicate } = stats;
 
         // Fetch scanned barcodes list
         const scansListQuery = `
@@ -1241,7 +1199,7 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
             failed,
             pending,
             invalid,
-            duplicate: session.duplicate_scan_count,
+            duplicate,
             sessionStatus: session.status,
             isCompleted: session.status === 'Completed',
             scans: scansListRes.rows

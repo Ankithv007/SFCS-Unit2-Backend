@@ -168,19 +168,19 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                     i.id,
                     i.serial_id,
                     COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text) AS serial_number,
-                    COALESCE(i.work_order_id, ps.work_order_id, sn.work_order_id) AS work_order_id,
+                    COALESCE(i.work_order_id, ps.work_order_id) AS work_order_id,
                     COALESCE(ps.side, '') AS side,
                     i.process_step AS previous_stage,
                     UPPER(TRIM(i.status)) AS status,
                     COALESCE(i.scanned_by, '-') AS scanned_by,
                     i.scanned_at
                 FROM smt_inspections i
-                LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
                 JOIN ${config.prevSessionTable} ps ON i.${config.prevSessionJoinCol} = ps.id
+                LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
                 WHERE (
-                    UPPER(TRIM(COALESCE(i.work_order_id, ''))) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(ps.work_order_id, ''))) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(sn.work_order_id, ''))) = UPPER(TRIM($1))
+                    ps.work_order_id = $1
+                    OR UPPER(TRIM(ps.work_order_id)) = UPPER(TRIM($1))
+                    OR UPPER(TRIM(COALESCE(i.work_order_id, ''))) = UPPER(TRIM($1))
                 )
                   AND LOWER(TRIM(ps.side)) = LOWER(TRIM($2))
                   AND i.process_step = ANY($3::text[])
@@ -208,17 +208,10 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
             LEFT JOIN LATERAL (
                 SELECT li.process_step, li.status, li.scanned_at
                 FROM smt_inspections li
-                LEFT JOIN smt_printing_sessions l_ps ON li.printing_session_id = l_ps.id
-                LEFT JOIN smt_spi_sessions l_spis ON li.spi_session_id = l_spis.id
-                LEFT JOIN smt_pre_aoi_sessions l_pas ON li.pre_aoi_session_id = l_pas.id
-                LEFT JOIN smt_post_aoi_sessions l_poas ON li.post_aoi_session_id = l_poas.id
-                LEFT JOIN smt_rework_sessions l_rs ON li.rework_session_id = l_rs.id
-                LEFT JOIN smt_fg_sessions l_fgs ON li.fg_session_id = l_fgs.id
                 WHERE (
                     (qu.serial_id IS NOT NULL AND li.serial_id = qu.serial_id)
                     OR (qu.serial_number IS NOT NULL AND UPPER(TRIM(COALESCE(li.scanned_barcode, ''))) = UPPER(TRIM(qu.serial_number)))
                 )
-                AND LOWER(TRIM(COALESCE(l_ps.side, l_spis.side, l_pas.side, l_poas.side, l_rs.side, l_fgs.side, qu.side))) = LOWER(TRIM(qu.side))
                 AND li.scanned_at > qu.scanned_at
                 ORDER BY li.scanned_at DESC, li.id DESC
                 LIMIT 1
@@ -226,16 +219,16 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM smt_inspections ci
-                LEFT JOIN smt_serial_numbers csn ON ci.serial_id = csn.id
                 JOIN ${config.currentSessionTable} cs ON ci.${config.currentSessionJoinCol} = cs.id
+                LEFT JOIN smt_serial_numbers csn ON ci.serial_id = csn.id
                 WHERE (
                     (qu.serial_id IS NOT NULL AND ci.serial_id = qu.serial_id)
                     OR (qu.serial_number IS NOT NULL AND UPPER(TRIM(COALESCE(ci.scanned_barcode, csn.serial_number, ''))) = UPPER(TRIM(qu.serial_number)))
                 )
                 AND (
-                    UPPER(TRIM(COALESCE(ci.work_order_id, ''))) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(cs.work_order_id, ''))) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(csn.work_order_id, ''))) = UPPER(TRIM($1))
+                    cs.work_order_id = $1
+                    OR UPPER(TRIM(cs.work_order_id)) = UPPER(TRIM($1))
+                    OR UPPER(TRIM(COALESCE(ci.work_order_id, ''))) = UPPER(TRIM($1))
                 )
                 AND LOWER(TRIM(cs.side)) = LOWER(TRIM($2))
                 AND ci.process_step = ANY($4::text[])
