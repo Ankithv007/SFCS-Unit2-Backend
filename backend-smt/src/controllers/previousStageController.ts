@@ -120,6 +120,19 @@ const STAGE_MAPPING: Record<string, StageConfig | null> = {
  * Returns list of unique production units that successfully passed the previous stage
  * and have NOT yet passed the current stage (Pending at Current Stage), along with the count.
  */
+import { getPendingCache, setPendingCache } from '../utils/pendingCache';
+
+/**
+ * GET /api/smt/previous-stage-passed
+ * Query params:
+ *  - workOrderId (required)
+ *  - side (required, 'Top' | 'Bottom' | etc.)
+ *  - stage (required, current stage name e.g. 'SPI', 'Pre-AOI', 'Post-AOI', 'Rework', 'SMT-FG')
+ *  - sessionId (optional)
+ *
+ * Returns list of unique production units that successfully passed the previous stage
+ * and have NOT yet passed the current stage (Pending at Current Stage), along with the count.
+ */
 export const getPreviousStagePassed = async (req: Request, res: Response) => {
     const workOrderId = (req.query.workOrderId as string || req.query.woId as string || req.params.woId || '').trim();
     const side = (req.query.side as string || '').trim();
@@ -161,13 +174,38 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
         });
     }
 
+    const cleanWo = workOrderId.trim();
+    const cleanSide = side.trim();
+    const cacheKey = `smt:pending:${cleanWo.toUpperCase()}:${cleanSide.toLowerCase()}:${normalizedStage}`;
+
+    // 1. Check in-memory TTL cache for instant (<1ms) response
+    const cached = getPendingCache<any>(cacheKey);
+    if (cached) {
+        return res.status(200).json(cached);
+    }
+
     try {
         const query = `
-            WITH latest_prev_stage_scans AS (
+            WITH prev_sessions AS (
+                SELECT id, work_order_id, side
+                FROM ${config.prevSessionTable}
+                WHERE (UPPER(TRIM(work_order_id)) = UPPER(TRIM($1)) OR work_order_id = $1)
+                  AND LOWER(TRIM(side)) = LOWER(TRIM($2))
+                  AND (is_deleted = false OR is_deleted IS NULL)
+            ),
+            current_sessions AS (
+                SELECT id, work_order_id, side
+                FROM ${config.currentSessionTable}
+                WHERE (UPPER(TRIM(work_order_id)) = UPPER(TRIM($1)) OR work_order_id = $1)
+                  AND LOWER(TRIM(side)) = LOWER(TRIM($2))
+                  AND (is_deleted = false OR is_deleted IS NULL)
+            ),
+            prev_stage_scans AS (
                 SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))))
                     i.id,
                     i.serial_id,
                     COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text) AS serial_number,
+                    UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, ''))) AS clean_serial,
                     COALESCE(i.work_order_id, ps.work_order_id) AS work_order_id,
                     COALESCE(ps.side, '') AS side,
                     i.process_step AS previous_stage,
@@ -175,72 +213,41 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                     COALESCE(i.scanned_by, '-') AS scanned_by,
                     i.scanned_at
                 FROM smt_inspections i
-                JOIN ${config.prevSessionTable} ps ON i.${config.prevSessionJoinCol} = ps.id
+                JOIN prev_sessions ps ON i.${config.prevSessionJoinCol} = ps.id
                 LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
-                WHERE (
-                    ps.work_order_id = $1
-                    OR UPPER(TRIM(ps.work_order_id)) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(i.work_order_id, ''))) = UPPER(TRIM($1))
-                )
-                  AND LOWER(TRIM(ps.side)) = LOWER(TRIM($2))
-                  AND i.process_step = ANY($3::text[])
-                  AND (ps.is_deleted = false OR ps.is_deleted IS NULL)
+                WHERE i.process_step = ANY($3::text[])
+                  AND UPPER(TRIM(i.status)) IN ('PASS', 'ACCEPTED', 'PASSED')
                 ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))), i.scanned_at DESC, i.id DESC
             ),
-            qualified_units AS (
-                SELECT *
-                FROM latest_prev_stage_scans
-                WHERE status IN ('PASS', 'ACCEPTED', 'PASSED')
+            current_stage_passed AS (
+                SELECT DISTINCT UPPER(TRIM(COALESCE(sn.serial_number, ci.scanned_barcode, ''))) as clean_serial
+                FROM smt_inspections ci
+                JOIN current_sessions cs ON ci.${config.currentSessionJoinCol} = cs.id
+                LEFT JOIN smt_serial_numbers sn ON ci.serial_id = sn.id
+                WHERE ci.process_step = ANY($4::text[])
+                  AND UPPER(TRIM(ci.status)) IN ('PASS', 'ACCEPTED', 'PASSED')
             )
             SELECT 
-                qu.id,
-                qu.serial_id,
-                qu.serial_number,
-                qu.work_order_id,
-                qu.side,
-                qu.previous_stage,
-                qu.status,
-                qu.scanned_by,
-                qu.scanned_at,
-                subsequent_smt.process_step AS subsequent_smt_stage,
-                subsequent_smt.scanned_at AS subsequent_smt_scanned_at
-            FROM qualified_units qu
-            LEFT JOIN LATERAL (
-                SELECT li.process_step, li.status, li.scanned_at
-                FROM smt_inspections li
-                WHERE (
-                    (qu.serial_id IS NOT NULL AND li.serial_id = qu.serial_id)
-                    OR (qu.serial_number IS NOT NULL AND UPPER(TRIM(COALESCE(li.scanned_barcode, ''))) = UPPER(TRIM(qu.serial_number)))
-                )
-                AND li.scanned_at > qu.scanned_at
-                ORDER BY li.scanned_at DESC, li.id DESC
-                LIMIT 1
-            ) subsequent_smt ON TRUE
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM smt_inspections ci
-                JOIN ${config.currentSessionTable} cs ON ci.${config.currentSessionJoinCol} = cs.id
-                LEFT JOIN smt_serial_numbers csn ON ci.serial_id = csn.id
-                WHERE (
-                    (qu.serial_id IS NOT NULL AND ci.serial_id = qu.serial_id)
-                    OR (qu.serial_number IS NOT NULL AND UPPER(TRIM(COALESCE(ci.scanned_barcode, csn.serial_number, ''))) = UPPER(TRIM(qu.serial_number)))
-                )
-                AND (
-                    cs.work_order_id = $1
-                    OR UPPER(TRIM(cs.work_order_id)) = UPPER(TRIM($1))
-                    OR UPPER(TRIM(COALESCE(ci.work_order_id, ''))) = UPPER(TRIM($1))
-                )
-                AND LOWER(TRIM(cs.side)) = LOWER(TRIM($2))
-                AND ci.process_step = ANY($4::text[])
-                AND UPPER(TRIM(ci.status)) IN ('PASS', 'ACCEPTED', 'PASSED')
-                AND (cs.is_deleted = false OR cs.is_deleted IS NULL)
-            )
-            ORDER BY qu.scanned_at DESC, qu.id DESC
+                p.id,
+                p.serial_id,
+                p.serial_number,
+                p.work_order_id,
+                p.side,
+                p.previous_stage,
+                p.status,
+                p.scanned_by,
+                p.scanned_at,
+                NULL as subsequent_smt_stage,
+                NULL as subsequent_smt_scanned_at
+            FROM prev_stage_scans p
+            LEFT JOIN current_stage_passed c ON p.clean_serial = c.clean_serial
+            WHERE c.clean_serial IS NULL OR p.clean_serial = ''
+            ORDER BY p.scanned_at DESC, p.id DESC
         `;
 
         const result = await pool.query(query, [
-            workOrderId,
-            side,
+            cleanWo,
+            cleanSide,
             config.prevProcessSteps,
             config.currentProcessSteps
         ]);
@@ -276,19 +283,20 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
         };
 
         // ─────────────────────────────────────────────────────────────────────────────
-        // Re-use Existing Backend Track Items Logic:
-        // Cross-query backendPool (units ledger, mapping, and scans) for candidate barcodes
+        // Optional Backend Track Items Cross-Query:
+        // Cross-query backendPool (units ledger, mapping, and scans) only for first 200 units
+        // to keep latency low while providing full stage visibility
         // ─────────────────────────────────────────────────────────────────────────────
         const backendUnitMap = new Map<string, { currentStage: string; latestScanAt?: Date }>();
 
         if (result.rows.length > 0) {
             try {
                 const serials = result.rows
+                    .slice(0, 200)
                     .map((r: any) => (r.serial_number || '').trim().toUpperCase())
                     .filter(Boolean);
 
                 if (serials.length > 0) {
-                    // 1. Resolve candidate barcodes / unit mappings from Backend unit_serial_mapping
                     const candidateMap = new Map<string, Set<string>>();
                     serials.forEach(sn => candidateMap.set(sn, new Set([sn])));
 
@@ -311,13 +319,11 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                         });
                     });
 
-                    // Flatten all candidate barcodes to query backend scans and units ledger
                     const allCandidateBarcodes = Array.from(
                         new Set(Array.from(candidateMap.values()).flatMap(s => Array.from(s)))
                     );
 
                     if (allCandidateBarcodes.length > 0) {
-                        // 2. Fetch backend scans in chronological order
                         const bScansRes = await backendPool.query(
                             `SELECT 
                                 s.barcode,
@@ -334,7 +340,6 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                             [allCandidateBarcodes]
                         );
 
-                        // 3. Fetch backend units ledger current_stage_id & stage_name
                         const bUnitsRes = await backendPool.query(
                             `SELECT 
                                 u.barcode,
@@ -347,7 +352,6 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                             [allCandidateBarcodes]
                         );
 
-                        // Associate backend scan history with each serial
                         serials.forEach(sn => {
                             const candidates = candidateMap.get(sn) || new Set([sn]);
                             const matchedScans = bScansRes.rows.filter((sRow: any) =>
@@ -383,10 +387,6 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
             const snUpper = (row.serial_number || '').trim().toUpperCase();
             const backendInfo = backendUnitMap.get(snUpper);
 
-            // Determine Current Stage:
-            // 1. If unit reached a subsequent Backend stage (after qualifying scan), show that Backend stage
-            // 2. Else if unit reached a subsequent SMT stage (e.g. Rework), show that SMT stage
-            // 3. Default: the unit is pending at the current target SMT stage (e.g. Pre-AOI, Post-AOI, SPI, Rework, SMT-FG)
             let resolvedCurrentStage = config.currentStageName;
 
             if (backendInfo?.currentStage) {
@@ -418,14 +418,19 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
             };
         });
 
-        return res.status(200).json({
+        const responsePayload = {
             success: true,
             stage,
             previousStage: config.previousStageName,
             count: units.length,
             units,
             data: units
-        });
+        };
+
+        // Cache for 10 seconds (auto-invalidated on any new scan submission)
+        setPendingCache(cacheKey, responsePayload, 10000);
+
+        return res.status(200).json(responsePayload);
     } catch (err: any) {
         logger.error(`Error fetching previous stage passed units for ${stage} (WO: ${workOrderId}, Side: ${side}):`, err);
         return res.status(500).json({

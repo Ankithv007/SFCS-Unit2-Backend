@@ -60,6 +60,39 @@ export const getSessionUser = (req: Request) => {
     };
 };
 
+/**
+ * GET /api/rrh/inward/eligible-work-orders
+ * Return RRH work orders that are NOT currently active in Inward (In Progress, Pending, Paused)
+ * and NOT completed in Inward (Completed).
+ */
+export const getEligibleInwardWorkOrders = async (_req: Request, res: Response) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                w.id,
+                w.work_order_id,
+                COALESCE(w.work_order_date, w.date) as work_order_date,
+                w.lot_quantity,
+                w.status,
+                w.created_at
+            FROM rrh_work_orders w
+            WHERE w.status != 'Completed'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM rrh_inward_sessions s
+                WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
+                  AND s.is_deleted = false
+                  AND s.status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+            )
+            ORDER BY w.created_at DESC, w.id DESC
+        `);
+        return res.status(200).json({ success: true, data: result.rows });
+    } catch (err: any) {
+        logger.error('Error in getEligibleInwardWorkOrders: ' + err.message);
+        return res.status(500).json({ message: 'Failed to fetch eligible work orders for Inward.', error: err.message });
+    }
+};
+
 export const createInwardSession = async (req: Request, res: Response) => {
     const { work_order_id } = req.body;
     const operator = getSessionUser(req);

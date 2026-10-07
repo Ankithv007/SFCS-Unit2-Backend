@@ -329,6 +329,7 @@ BEGIN
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS checkpoints JSONB DEFAULT '[]'::jsonb;
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS is_reinspected BOOLEAN DEFAULT false;
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS route VARCHAR(50) DEFAULT 'ECN';
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session_status_scanned ON rrh_ivi_inspections(session_id, status, scanned_at DESC, id DESC) WHERE is_deleted = false;

@@ -925,7 +925,9 @@ export const submitInspection = async (req: Request, res: Response) => {
                 );
             }
 
-            // Insert inspection with is_reinspected flag and defect_fixed text
+            const cleanRoute = (req.body.route || req.body.selected_route || 'ECN').toString().trim().toUpperCase() === 'NON_ECN' ? 'NON_ECN' : 'ECN';
+
+            // Insert inspection with is_reinspected flag, defect_fixed text, and route
             const insertRes = await client.query(
                 `INSERT INTO rrh_ivi_inspections (
                     session_id,
@@ -949,8 +951,9 @@ export const submitInspection = async (req: Request, res: Response) => {
                     sl_no,
                     checkpoints,
                     is_reinspected,
-                    defect_fixed
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                    defect_fixed,
+                    route
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 RETURNING *`,
                 [
                     id,
@@ -974,7 +977,8 @@ export const submitInspection = async (req: Request, res: Response) => {
                     inwardSlNo,
                     formattedCheckpoints ? JSON.stringify(formattedCheckpoints) : null,
                     isReinspected && cleanStatus === 'PASS',
-                    defectFixedText
+                    defectFixedText,
+                    cleanRoute
                 ]
             );
 

@@ -5,7 +5,8 @@ import {
     getSessionById, 
     updateSessionStatus,
     checkBottom,
-    downloadSessionFile
+    downloadSessionFile,
+    getEligibleInwardWorkOrders
 } from '../controllers/inwardController';
 import {
     getSessionStats,
@@ -22,7 +23,8 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// Work order checks
+// Work order checks & eligible list
+router.get('/eligible-work-orders', authMiddleware, getEligibleInwardWorkOrders);
 router.get('/work-orders/:woId/check-bottom', checkBottom);
 
 // Session management (authenticated)

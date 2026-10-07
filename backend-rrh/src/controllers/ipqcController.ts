@@ -103,6 +103,7 @@ export const getEligibleIpqcWorkOrders = async (_req: Request, res: Response) =>
                     JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
                     WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM(w.work_order_id))
                       AND ivi.status = 'PASS'
+                      AND COALESCE(ivi.route, 'ECN') = 'ECN'
                       AND ivi.is_deleted = false
                 ) as ivi_passed_count
             FROM rrh_work_orders w
@@ -148,6 +149,7 @@ export const getWorkOrderIviDetails = async (req: Request, res: Response) => {
              JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
              WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
                AND ivi.status = 'PASS'
+               AND COALESCE(ivi.route, 'ECN') = 'ECN'
                AND ivi.is_deleted = false`,
             [cleanWoId]
         );
@@ -347,6 +349,7 @@ export const getIpqcSessionById = async (req: Request, res: Response) => {
              JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
              WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
                AND ivi.status = 'PASS'
+               AND COALESCE(ivi.route, 'ECN') = 'ECN'
                AND ivi.is_deleted = false`,
             [session.work_order_id]
         );
@@ -529,6 +532,7 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
               AND ivi.status = 'PASS'
+              AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
               AND ivi.serial_number NOT IN (
                   SELECT serial_number FROM rrh_ipqc_inspections 
@@ -581,6 +585,7 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
               AND ivi.status = 'PASS'
+              AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
               AND ivi.serial_number NOT IN (
                   SELECT serial_number FROM rrh_ipqc_inspections 
@@ -665,6 +670,7 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                 OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = $1
             )
               AND ivi.status = 'PASS'
+              AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
         `;
 
@@ -678,6 +684,29 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
         const result = await pool.query(iviQuery, queryParams);
 
         if (result.rows.length === 0) {
+            // Check if it exists as NON_ECN route
+            const nonEcnCheck = await pool.query(
+                `SELECT ivi.id, ivi.route
+                 FROM rrh_ivi_inspections ivi
+                 JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
+                 WHERE (
+                     UPPER(TRIM(ivi.serial_number)) = $1
+                     OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = $1
+                 )
+                   AND ivi.status = 'PASS'
+                   AND ivi.route = 'NON_ECN'
+                   AND ivi.is_deleted = false
+                 ORDER BY ivi.scanned_at DESC, ivi.id DESC LIMIT 1`,
+                [cleanSerial]
+            );
+
+            if (nonEcnCheck.rows.length > 0) {
+                return res.status(200).json({
+                    found: false,
+                    message: `Unit "${cleanSerial}" is configured for Non-ECN route and cannot be processed in IPQC.`
+                });
+            }
+
             return res.status(200).json({
                 found: false,
                 message: `Unit "${cleanSerial}" not found in passed RRH IVI inspections.`
@@ -1315,6 +1344,7 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
               AND ivi.status = 'PASS'
+              AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
               AND ivi.serial_number NOT IN (
                   SELECT serial_number FROM rrh_ipqc_inspections 

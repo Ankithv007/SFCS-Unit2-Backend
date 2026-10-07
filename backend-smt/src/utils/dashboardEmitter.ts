@@ -20,9 +20,14 @@ export const dashboardEvents = new SmtDashboardEventEmitter();
  * Note: Must only be called after the database transaction has successfully committed.
  * Invalid scans and technical errors must NEVER call this function.
  */
+import { invalidatePendingCache } from './pendingCache';
+
 export const notifySmtDashboardUpdate = (workOrderId: string) => {
     if (!workOrderId) return;
     try {
+        // Automatically invalidate pending cache for this Work Order
+        invalidatePendingCache(workOrderId);
+
         logger.info(`Emitting SMT dashboard update for Work Order: ${workOrderId}`);
         dashboardEvents.emit('smt-dashboard-update', {
             event: 'SMT_DASHBOARD_UPDATE',
