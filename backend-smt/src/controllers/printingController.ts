@@ -264,37 +264,19 @@ export const createPrintingSession = async (req: Request, res: Response) => {
 };
 
 const fetchPrintingSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number, sessionRow?: any) => {
-    // Single aggregation query replaces 4 separate COUNT queries.
-    // FILTER (WHERE ...) is standard PostgreSQL and executes in one pass over the index.
     const statsRes = await client.query(
         `SELECT
-            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS')    AS passed,
-            COUNT(id)                                                    FILTER (WHERE status = 'FAIL')    AS failed,
-            COUNT(id)                                                    FILTER (WHERE status = 'INVALID') AS invalid
+            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS') AS passed,
+            COUNT(id)                                                  FILTER (WHERE status = 'FAIL') AS failed
          FROM smt_inspections
          WHERE printing_session_id = $1`,
         [sessionId]
     );
     const passed  = parseInt(statsRes.rows[0].passed,  10) || 0;
     const failed  = parseInt(statsRes.rows[0].failed,  10) || 0;
-    const invalid = parseInt(statsRes.rows[0].invalid, 10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
-    // duplicate_scan_count is maintained directly on the session row (updated via UPDATE ... SET duplicate_scan_count + 1).
-    // If the caller passes the session row already fetched inside the transaction, read it directly.
-    // Otherwise fall back to a targeted query (avoids a full table re-scan).
-    let duplicate = 0;
-    if (sessionRow !== undefined) {
-        duplicate = sessionRow.duplicate_scan_count || 0;
-    } else {
-        const dupRes = await client.query(
-            `SELECT duplicate_scan_count FROM smt_printing_sessions WHERE id = $1`,
-            [sessionId]
-        );
-        duplicate = dupRes.rows[0]?.duplicate_scan_count || 0;
-    }
-
-    return { passed, failed, pending, invalid, duplicate };
+    return { passed, failed, pending, invalid: 0, duplicate: 0 };
 };
 
 
@@ -718,34 +700,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 });
             } else {
                 // If it is 'PASS', then it's a real duplicate!
-                // Increment duplicate_scan_count
-                await client.query(
-                    `UPDATE smt_printing_sessions SET duplicate_scan_count = duplicate_scan_count + 1 WHERE id = $1`,
-                    [id]
-                );
-
-                // Audit log duplicate
-                await client.query(
-                    `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
-                     VALUES ($1, $2, $3, $4, $5)`,
-                    [
-                        'DUPLICATE_SCAN',
-                        'PRINTING_SESSION',
-                        id,
-                        operator.name,
-                        `Duplicate scan attempt blocked for barcode: ${cleanBarcode}`
-                    ]
-                );
-
-                const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
-                await client.query('COMMIT');
+                await client.query('ROLLBACK');
                 return res.status(409).json({ 
                     success: false,
-                    isValid: true,
-                    isCompleted: false,
-                    sessionStatus: 'In Progress',
-                    message: 'This barcode has already been scanned in this Printing Session.',
-                    statistics: stats
+                    message: `Barcode "${cleanBarcode}" has already been scanned in this Printing Session (Duplicate Scan).`
                 });
             }
         }
@@ -770,40 +728,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
                 : 'Serial Number does not exist or does not belong to selected Work Order';
 
-            // Save as INVALID inspection
-            const insertInspection = `
-                INSERT INTO smt_inspections (
-                    serial_id, process_step, scanned_by, status, rework_reason, work_order_id, printing_session_id, scanned_barcode
-                ) VALUES (NULL, 'Printing', $1, 'INVALID', $2, $3, $4, $5)
-                RETURNING *
-            `;
-            const insRes = await client.query(insertInspection, [
-                operator.name, failReason, session.work_order_id, id, cleanBarcode
-            ]);
-
-            // Log audit
-            await client.query(
-                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [
-                    'INVALID_SCAN',
-                    'PRINTING_SESSION',
-                    id,
-                    operator.name,
-                    `Invalid barcode scanned: ${cleanBarcode} (${failReason})`,
-                    JSON.stringify(insRes.rows[0])
-                ]
-            );
-
-            const stats = await fetchPrintingSessionStatsHelper(client, id, workOrderQty);
-            await client.query('COMMIT');
-            return res.status(200).json({
-                success: true,
-                isValid: false,
-                isCompleted: false,
-                sessionStatus: 'In Progress',
-                message: `Invalid Serial Number: ${failReason}.`,
-                statistics: stats
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                success: false,
+                message: `Invalid Serial Number: ${failReason}.`
             });
         }
 
@@ -1209,15 +1137,6 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
 
         const pending = Math.max(0, workOrderQty - passed);
 
-        // Invalid: total invalid scan attempts
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count 
-             FROM smt_inspections 
-             WHERE printing_session_id = $1 AND status = 'INVALID'`,
-            [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
-
         // Fetch scanned barcodes list
         const scansListQuery = `
             SELECT 
@@ -1240,8 +1159,8 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
             passed,
             failed,
             pending,
-            invalid,
-            duplicate: session.duplicate_scan_count,
+            invalid: 0,
+            duplicate: 0,
             sessionStatus: session.status,
             isCompleted: session.status === 'Completed',
             scans: scansListRes.rows
@@ -1293,11 +1212,6 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
         const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
-
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
 
         // Scans list
         const scansRes = await pool.query(
@@ -1459,8 +1373,6 @@ export const exportPrintingSessionExcel = async (req: Request, res: Response) =>
         addKVRow(r, 'Yield (%)', yieldPercent); r++;
         addKVRow(r, 'Failed Quantity', failed); r++;
         addKVRow(r, 'Pending Quantity', pending); r++;
-        addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
-        addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count); r++;
 
         r++; // spacer
 
@@ -1588,11 +1500,6 @@ export const exportPrintingSessionPdfData = async (req: Request, res: Response) 
         const failed = parseInt(failedRes.rows[0].count);
         const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE printing_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
-
         const scansRes = await pool.query(
             `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at, repair_time, repair_remark
              FROM smt_inspections WHERE printing_session_id = $1 ORDER BY scanned_at ASC`,
@@ -1642,8 +1549,8 @@ export const exportPrintingSessionPdfData = async (req: Request, res: Response) 
                 passed,
                 failed,
                 pending,
-                invalid,
-                duplicate: session.duplicate_scan_count
+                invalid: 0,
+                duplicate: 0
             },
             scans: scansRes.rows
         });

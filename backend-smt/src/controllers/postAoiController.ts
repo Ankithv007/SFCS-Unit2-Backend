@@ -295,44 +295,24 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
 };
 
 const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number) => {
-    const passedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-         FROM smt_inspections 
-         WHERE post_aoi_session_id = $1 AND status = 'PASS'`,
+    const statsRes = await client.query(
+        `SELECT
+            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS') AS passed,
+            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'FAIL') AS failed
+         FROM smt_inspections
+         WHERE post_aoi_session_id = $1`,
         [sessionId]
     );
-    const passed = parseInt(passedRes.rows[0].count, 10) || 0;
-
-    const failedRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE post_aoi_session_id = $1 AND status = 'FAIL'`,
-        [sessionId]
-    );
-    const failed = parseInt(failedRes.rows[0].count, 10) || 0;
-
+    const passed = parseInt(statsRes.rows[0].passed, 10) || 0;
+    const failed = parseInt(statsRes.rows[0].failed, 10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
-
-    const invalidRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE post_aoi_session_id = $1 AND status = 'INVALID'`,
-        [sessionId]
-    );
-    const invalid = parseInt(invalidRes.rows[0].count, 10) || 0;
-
-    const dupRes = await client.query(
-        `SELECT duplicate_scan_count FROM smt_post_aoi_sessions WHERE id = $1`,
-        [sessionId]
-    );
-    const duplicate = dupRes.rows[0]?.duplicate_scan_count || 0;
 
     return {
         passed,
         failed,
         pending,
-        invalid,
-        duplicate
+        invalid: 0,
+        duplicate: 0
     };
 };
 
@@ -651,39 +631,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
                 : 'Serial Number does not exist or does not belong to selected Work Order';
 
-            // Save as INVALID inspection
-            const insertInspection = `
-                INSERT INTO smt_inspections (
-                    serial_id, process_step, scanned_by, status, rework_reason, work_order_id, post_aoi_session_id, scanned_barcode
-                ) VALUES (NULL, 'Post AOI', $1, 'INVALID', $2, $3, $4, $5)
-                RETURNING *
-            `;
-            const insRes = await client.query(insertInspection, [
-                operator.name, failReason, session.work_order_id, id, cleanBarcode
-            ]);
-
-            await client.query(
-                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [
-                    'INVALID_SCAN',
-                    'POST_AOI_SESSION',
-                    id,
-                    operator.name,
-                    `Invalid barcode scanned: ${cleanBarcode} (${failReason})`,
-                    JSON.stringify(insRes.rows[0])
-                ]
-            );
-
-            const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
-            await client.query('COMMIT');
-            return res.status(200).json({
-                success: true,
-                isValid: false,
-                isCompleted: false,
-                sessionStatus: 'In Progress',
-                message: `Invalid Serial Number: ${failReason}.`,
-                statistics: stats
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                success: false,
+                message: `Invalid Serial Number: ${failReason}.`
             });
         }
 
@@ -758,33 +709,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         );
 
         if (duplicateCheck.rows.length > 0) {
-            // Increment duplicate count
-            await client.query(
-                `UPDATE smt_post_aoi_sessions SET duplicate_scan_count = duplicate_scan_count + 1 WHERE id = $1`,
-                [id]
-            );
-
-            await client.query(
-                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [
-                    'DUPLICATE_SCAN',
-                    'POST_AOI_SESSION',
-                    id,
-                    operator.name,
-                    `Duplicate scan attempt blocked for barcode: ${cleanBarcode}`
-                ]
-            );
-
-            const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
-            await client.query('COMMIT');
+            await client.query('ROLLBACK');
             return res.status(409).json({
                 success: false,
-                isValid: true,
-                isCompleted: false,
-                sessionStatus: 'In Progress',
-                message: 'This barcode has already been scanned in this Post AOI Session.',
-                statistics: stats
+                message: `Barcode "${cleanBarcode}" has already been scanned in this Post AOI Session (Duplicate Scan).`
             });
         }
 
@@ -1247,22 +1175,11 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
             [id]
         );
         const failed = parseInt(failedRes.rows[0].count);
-
         const pending = Math.max(0, workOrderQty - passed);
 
-        // Invalid: total invalid scan attempts
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count 
-             FROM smt_inspections 
-             WHERE post_aoi_session_id = $1 AND status = 'INVALID'`,
-            [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
-
-        // Fetch scanned barcodes list
-        const scansListQuery = `
-            SELECT 
-                ins.id AS scan_id,
+        const scansListRes = await pool.query(
+            `SELECT 
+                ins.id,
                 ins.scanned_barcode AS barcode,
                 ins.status AS result,
                 ins.rework_reason AS remark,
@@ -1316,17 +1233,17 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
                 END AS repair_remark
             FROM smt_inspections ins
             WHERE ins.post_aoi_session_id = $1
-            ORDER BY ins.scanned_at DESC
-        `;
-        const scansListRes = await pool.query(scansListQuery, [id]);
+            ORDER BY ins.scanned_at DESC`,
+            [id]
+        );
 
         return res.status(200).json({
             workOrderQuantity: workOrderQty,
             passed,
             failed,
             pending,
-            invalid,
-            duplicate: session.duplicate_scan_count,
+            invalid: 0,
+            duplicate: 0,
             sessionStatus: session.status,
             isCompleted: session.status === 'Completed',
             scans: scansListRes.rows
@@ -1375,12 +1292,7 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, (session.work_order_quantity || 0) - passed - failed);
-
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE post_aoi_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
         // Scans list
         const scansRes = await pool.query(
@@ -1436,7 +1348,7 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
                         )
                     ELSE NULL
                 END AS repair_remark
-             FROM smt_inspections ins WHERE ins.post_aoi_session_id = $1 ORDER BY ins.scanned_at ASC`,
+            FROM smt_inspections ins WHERE ins.post_aoi_session_id = $1 ORDER BY ins.scanned_at ASC`,
             [id]
         );
 
@@ -1589,8 +1501,6 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
         addKVRow(r, 'Yield (%)', yieldPercent); r++;
         addKVRow(r, 'Failed Quantity', failed); r++;
         addKVRow(r, 'Pending Quantity', pending); r++;
-        addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
-        addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count); r++;
 
         r++; // Spacer
 
@@ -1612,8 +1522,6 @@ export const exportPostAoiSessionExcel = async (req: Request, res: Response) => 
         r++;
 
         scansRes.rows.forEach((scan, idx) => {
-            const dataRow = ws.getRow(r);
-            dataRow.height = 16;
             const rowFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: idx % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFC' } };
 
             const setCell = (col: string, value: any, extra: Partial<ExcelJS.Style> = {}) => {
@@ -1713,12 +1621,7 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
         );
         const passed = parseInt(passedRes.rows[0].count);
         const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, (session.work_order_quantity || 0) - passed - failed);
-
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE post_aoi_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
+        const pending = Math.max(0, (session.work_order_quantity || 0) - passed);
 
         const scansRes = await pool.query(
             `SELECT 
@@ -1820,8 +1723,8 @@ export const exportPostAoiSessionPdfData = async (req: Request, res: Response) =
                 passed,
                 failed,
                 pending,
-                invalid,
-                duplicate: session.duplicate_scan_count
+                invalid: 0,
+                duplicate: 0
             },
             scans: scansRes.rows
         });

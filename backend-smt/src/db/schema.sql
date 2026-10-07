@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS smt_inspections (
     process_step VARCHAR(100) NOT NULL, -- Post AOI, Rework, etc.
     scanned_by VARCHAR(255),
     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR(50) DEFAULT 'PASS',
+    status VARCHAR(50) DEFAULT 'PASS' CHECK (status IN ('PASS', 'FAIL', 'PENDING')),
     rework_reason TEXT
 );
 

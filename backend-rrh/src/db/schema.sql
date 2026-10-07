@@ -1,9 +1,3 @@
--- ============================================================================
--- Enterprise Production Schema for RRH (Remote Radio Head) Microservice
--- Modules: Work Orders, Excel Ingestion, Inventory, Inward, IVI, IPQC
--- Architecture: High-Throughput OLTP, Zero Write-Bloat, Full ACID Integrity
--- ============================================================================
-
 -- ----------------------------------------------------------------------------
 -- 1. Shared Functions & Pre-requisite Sync
 -- ----------------------------------------------------------------------------
@@ -134,7 +128,7 @@ CREATE TABLE IF NOT EXISTS rrh_excel_merged_cells (
     row_span INTEGER,
     column_span INTEGER
 );
-
+ 
 CREATE INDEX IF NOT EXISTS idx_rrh_excel_merged_cells_sheet ON rrh_excel_merged_cells(sheet_id);
 
 -- ----------------------------------------------------------------------------

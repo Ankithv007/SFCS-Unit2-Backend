@@ -319,26 +319,12 @@ const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, wor
 
     const pending = Math.max(0, workOrderQtyActual - passed);
 
-    const invalidRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE rework_session_id = $1 AND status = 'INVALID'`,
-        [sessionId]
-    );
-    const invalid = parseInt(invalidRes.rows[0].count, 10) || 0;
-
-    const dupRes = await client.query(
-        `SELECT duplicate_scan_count FROM smt_rework_sessions WHERE id = $1`,
-        [sessionId]
-    );
-    const duplicate = dupRes.rows[0]?.duplicate_scan_count || 0;
-
     return {
         passed,
         failed,
         pending,
-        invalid,
-        duplicate,
+        invalid: 0,
+        duplicate: 0,
         workOrderQuantity: workOrderQtyActual,
         reworkTargetQty
     };
@@ -631,8 +617,8 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         if (session.status !== 'In Progress') {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.` 
+            return res.status(400).json({
+                message: `Scanning is only allowed in 'In Progress' sessions. Current session is '${session.status}'.`
             });
         }
 
@@ -655,39 +641,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
                 : 'Serial Number does not exist or does not belong to selected Work Order';
 
-            // Save as INVALID inspection
-            const insertInspection = `
-                INSERT INTO smt_inspections (
-                    serial_id, process_step, scanned_by, status, rework_reason, work_order_id, rework_session_id, scanned_barcode
-                ) VALUES (NULL, 'Rework', $1, 'INVALID', $2, $3, $4, $5)
-                RETURNING *
-            `;
-            const insRes = await client.query(insertInspection, [
-                operator.name, failReason, session.work_order_id, id, cleanBarcode
-            ]);
-
-            await client.query(
-                `INSERT INTO audit_log (event_type, entity_type, entity_id, actor, description, new_value)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [
-                    'INVALID_SCAN',
-                    'REWORK_SESSION',
-                    id,
-                    operator.name,
-                    `Invalid barcode scanned: ${cleanBarcode} (${failReason})`,
-                    JSON.stringify(insRes.rows[0])
-                ]
-            );
-
-            const stats = await fetchReworkSessionStatsHelper(client, id, session.work_order_id, session.side);
-            await client.query('COMMIT');
-            return res.status(200).json({
-                success: true,
-                isValid: false,
-                isCompleted: false,
-                sessionStatus: 'In Progress',
-                message: `Invalid Serial Number: ${failReason}.`,
-                statistics: stats
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                success: false,
+                message: `Invalid Serial Number: ${failReason}.`
             });
         }
 
@@ -720,7 +677,7 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             `SELECT ri.id FROM smt_inspections ri
              JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
              WHERE ri.work_order_id = $1
-               AND rs.side = $2
+               AND LOWER(rs.side) = LOWER($2)
                AND ri.serial_id = $3
                AND ri.process_step = 'Rework'
                AND ri.status = 'PASS'
@@ -732,8 +689,9 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
 
         if (reworkCheck.rows.length > 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({
-                message: 'This failed board has already been repaired in Rework.'
+            return res.status(409).json({
+                success: false,
+                message: 'This failed board has already been repaired in Rework (Duplicate Scan).'
             });
         }
 
@@ -924,8 +882,8 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         );
         if (serialRes.rows.length === 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.' 
+            return res.status(400).json({
+                message: 'Invalid Serial Number. This Serial Number does not belong to the selected Work Order.'
             });
         }
         const newSerial = serialRes.rows[0];
@@ -959,8 +917,8 @@ export const updateScanBarcode = async (req: Request, res: Response) => {
         );
         if (duplicateCheck.rows.length > 0) {
             await client.query('ROLLBACK');
-            return res.status(400).json({ 
-                message: 'This barcode has already been scanned in this Rework Session.' 
+            return res.status(400).json({
+                message: 'This barcode has already been scanned in this Rework Session.'
             });
         }
 
@@ -1182,8 +1140,8 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
             passed,
             failed,
             pending,
-            invalid,
-            duplicate: session.duplicate_scan_count,
+            invalid: 0,
+            duplicate: 0,
             sessionStatus: session.status,
             isCompleted: session.status === 'Completed',
             scans: scansListRes.rows
@@ -1249,11 +1207,6 @@ export const exportReworkSessionExcel = async (req: Request, res: Response) => {
         const failed = parseInt(failedRes.rows[0].count);
         const pending = Math.max(0, session.work_order_quantity - passed);
 
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE rework_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
-
         // Scans list
         const scansRes = await pool.query(
             `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at, repair_time, repair_remark
@@ -1273,18 +1226,18 @@ export const exportReworkSessionExcel = async (req: Request, res: Response) => {
             pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true }
         });
 
-        const NAVY:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
-        const BLUE:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
-        const TEAL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
+        const NAVY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+        const BLUE: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+        const TEAL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
         const INDIGO: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } };
-        const PLUM:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
+        const PLUM: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
         const GREEN: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF15803D' } };
         const LIGHT_GRAY: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
-        const WHITE_FILL:  ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+        const WHITE_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
 
-        const WHITE_FONT  = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
-        const DARK_FONT   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
-        const BOLD_DARK   = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
+        const WHITE_FONT = { name: 'Calibri', size: 11, color: { argb: 'FFFFFFFF' }, bold: true };
+        const DARK_FONT = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
+        const BOLD_DARK = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' }, bold: true };
 
         const thinBorder: Partial<ExcelJS.Borders> = {
             top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
@@ -1406,8 +1359,6 @@ export const exportReworkSessionExcel = async (req: Request, res: Response) => {
         addKVRow(r, 'Repaired (Passed) Quantity', passed); r++;
         addKVRow(r, 'Failed Quantity', failed); r++;
         addKVRow(r, 'Pending Quantity', pending); r++;
-        addKVRow(r, 'Invalid Scan Quantity', invalid); r++;
-        addKVRow(r, 'Duplicate Scan Quantity', session.duplicate_scan_count); r++;
 
         r++; // Spacer
 
@@ -1547,11 +1498,6 @@ export const exportReworkSessionPdfData = async (req: Request, res: Response) =>
         const failed = parseInt(failedRes.rows[0].count);
         const pending = Math.max(0, session.work_order_quantity - passed);
 
-        const invalidRes = await pool.query(
-            `SELECT COUNT(id) AS count FROM smt_inspections WHERE rework_session_id = $1 AND status = 'INVALID'`, [id]
-        );
-        const invalid = parseInt(invalidRes.rows[0].count);
-
         const scansRes = await pool.query(
             `SELECT scanned_barcode AS barcode, status AS result, rework_reason AS remark, scanned_by, scanned_at, repair_time, repair_remark
              FROM smt_inspections WHERE rework_session_id = $1 ORDER BY scanned_at ASC`,
@@ -1602,8 +1548,8 @@ export const exportReworkSessionPdfData = async (req: Request, res: Response) =>
                 passed,
                 failed,
                 pending,
-                invalid,
-                duplicate: session.duplicate_scan_count
+                invalid: 0,
+                duplicate: 0
             },
             scans: scansRes.rows
         });
