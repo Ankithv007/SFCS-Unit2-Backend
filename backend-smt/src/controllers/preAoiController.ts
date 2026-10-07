@@ -261,7 +261,7 @@ export const createPreAoiSession = async (req: Request, res: Response) => {
     }
 };
 
-const fetchPreAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number) => {
+const fetchPreAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number, sessionRow?: any) => {
     const statsRes = await client.query(
         `SELECT
             COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS') AS passed,
@@ -270,17 +270,11 @@ const fetchPreAoiSessionStatsHelper = async (client: any, sessionId: string, wor
          WHERE pre_aoi_session_id = $1`,
         [sessionId]
     );
-    const passed = parseInt(statsRes.rows[0].passed, 10) || 0;
-    const failed = parseInt(statsRes.rows[0].failed, 10) || 0;
+    const passed  = parseInt(statsRes.rows[0].passed,  10) || 0;
+    const failed  = parseInt(statsRes.rows[0].failed,  10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
-    return {
-        passed,
-        failed,
-        pending,
-        invalid: 0,
-        duplicate: 0
-    };
+    return { passed, failed, pending, invalid: 0, duplicate: 0 };
 };
 
 /**
@@ -295,13 +289,15 @@ export const getPreAoiSessions = async (req: Request, res: Response) => {
     const search = req.query.search as string;
 
     try {
-        let countQuery = `
-            SELECT COUNT(ps.id) 
-            FROM smt_pre_aoi_sessions ps
-            JOIN smt_work_orders wo ON ps.work_order_id = wo.id
-            JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-            WHERE ps.is_deleted = false
-        `;
+        let countQuery = search
+            ? `SELECT COUNT(ps.id) 
+               FROM smt_pre_aoi_sessions ps
+               JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+               JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
+               WHERE ps.is_deleted = false`
+            : `SELECT COUNT(ps.id) 
+               FROM smt_pre_aoi_sessions ps
+               WHERE ps.is_deleted = false`;
         let selectQuery = `
             SELECT 
                 ps.*,
@@ -552,9 +548,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
     }
 
     const cleanBarcode = barcode.trim().toUpperCase();
-    const client = await pool.connect();
+    let client: any = null;
 
     try {
+        client = await pool.connect();
         await client.query('BEGIN');
 
         // 1. Fetch Session details
@@ -579,26 +576,48 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         const woRes = await client.query(`SELECT quantity FROM smt_work_orders WHERE id = $1`, [session.work_order_id]);
         const workOrderQty = woRes.rows[0]?.quantity || 0;
 
-        // 2. Check duplicate scan in this Pre AOI Session
+        const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
+
+        // 2. Validate barcode exists in this Work Order (case-insensitive)
+        const serialRes = await client.query(
+            `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
+             WHERE work_order_id = $1
+               AND UPPER(TRIM(serial_number)) = UPPER(TRIM($2))`,
+            [cleanWoId, cleanBarcode]
+        );
+
+        if (serialRes.rows.length === 0) {
+            const otherWoRes = await client.query(
+                `SELECT work_order_id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) LIMIT 1`,
+                [cleanBarcode]
+            );
+            const failReason = otherWoRes.rows.length > 0
+                ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
+                : 'Serial Number does not exist or does not belong to selected Work Order';
+
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+                success: false,
+                message: `Invalid Serial Number: ${failReason}.`
+            });
+        }
+
+        const serial = serialRes.rows[0];
+
+        // 3. Check duplicate scan in this Pre AOI Session
         const existingScanRes = await client.query(
-            `SELECT * FROM smt_inspections 
+            `SELECT id, status, scanned_barcode, serial_id FROM smt_inspections 
              WHERE pre_aoi_session_id = $1
-               AND (
-                   UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($2)) 
-                   OR (serial_id IS NOT NULL AND serial_id = (
-                       SELECT id FROM smt_serial_numbers 
-                       WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($2)) 
-                       LIMIT 1
-                   ))
-               )
-               AND status IN ('PASS', 'FAIL')`,
-            [id, cleanBarcode]
+               AND (serial_id = $2 OR UPPER(TRIM(scanned_barcode)) = UPPER(TRIM($3)))
+               AND status IN ('PASS', 'FAIL')
+             LIMIT 1`,
+            [id, serial.id, cleanBarcode]
         );
 
         if (existingScanRes.rows.length > 0) {
             const existingScan = existingScanRes.rows[0];
             if (existingScan.status === 'FAIL') {
-                // Rework / Repair lifecycle!
+                // Rework / Repair lifecycle
                 const { repairRemark } = req.body;
                 if (!repairRemark || repairRemark.trim() === '') {
                     await client.query('COMMIT');
@@ -634,14 +653,9 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     ]
                 );
 
-                // Recalculate unique Passed scans
-                const passRes = await client.query(
-                    `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-                     FROM smt_inspections 
-                     WHERE pre_aoi_session_id = $1 AND status = 'PASS'`,
-                    [id]
-                );
-                const passCount = parseInt(passRes.rows[0].count, 10);
+                // Fetch stats first (single FILTER aggregate — includes passed count).
+                const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
+                const passCount = stats.passed;
 
                 let completed = false;
                 if (passCount >= workOrderQty) {
@@ -664,7 +678,6 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                     );
                 }
 
-                const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
                 await client.query('COMMIT');
                 notifySmtDashboardUpdate(session.work_order_id);
                 return res.status(200).json({
@@ -684,34 +697,6 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
                 });
             }
         }
-
-        const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
-
-        // 3. Validate barcode exists in this Work Order (case-insensitive)
-        const serialRes = await client.query(
-            `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
-             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND work_order_id = $2`,
-            [cleanBarcode, cleanWoId]
-        );
-
-        if (serialRes.rows.length === 0) {
-            const otherWoRes = await client.query(
-                `SELECT work_order_id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) LIMIT 1`,
-                [cleanBarcode]
-            );
-            const failReason = otherWoRes.rows.length > 0
-                ? `Serial Number belongs to Work Order '${otherWoRes.rows[0].work_order_id}', not '${session.work_order_id}'`
-                : 'Serial Number does not exist or does not belong to selected Work Order';
-
-            await client.query('ROLLBACK');
-            return res.status(400).json({
-                success: false,
-                message: `Invalid Serial Number: ${failReason}.`
-            });
-        }
-
-        const serial = serialRes.rows[0];
 
         // 4. Validate barcode has passed SPI stage on this side
         const spiCheck = await client.query(
@@ -764,14 +749,9 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             ]
         );
 
-        // Recalculate unique Passed scans
-        const passRes = await client.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE pre_aoi_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passCount = parseInt(passRes.rows[0].count, 10);
+        // Fetch stats first (single FILTER aggregate — includes passed count).
+        const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
+        const passCount = stats.passed;
 
         let completed = false;
         if (passCount >= workOrderQty) {
@@ -794,7 +774,6 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             );
         }
 
-        const stats = await fetchPreAoiSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
         notifySmtDashboardUpdate(session.work_order_id);
         return res.status(200).json({
@@ -807,11 +786,15 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         });
 
     } catch (err: any) {
-        await client.query('ROLLBACK');
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         logger.error('Error validating barcode scan:', err);
         return res.status(500).json({ message: 'Internal server error while processing barcode scan.' });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 };
 
@@ -1079,25 +1062,8 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         const session = sessionRes.rows[0];
         const workOrderQty = session.work_order_quantity;
 
-        // Passed: unique serials with status PASS
-        const passedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE pre_aoi_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passed = parseInt(passedRes.rows[0].count);
-
-        // Failed: total failed occurrences
-        const failedRes = await pool.query(
-            `SELECT COUNT(id) AS count 
-             FROM smt_inspections 
-             WHERE pre_aoi_session_id = $1 AND status = 'FAIL'`,
-            [id]
-        );
-        const failed = parseInt(failedRes.rows[0].count);
-
-        const pending = Math.max(0, workOrderQty - passed);
+        const stats = await fetchPreAoiSessionStatsHelper(pool, id, workOrderQty, session);
+        const { passed, failed, pending } = stats;
 
         // Fetch scanned barcodes list
         const scansListQuery = `

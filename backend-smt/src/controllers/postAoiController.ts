@@ -294,7 +294,7 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
     }
 };
 
-const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number) => {
+const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number, sessionRow?: any) => {
     const statsRes = await client.query(
         `SELECT
             COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS') AS passed,
@@ -303,17 +303,11 @@ const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, wo
          WHERE post_aoi_session_id = $1`,
         [sessionId]
     );
-    const passed = parseInt(statsRes.rows[0].passed, 10) || 0;
-    const failed = parseInt(statsRes.rows[0].failed, 10) || 0;
+    const passed  = parseInt(statsRes.rows[0].passed,  10) || 0;
+    const failed  = parseInt(statsRes.rows[0].failed,  10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
-    return {
-        passed,
-        failed,
-        pending,
-        invalid: 0,
-        duplicate: 0
-    };
+    return { passed, failed, pending, invalid: 0, duplicate: 0 };
 };
 
 /**
@@ -328,13 +322,15 @@ export const getPostAoiSessions = async (req: Request, res: Response) => {
     const search = req.query.search as string;
 
     try {
-        let countQuery = `
-            SELECT COUNT(ps.id) 
-            FROM smt_post_aoi_sessions ps
-            JOIN smt_work_orders wo ON ps.work_order_id = wo.id
-            JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
-            WHERE ps.is_deleted = false
-        `;
+        let countQuery = search
+            ? `SELECT COUNT(ps.id) 
+               FROM smt_post_aoi_sessions ps
+               JOIN smt_work_orders wo ON ps.work_order_id = wo.id
+               JOIN smt_stencil_lifecycle lc ON ps.stencil_lifecycle_id = lc.id
+               WHERE ps.is_deleted = false`
+            : `SELECT COUNT(ps.id) 
+               FROM smt_post_aoi_sessions ps
+               WHERE ps.is_deleted = false`;
         let selectQuery = `
             SELECT 
                 ps.*,
@@ -585,9 +581,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
     }
 
     const cleanBarcode = barcode.trim().toUpperCase();
-    const client = await pool.connect();
+    let client: any = null;
 
     try {
+        client = await pool.connect();
         await client.query('BEGIN');
 
         // Fetch Session details
@@ -608,18 +605,19 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             });
         }
 
-        // Get Work Order Quantity
-        const woRes = await client.query(`SELECT quantity FROM smt_work_orders WHERE id = $1`, [session.work_order_id]);
+        // Get Work Order Quantity and Sides
+        const woRes = await client.query(`SELECT quantity, sides FROM smt_work_orders WHERE id = $1`, [session.work_order_id]);
         const workOrderQty = woRes.rows[0]?.quantity || 0;
+        const woSidesRaw = (woRes.rows[0]?.sides || '').trim().toLowerCase();
 
         const cleanWoId = session.work_order_id == null ? null : String(session.work_order_id).trim().toUpperCase();
 
         // Validate barcode belongs to WO (case-insensitive)
         const serialRes = await client.query(
             `SELECT id, serial_number, work_order_id FROM smt_serial_numbers 
-             WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) 
-               AND work_order_id = $2`,
-            [cleanBarcode, cleanWoId]
+             WHERE work_order_id = $1 
+               AND UPPER(TRIM(serial_number)) = UPPER(TRIM($2))`,
+            [cleanWoId, cleanBarcode]
         );
 
         if (serialRes.rows.length === 0) {
@@ -740,22 +738,10 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             ]
         );
 
-        // Recalculate unique Passed scans
-        const passRes = await client.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE post_aoi_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passCount = parseInt(passRes.rows[0].count, 10);
-
-        const processedRes = await client.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE post_aoi_session_id = $1 AND status IN ('PASS', 'FAIL')`,
-            [id]
-        );
-        const processedCount = parseInt(processedRes.rows[0].count, 10);
+        // Fetch stats first (single FILTER aggregate — includes passed count).
+        // Use stats.passed for completion check to avoid duplicate COUNT queries.
+        const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
+        const passCount = stats.passed;
 
         let completed = false;
         if (passCount >= workOrderQty) {
@@ -778,18 +764,12 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
             );
         }
 
-        const stats = await fetchPostAoiSessionStatsHelper(client, id, workOrderQty);
         await client.query('COMMIT');
 
         // ── Automatic SMT-FG scheduling ──────────────────────────────────────
         // Evaluates whether this Post-AOI PASS is the final applicable stage for the Work Order.
         // Runs after COMMIT so a failure here cannot affect the Post-AOI record.
         try {
-            const woSidesRes = await pool.query(
-                `SELECT sides FROM smt_work_orders WHERE id = $1`,
-                [session.work_order_id]
-            );
-            const woSidesRaw = (woSidesRes.rows[0]?.sides || '').trim().toLowerCase();
             const woSides = woSidesRaw.replace(/\s*\/\s*/g, '/');
             const sessionSide = (session.side || '').trim().toLowerCase();
 
@@ -851,11 +831,15 @@ export const validateAndRecordScan = async (req: Request, res: Response) => {
         });
 
     } catch (err: any) {
-        await client.query('ROLLBACK');
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+        }
         logger.error('Error validating barcode scan:', err);
         return res.status(500).json({ message: 'Internal server error while processing barcode scan.' });
     } finally {
-        client.release();
+        if (client) {
+            client.release();
+        }
     }
 };
 
@@ -1158,28 +1142,13 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
         const session = sessionRes.rows[0];
         const workOrderQty = session.work_order_quantity;
 
-        // Passed: unique serials with status PASS
-        const passedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE post_aoi_session_id = $1 AND status = 'PASS'`,
-            [id]
-        );
-        const passed = parseInt(passedRes.rows[0].count);
+        const stats = await fetchPostAoiSessionStatsHelper(pool, id, workOrderQty, session);
+        const { passed, failed, pending } = stats;
 
-        // Failed: unique serials with status FAIL
-        const failedRes = await pool.query(
-            `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-             FROM smt_inspections 
-             WHERE post_aoi_session_id = $1 AND status = 'FAIL'`,
-            [id]
-        );
-        const failed = parseInt(failedRes.rows[0].count);
-        const pending = Math.max(0, workOrderQty - passed);
-
-        const scansListRes = await pool.query(
-            `SELECT 
-                ins.id,
+        // Fetch scanned barcodes list
+        const scansListQuery = `
+            SELECT 
+                ins.id AS scan_id,
                 ins.scanned_barcode AS barcode,
                 ins.status AS result,
                 ins.rework_reason AS remark,
@@ -1233,9 +1202,9 @@ export const getSessionStatistics = async (req: Request, res: Response) => {
                 END AS repair_remark
             FROM smt_inspections ins
             WHERE ins.post_aoi_session_id = $1
-            ORDER BY ins.scanned_at DESC`,
-            [id]
-        );
+            ORDER BY ins.scanned_at DESC`;
+
+        const scansListRes = await pool.query(scansListQuery, [id]);
 
         return res.status(200).json({
             workOrderQuantity: workOrderQty,

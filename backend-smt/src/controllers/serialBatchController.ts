@@ -493,7 +493,11 @@ export const getSerialGenerationRecords = async (req: Request, res: Response) =>
         }
 
         // Count query
-        const countRes = await pool.query(`SELECT COUNT(*) FROM (${query}) AS temp`, params);
+        const countQuery = search.trim()
+            ? `SELECT COUNT(id) FROM smt_serial_batches WHERE is_deleted = false AND (work_order_number ILIKE $1 OR product_name ILIKE $1)`
+            : `SELECT COUNT(id) FROM smt_serial_batches WHERE is_deleted = false`;
+        const countParams = search.trim() ? [`%${search.trim()}%`] : [];
+        const countRes = await pool.query(countQuery, countParams);
         const totalRows = parseInt(countRes.rows[0].count, 10);
         const totalPages = Math.ceil(totalRows / limit);
 
@@ -769,7 +773,7 @@ export const checkSerialNumberExists = async (req: Request, res: Response) => {
     const { serialNumber } = req.params;
     try {
         const checkRes = await pool.query(
-            'SELECT id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1))',
+            'SELECT id FROM smt_serial_numbers WHERE UPPER(TRIM(serial_number)) = UPPER(TRIM($1)) LIMIT 1',
             [serialNumber.trim()]
         );
         return res.json({
