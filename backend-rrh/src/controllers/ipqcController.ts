@@ -102,7 +102,7 @@ export const getEligibleIpqcWorkOrders = async (_req: Request, res: Response) =>
                     FROM rrh_ivi_inspections ivi
                     JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
                     WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM(w.work_order_id))
-                      AND ivi.status = 'PASS'
+                      AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
                       AND COALESCE(ivi.route, 'ECN') = 'ECN'
                       AND ivi.is_deleted = false
                 ) as ivi_passed_count
@@ -148,7 +148,7 @@ export const getWorkOrderIviDetails = async (req: Request, res: Response) => {
              FROM rrh_ivi_inspections ivi
              JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
              WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-               AND ivi.status = 'PASS'
+               AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
                AND COALESCE(ivi.route, 'ECN') = 'ECN'
                AND ivi.is_deleted = false`,
             [cleanWoId]
@@ -342,52 +342,34 @@ export const getIpqcSessionById = async (req: Request, res: Response) => {
 
         const session = sessionRes.rows[0];
 
-        // 1. Total IVI passed units available for this Work Order
-        const iviPassedRes = await pool.query(
-            `SELECT COUNT(*)::int as total
-             FROM rrh_ivi_inspections ivi
-             JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
-             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-               AND ivi.status = 'PASS'
-               AND COALESCE(ivi.route, 'ECN') = 'ECN'
-               AND ivi.is_deleted = false`,
-            [session.work_order_id]
-        );
+        // Fetch IVI available count and aggregated IPQC session stats concurrently
+        const [iviPassedRes, ipqcStatsRes] = await Promise.all([
+            pool.query(
+                `SELECT COUNT(*)::int as total
+                 FROM rrh_ivi_inspections ivi
+                 JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
+                 WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
+                   AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
+                   AND COALESCE(ivi.route, 'ECN') = 'ECN'
+                   AND ivi.is_deleted = false`,
+                [session.work_order_id]
+            ),
+            pool.query(
+                `SELECT 
+                    COUNT(*) FILTER (WHERE status IN ('COMPLETED', 'PASS'))::int AS completed,
+                    COUNT(*) FILTER (WHERE status = 'FAIL')::int AS failed,
+                    COUNT(*) FILTER (WHERE status IN ('COMPLETED', 'PASS') AND is_reinspected = true)::int AS edited_pass
+                 FROM rrh_ipqc_inspections
+                 WHERE session_id = $1 AND is_deleted = false`,
+                [id]
+            )
+        ]);
+
         const iviPassedCount = iviPassedRes.rows[0]?.total || 0;
-
-        // 2. IPQC Completed/Passed count for this session
-        const ipqcCompletedRes = await pool.query(
-            `SELECT COUNT(*)::int as total
-             FROM rrh_ipqc_inspections
-             WHERE session_id = $1
-               AND status IN ('COMPLETED', 'PASS')
-               AND is_deleted = false`,
-            [id]
-        );
-        const completedCount = ipqcCompletedRes.rows[0]?.total || 0;
-
-        // 3. IPQC Failed count for this session
-        const ipqcFailedRes = await pool.query(
-            `SELECT COUNT(*)::int as total
-             FROM rrh_ipqc_inspections
-             WHERE session_id = $1
-               AND status = 'FAIL'
-               AND is_deleted = false`,
-            [id]
-        );
-        const failedCount = ipqcFailedRes.rows[0]?.total || 0;
-
-        // 4. Edited Pass (re-inspected passed units)
-        const editedPassRes = await pool.query(
-            `SELECT COUNT(*)::int as total
-             FROM rrh_ipqc_inspections
-             WHERE session_id = $1
-               AND status IN ('COMPLETED', 'PASS')
-               AND is_reinspected = true
-               AND is_deleted = false`,
-            [id]
-        );
-        const editedPassCount = editedPassRes.rows[0]?.total || 0;
+        const statsRow = ipqcStatsRes.rows[0] || {};
+        const completedCount = statsRow.completed || 0;
+        const failedCount = statsRow.failed || 0;
+        const editedPassCount = statsRow.edited_pass || 0;
 
         const lotQuantity = session.lot_quantity || 0;
         const pending = Math.max(0, (lotQuantity || iviPassedCount) - completedCount);
@@ -531,26 +513,21 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
                 OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND ivi.status = 'PASS'
+              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
               AND COALESCE(ivi.route, 'ECN') = 'ECN'
-              AND ivi.is_deleted = false
-              AND ivi.serial_number NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              )
-              AND (ivi.band_serial_no IS NULL OR ivi.band_serial_no NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              ))
-              AND ivi.id NOT IN (
-                  SELECT ivi_inspection_id FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND ivi_inspection_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ipqc_inspections ipqc
+                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                    AND ipqc.is_deleted = false
+                    AND (
+                        ipqc.ivi_inspection_id = ivi.id
+                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
+                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
+                        OR (ivi.band_serial_no IS NOT NULL AND (
+                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                        ))
+                    )
               )
               ${searchClause}
         `;
@@ -584,26 +561,22 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
                 OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND ivi.status = 'PASS'
+              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
               AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
-              AND ivi.serial_number NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              )
-              AND (ivi.band_serial_no IS NULL OR ivi.band_serial_no NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              ))
-              AND ivi.id NOT IN (
-                  SELECT ivi_inspection_id FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND ivi_inspection_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ipqc_inspections ipqc
+                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                    AND ipqc.is_deleted = false
+                    AND (
+                        ipqc.ivi_inspection_id = ivi.id
+                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
+                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
+                        OR (ivi.band_serial_no IS NOT NULL AND (
+                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                        ))
+                    )
               )
               ${searchClause}
             ORDER BY ivi.scanned_at DESC, ivi.id DESC
@@ -669,7 +642,7 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                 UPPER(TRIM(ivi.serial_number)) = $1
                 OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = $1
             )
-              AND ivi.status = 'PASS'
+              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
               AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
         `;
@@ -693,7 +666,7 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                      UPPER(TRIM(ivi.serial_number)) = $1
                      OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = $1
                  )
-                   AND ivi.status = 'PASS'
+                   AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
                    AND ivi.route = 'NON_ECN'
                    AND ivi.is_deleted = false
                  ORDER BY ivi.scanned_at DESC, ivi.id DESC LIMIT 1`,
@@ -1213,7 +1186,7 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
                             failedRemarks = failTexts.join('; ');
                         }
                     }
-                } catch {}
+                } catch { }
             }
             if (!failedRemarks || failedRemarks === '-') failedRemarks = '—';
 
@@ -1343,26 +1316,22 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
                 OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
             LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND ivi.status = 'PASS'
+              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
               AND COALESCE(ivi.route, 'ECN') = 'ECN'
               AND ivi.is_deleted = false
-              AND ivi.serial_number NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              )
-              AND (ivi.band_serial_no IS NULL OR ivi.band_serial_no NOT IN (
-                  SELECT serial_number FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false
-                  UNION
-                  SELECT band_serial_no FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND band_serial_no IS NOT NULL
-              ))
-              AND ivi.id NOT IN (
-                  SELECT ivi_inspection_id FROM rrh_ipqc_inspections 
-                  WHERE (session_id = $2 OR UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))) AND is_deleted = false AND ivi_inspection_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ipqc_inspections ipqc
+                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                    AND ipqc.is_deleted = false
+                    AND (
+                        ipqc.ivi_inspection_id = ivi.id
+                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
+                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
+                        OR (ivi.band_serial_no IS NOT NULL AND (
+                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                        ))
+                    )
               )
             ORDER BY ivi.scanned_at DESC, ivi.id DESC`,
             [woId, sessionId]

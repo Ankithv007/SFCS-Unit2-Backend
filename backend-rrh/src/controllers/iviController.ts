@@ -97,11 +97,12 @@ export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
                 w.status,
                 w.created_at
             FROM rrh_work_orders w
-            WHERE w.work_order_id NOT IN (
-                SELECT DISTINCT work_order_id
-                FROM rrh_ivi_sessions
-                WHERE is_deleted = false
-                  AND status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM rrh_ivi_sessions s
+                WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
+                  AND s.is_deleted = false
+                  AND s.status IN ('In Progress', 'Pending', 'Paused', 'Completed')
             )
             ORDER BY w.created_at DESC, w.id DESC
         `);
@@ -261,28 +262,34 @@ export const getIviSessionById = async (req: Request, res: Response) => {
         const session = sessionRes.rows[0];
         const lotQuantity = parseInt(session.lot_quantity, 10) || 0;
 
-        // Fetch inward total for this work order
-        const inwardCountRes = await pool.query(
-            `SELECT COUNT(*)::int as inward_total 
-             FROM rrh_inward_scans 
-             WHERE work_order_id = $1 AND status = 'PASS' AND is_deleted = false`,
-            [session.work_order_id]
-        );
+        // Fetch inward total and aggregated inspection statistics concurrently
+        const [inwardCountRes, statsRes] = await Promise.all([
+            pool.query(
+                `SELECT COUNT(*)::int as inward_total 
+                 FROM rrh_inward_scans 
+                 WHERE work_order_id = $1 AND status = 'PASS' AND is_deleted = false`,
+                [session.work_order_id]
+            ),
+            pool.query(
+                `SELECT 
+                    COUNT(*) FILTER (WHERE status = 'PASS')::int AS passed,
+                    COUNT(*) FILTER (WHERE status = 'FAIL')::int AS failed,
+                    COUNT(*) FILTER (WHERE status = 'SCRAP')::int AS scrapped,
+                    COUNT(*)::int AS total
+                 FROM rrh_ivi_inspections 
+                 WHERE session_id = $1 AND is_deleted = false`,
+                [id]
+            )
+        ]);
+
         const totalInwarded = inwardCountRes.rows[0]?.inward_total || 0;
-
-        // Fetch inspection stats
-        const inspectionsRes = await pool.query(
-            `SELECT status FROM rrh_ivi_inspections 
-             WHERE session_id = $1 AND is_deleted = false`,
-            [id]
-        );
-
-        const inspections = inspectionsRes.rows;
-        const passed = inspections.filter(i => i.status === 'PASS').length;
-        const failed = inspections.filter(i => i.status === 'FAIL').length;
-        const total = inspections.length;
-        const pending = Math.max(0, lotQuantity - passed);
-        const remainingInward = Math.max(0, totalInwarded - passed);
+        const row = statsRes.rows[0] || {};
+        const passed = row.passed || 0;
+        const failed = row.failed || 0;
+        const scrapped = row.scrapped || 0;
+        const total = row.total || 0;
+        const pending = Math.max(0, lotQuantity - passed - scrapped);
+        const remainingInward = Math.max(0, totalInwarded - passed - scrapped);
         const yieldRate = total > 0 ? ((passed / total) * 100).toFixed(2) : '0.00';
 
         return res.status(200).json({
@@ -293,6 +300,7 @@ export const getIviSessionById = async (req: Request, res: Response) => {
                 remainingInward,
                 passed,
                 failed,
+                scrapped,
                 total,
                 pending,
                 yield: yieldRate
@@ -433,14 +441,18 @@ export const getRemainingInwardMasterData = async (req: Request, res: Response) 
             WHERE ins.work_order_id = $1
               AND ins.status IN ('PASS', 'EDITED PASS')
               AND ins.is_deleted = false
-              AND ins.serial_number NOT IN (
-                  SELECT serial_number FROM rrh_ivi_inspections 
-                  WHERE session_id = $2 AND is_deleted = false
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ivi_inspections ivi
+                  WHERE ivi.session_id = $2 AND ivi.is_deleted = false
+                    AND (
+                        UPPER(TRIM(ivi.serial_number)) = UPPER(TRIM(ins.serial_number))
+                        OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = UPPER(TRIM(ins.serial_number))
+                        OR (ins.band_serial_no IS NOT NULL AND (
+                            UPPER(TRIM(ivi.serial_number)) = UPPER(TRIM(ins.band_serial_no))
+                            OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = UPPER(TRIM(ins.band_serial_no))
+                        ))
+                    )
               )
-              AND (ins.band_serial_no IS NULL OR ins.band_serial_no NOT IN (
-                  SELECT serial_number FROM rrh_ivi_inspections 
-                  WHERE session_id = $2 AND is_deleted = false
-              ))
               ${searchClause}
         `;
 
@@ -498,14 +510,18 @@ export const getRemainingInwardMasterData = async (req: Request, res: Response) 
             WHERE ins.work_order_id = $1
               AND ins.status IN ('PASS', 'EDITED PASS')
               AND ins.is_deleted = false
-              AND ins.serial_number NOT IN (
-                  SELECT serial_number FROM rrh_ivi_inspections 
-                  WHERE session_id = $2 AND is_deleted = false
+              AND NOT EXISTS (
+                  SELECT 1 FROM rrh_ivi_inspections ivi
+                  WHERE ivi.session_id = $2 AND ivi.is_deleted = false
+                    AND (
+                        UPPER(TRIM(ivi.serial_number)) = UPPER(TRIM(ins.serial_number))
+                        OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = UPPER(TRIM(ins.serial_number))
+                        OR (ins.band_serial_no IS NOT NULL AND (
+                            UPPER(TRIM(ivi.serial_number)) = UPPER(TRIM(ins.band_serial_no))
+                            OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = UPPER(TRIM(ins.band_serial_no))
+                        ))
+                    )
               )
-              AND (ins.band_serial_no IS NULL OR ins.band_serial_no NOT IN (
-                  SELECT serial_number FROM rrh_ivi_inspections 
-                  WHERE session_id = $2 AND is_deleted = false
-              ))
               ${searchFilter}
             ORDER BY ins.id ASC
             LIMIT $${remainingParams.length + 1} OFFSET $${remainingParams.length + 2}
@@ -637,6 +653,23 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                 });
             }
 
+            // Check if unit has been marked as SCRAP in IVI
+            const scrapCheck = await pool.query(
+                `SELECT * FROM rrh_ivi_scrap_inspections 
+                 WHERE (UPPER(TRIM(serial_number)) = $1 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $1)
+                   AND is_deleted = false
+                 LIMIT 1`,
+                [cleanSerial]
+            );
+            if (scrapCheck.rows.length > 0) {
+                const sc = scrapCheck.rows[0];
+                return res.status(400).json({
+                    found: false,
+                    scrapped: true,
+                    message: `Serial number "${cleanSerial}" has been marked as SCRAP by ${sc.scanned_by || 'operator'} and cannot be inspected or processed further.`
+                });
+            }
+
             // Check if already inspected in IVI
             const alreadyInspectedRes = await pool.query(
                 `SELECT id, status, scanned_at, scanned_by, duplexer_main, duplexer_part_no 
@@ -746,32 +779,36 @@ export const submitInspection = async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'Serial number is required.' });
     }
 
-    const rawDuplexerMake = req.body.duplexer_make || req.body.duplexer_main;
-    if (!rawDuplexerMake || !rawDuplexerMake.toString().trim()) {
-        return res.status(400).json({ message: 'Duplexer Make is required.' });
+    const cleanStatus = (status || 'PASS').toString().trim().toUpperCase();
+    if (!['PASS', 'FAIL', 'SCRAP'].includes(cleanStatus)) {
+        return res.status(400).json({ message: 'Status must be PASS, FAIL, or SCRAP.' });
     }
-    const cleanDuplexerMake = rawDuplexerMake.toString().trim();
+
+    const rawDuplexerMake = req.body.duplexer_make || req.body.duplexer_main;
+    const cleanDuplexerMake = rawDuplexerMake ? rawDuplexerMake.toString().trim() : '—';
 
     const rawRrhUnitDefect = req.body.rrh_unit_defect !== undefined ? req.body.rrh_unit_defect : req.body.rrh_unit;
     const cleanRrhUnitDefect = rawRrhUnitDefect !== null && rawRrhUnitDefect !== undefined ? rawRrhUnitDefect.toString().trim() : null;
 
-    if (!duplexer_part_no || !duplexer_part_no.toString().trim()) {
-        return res.status(400).json({ message: 'Duplexer Part No. is required.' });
-    }
+    let cleanDuplexerPart = duplexer_part_no ? duplexer_part_no.toString().trim() : '—';
 
-    const cleanDuplexerPart = duplexer_part_no.toString().trim();
-    // Validate number and alphabets mix
-    const hasAlpha = /[a-zA-Z]/.test(cleanDuplexerPart);
-    const hasDigit = /[0-9]/.test(cleanDuplexerPart);
-    if (!hasAlpha || !hasDigit) {
-        return res.status(400).json({
-            message: 'Duplexer Part No. must contain a mix of numbers and alphabets.'
-        });
-    }
+    if (cleanStatus !== 'SCRAP') {
+        if (!rawDuplexerMake || !rawDuplexerMake.toString().trim()) {
+            return res.status(400).json({ message: 'Duplexer Make is required.' });
+        }
 
-    const cleanStatus = (status || 'PASS').toString().trim().toUpperCase();
-    if (!['PASS', 'FAIL'].includes(cleanStatus)) {
-        return res.status(400).json({ message: 'Status must be PASS or FAIL.' });
+        if (!duplexer_part_no || !duplexer_part_no.toString().trim()) {
+            return res.status(400).json({ message: 'Duplexer Part No. is required.' });
+        }
+
+        // Validate number and alphabets mix
+        const hasAlpha = /[a-zA-Z]/.test(cleanDuplexerPart);
+        const hasDigit = /[0-9]/.test(cleanDuplexerPart);
+        if (!hasAlpha || !hasDigit) {
+            return res.status(400).json({
+                message: 'Duplexer Part No. must contain a mix of numbers and alphabets.'
+            });
+        }
     }
 
     const cleanSerial = serial_number.toString().trim().toUpperCase();
@@ -786,7 +823,7 @@ export const submitInspection = async (req: Request, res: Response) => {
             if (file.size > 600 * 1024) {
                 // Clean up any files saved to disk
                 for (const f of req.files) {
-                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
+                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch { }
                 }
                 return res.status(400).json({ message: 'Upload image under 600 KB.' });
             }
@@ -800,7 +837,7 @@ export const submitInspection = async (req: Request, res: Response) => {
             const fileName = `${safeBandNo}${ext}`;
             const targetPath = path.join(getUploadsDir(), 'rrh', 'ivi', fileName);
             fs.copyFileSync(file.path, targetPath);
-            try { fs.unlinkSync(file.path); } catch {}
+            try { fs.unlinkSync(file.path); } catch { }
             imageUrls.push(`/uploads/rrh/ivi/${fileName}`);
         } else {
             // "like if 3 images are uploaded for the same band no then bandNo/1 , bandNo/2, bandNo/3"
@@ -815,7 +852,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                 const fileName = `${order}${ext}`;
                 const targetPath = path.join(bandDir, fileName);
                 fs.copyFileSync(file.path, targetPath);
-                try { fs.unlinkSync(file.path); } catch {}
+                try { fs.unlinkSync(file.path); } catch { }
                 imageUrls.push(`/uploads/rrh/ivi/${safeBandNo}/${fileName}`);
             }
         }
@@ -891,7 +928,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                             try {
                                 const parsed = JSON.parse(prevRow.image_urls);
                                 if (Array.isArray(parsed)) prevImgs = parsed;
-                            } catch {}
+                            } catch { }
                         }
                         if (prevImgs.length > 0) {
                             imageUrls.push(...prevImgs);
@@ -982,6 +1019,44 @@ export const submitInspection = async (req: Request, res: Response) => {
                 ]
             );
 
+            // If status is SCRAP, also record in dedicated rrh_ivi_scrap_inspections table
+            if (cleanStatus === 'SCRAP') {
+                await client.query(
+                    `INSERT INTO rrh_ivi_scrap_inspections (
+                        session_id,
+                        work_order_id,
+                        serial_number,
+                        band_serial_no,
+                        sl_no,
+                        tejas_dc_no,
+                        tejas_obd_no,
+                        bat_lot_no,
+                        physical_tpn,
+                        band,
+                        duplexer_main,
+                        duplexer_part_no,
+                        remarks,
+                        scanned_by
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                    [
+                        id,
+                        work_order_id || '',
+                        cleanSerial,
+                        cleanBandNo,
+                        inwardSlNo,
+                        tejas_dc_no || null,
+                        tejas_obd_no || null,
+                        bat_lot_no || null,
+                        physical_tpn || null,
+                        band || null,
+                        cleanDuplexerMake,
+                        cleanDuplexerPart,
+                        remarks ? remarks.toString().trim() : null,
+                        operator.name
+                    ]
+                );
+            }
+
             // Update session updated_at
             await client.query(
                 `UPDATE rrh_ivi_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -1032,6 +1107,28 @@ export const getRecentInspections = async (req: Request, res: Response) => {
 };
 
 /**
+ * GET /api/rrh/ivi/sessions/:id/scrap-inspections
+ * Get scrap inspections for this session
+ */
+export const getScrapInspections = async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    try {
+        const result = await pool.query(
+            `SELECT * FROM rrh_ivi_scrap_inspections 
+             WHERE session_id = $1 AND is_deleted = false
+             ORDER BY scanned_at DESC, id DESC`,
+            [id]
+        );
+
+        return res.status(200).json(result.rows);
+    } catch (err: any) {
+        logger.error(`Error in getScrapInspections: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to fetch scrap inspections.', error: err.message });
+    }
+};
+
+/**
  * GET /api/rrh/ivi/sessions/:id/export
  * Export inspections table to an Excel file with hyperlinked photo column
  */
@@ -1041,6 +1138,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
     const idsStr = (req.query.ids as string)?.trim();
     const isFailedOnly = statusFilter === 'FAIL';
     const isPassOnly = statusFilter === 'PASS';
+    const isScrapOnly = statusFilter === 'SCRAP';
 
     try {
         const sessionRes = await pool.query(
@@ -1084,6 +1182,8 @@ export const exportIviExcel = async (req: Request, res: Response) => {
               )`;
         } else if (isPassOnly) {
             query += ` AND rii.status = 'PASS'`;
+        } else if (isScrapOnly) {
+            query += ` AND rii.status = 'SCRAP'`;
         }
 
         query += ` ORDER BY rii.scanned_at DESC, rii.id DESC`;
@@ -1103,7 +1203,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         }
 
         const workbook = new ExcelJS.Workbook();
-        const sheetTitle = isFailedOnly ? 'Failed Inspections' : 'Recent Inspections';
+        const sheetTitle = isFailedOnly ? 'Failed Inspections' : (isScrapOnly ? 'Scrap Inspections' : 'Recent Inspections');
         const sheet = workbook.addWorksheet(sheetTitle);
 
         // Determine maximum number of images in any row to dynamically adjust column width
@@ -1116,7 +1216,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 try {
                     const parsed = JSON.parse(rawImgs);
                     if (Array.isArray(parsed)) count = parsed.length;
-                } catch {}
+                } catch { }
             }
             if (count > maxImgsInAnyRow) maxImgsInAnyRow = count;
         });
@@ -1127,30 +1227,40 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         const totalNeededPx = (leftPad * 2) + (maxImgsInAnyRow * singleImgW) + ((maxImgsInAnyRow - 1) * imgGap);
         const defectColWidth = Math.max(28, Math.ceil(totalNeededPx / 7.2) + 2);
 
-        const sheetColumns: any[] = [
-            { header: 'S.No', key: 'sno', width: 8 },
-            { header: 'Band Serial No', key: 'serial_number', width: 22 },
-            { header: 'Work Order No', key: 'work_order_id', width: 18 },
-            { header: 'Tejas DC No', key: 'tejas_dc_no', width: 18 },
-            { header: 'Tejas OBD No', key: 'tejas_obd_no', width: 18 },
-            { header: 'Physical TPN', key: 'physical_tpn', width: 20 },
-            { header: 'Band', key: 'band', width: 12 },
-            { header: 'Duplexer Make', key: 'duplexer_main', width: 20 },
-            { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 22 },
-            { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect', key: 'rrh_unit', width: 30 },
-        ];
+        let sheetColumns: any[] = [];
+        if (isScrapOnly) {
+            sheetColumns = [
+                { header: 'S.No', key: 'sno', width: 8 },
+                { header: 'Band S.No', key: 'serial_number', width: 22 },
+                { header: 'TPN', key: 'physical_tpn', width: 20 },
+                { header: 'Remark', key: 'remarks', width: 35 }
+            ];
+        } else {
+            sheetColumns = [
+                { header: 'S.No', key: 'sno', width: 8 },
+                { header: 'Band Serial No', key: 'serial_number', width: 22 },
+                { header: 'Work Order No', key: 'work_order_id', width: 18 },
+                { header: 'Tejas DC No', key: 'tejas_dc_no', width: 18 },
+                { header: 'Tejas OBD No', key: 'tejas_obd_no', width: 18 },
+                { header: 'Physical TPN', key: 'physical_tpn', width: 20 },
+                { header: 'Band', key: 'band', width: 12 },
+                { header: 'Duplexer Make', key: 'duplexer_main', width: 20 },
+                { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 22 },
+                { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect', key: 'rrh_unit', width: 30 },
+            ];
 
-        if (!isFailedOnly) {
-            sheetColumns.push({ header: 'Defect Fixed', key: 'defect_fixed', width: 34 });
+            if (!isFailedOnly) {
+                sheetColumns.push({ header: 'Defect Fixed', key: 'defect_fixed', width: 34 });
+            }
+
+            sheetColumns.push(
+                { header: 'Status', key: 'status', width: 12 },
+                { header: 'Images', key: 'photos', width: defectColWidth },
+                { header: 'Remarks', key: 'remarks', width: 28 },
+                { header: 'Scanned By', key: 'scanned_by', width: 20 },
+                { header: 'Date & Time', key: 'scanned_at', width: 22 }
+            );
         }
-
-        sheetColumns.push(
-            { header: 'Status', key: 'status', width: 12 },
-            { header: 'Images', key: 'photos', width: defectColWidth },
-            { header: 'Remarks', key: 'remarks', width: 28 },
-            { header: 'Scanned By', key: 'scanned_by', width: 20 },
-            { header: 'Date & Time', key: 'scanned_at', width: 22 }
-        );
 
         sheet.columns = sheetColumns;
 
@@ -1196,7 +1306,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                     if (fs.existsSync(p) && fs.statSync(p).isFile()) {
                         return p;
                     }
-                } catch {}
+                } catch { }
             }
             return null;
         };
@@ -1244,6 +1354,19 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         };
 
         rows.forEach((r, idx) => {
+            if (isScrapOnly) {
+                const rowData: any = {
+                    sno: r.sl_no || (idx + 1),
+                    serial_number: r.band_serial_no || r.serial_number,
+                    physical_tpn: r.physical_tpn || '—',
+                    remarks: r.remarks || 'Scrapped unit'
+                };
+                const row = sheet.addRow(rowData);
+                row.height = 24;
+                row.alignment = { vertical: 'middle', wrapText: true };
+                return;
+            }
+
             const rawImgs = r.image_urls;
             let imgs: string[] = [];
             if (Array.isArray(rawImgs)) {
@@ -1736,10 +1859,10 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
         <!-- Photo Grid -->
         <div class="gallery-grid">
             ${images.map((imgUrl, idx) => {
-                const cleanRel = imgUrl.replace(/^\/?uploads\/rrh\/ivi\//, '');
-                const fname = path.basename(imgUrl);
-                const dlUrl = `/api/rrh/ivi/photos/download/${cleanRel}`;
-                return `
+            const cleanRel = imgUrl.replace(/^\/?uploads\/rrh\/ivi\//, '');
+            const fname = path.basename(imgUrl);
+            const dlUrl = `/api/rrh/ivi/photos/download/${cleanRel}`;
+            return `
                     <div class="photo-card">
                         <div class="photo-wrapper" onclick="openModal('${imgUrl}')" title="Click to view full size">
                             <img src="${imgUrl}" alt="Photo ${idx + 1}" />
@@ -1755,7 +1878,7 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
                         </div>
                     </div>
                 `;
-            }).join('')}
+        }).join('')}
         </div>
     </div>
 
@@ -1821,5 +1944,42 @@ export const downloadInspectionPhoto = async (req: Request, res: Response) => {
     }
 
     return res.download(filePath, path.basename(safeSubpath));
+};
+
+/**
+ * PATCH /api/rrh/ivi/inspections/:id/pass-to-next-stage
+ * Mark a failed inspection as passed to next stage (IPQC for ECN, Post Burn-in for Non-ECN)
+ */
+export const passToNextStage = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const operator = getSessionUser(req);
+
+    try {
+        const updateRes = await pool.query(
+            `UPDATE rrh_ivi_inspections
+             SET passed_to_next_stage = TRUE,
+                 passed_to_next_stage_at = CURRENT_TIMESTAMP,
+                 passed_to_next_stage_by = $1
+             WHERE id = $2 AND is_deleted = false
+             RETURNING *`,
+            [operator.name || operator.username || 'System Admin', id]
+        );
+
+        if (updateRes.rows.length === 0) {
+            return res.status(404).json({ message: 'Inspection record not found.' });
+        }
+
+        const updated = updateRes.rows[0];
+        logger.info(`Inspection ID ${id} (Serial ${updated.serial_number}) passed to next stage by ${operator.username}`);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Unit successfully passed to next stage.',
+            inspection: updated
+        });
+    } catch (err: any) {
+        logger.error(`Error in passToNextStage: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to pass unit to next stage.', error: err.message });
+    }
 };
 

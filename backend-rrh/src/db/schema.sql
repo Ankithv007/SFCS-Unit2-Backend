@@ -310,7 +310,7 @@ CREATE TABLE IF NOT EXISTS rrh_ivi_inspections (
     duplexer_part_no VARCHAR(100) NOT NULL,
     rrh_unit VARCHAR(100),
     image_urls JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(image_urls) = 'array'),
-    status VARCHAR(50) NOT NULL DEFAULT 'PASS' CHECK (status IN ('PASS', 'FAIL')),
+    status VARCHAR(50) NOT NULL DEFAULT 'PASS' CHECK (status IN ('PASS', 'FAIL', 'SCRAP')),
     remarks TEXT,
     scanned_by VARCHAR(100),
     scanned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

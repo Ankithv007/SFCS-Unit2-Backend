@@ -13,11 +13,13 @@ import {
     lookupSerialDetails,
     submitInspection,
     getRecentInspections,
+    getScrapInspections,
     exportIviExcel,
     getRemainingInwardMasterData,
     viewInspectionPhotos,
     downloadInspectionPhoto,
-    getEligibleIviWorkOrders
+    getEligibleIviWorkOrders,
+    passToNextStage
 } from '../controllers/iviController';
 
 const router = Router();
@@ -71,9 +73,11 @@ router.patch('/sessions/:id/status', authMiddleware, updateIviSessionStatus as (
 router.delete('/sessions/:id', authMiddleware, deleteIviSession as (req: Request, res: Response) => void);
 
 // Inspection submission & listing & export (authenticated)
+router.patch('/inspections/:id/pass-to-next-stage', authMiddleware, passToNextStage as (req: Request, res: Response) => void);
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingInwardMasterData as (req: Request, res: Response) => void);
 router.post('/sessions/:id/inspections', authMiddleware, upload.array('images', 6), submitInspection as (req: Request, res: Response) => void);
 router.get('/sessions/:id/inspections', authMiddleware, getRecentInspections as (req: Request, res: Response) => void);
+router.get('/sessions/:id/scrap-inspections', authMiddleware, getScrapInspections as (req: Request, res: Response) => void);
 router.get('/sessions/:id/export', authMiddleware, exportIviExcel as (req: Request, res: Response) => void);
 
 export default router;
