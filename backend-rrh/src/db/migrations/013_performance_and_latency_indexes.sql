@@ -1,6 +1,12 @@
--- 013_performance_and_latency_indexes.sql
--- Enterprise High-Performance & Low-Latency Indexes for RRH Microservice
--- Optimizes Work Order lookups, Inward Scans, IVI Inspections, Scrap Tables, and IPQC lookups
+-- 0. Ensure soft-delete and tracking columns exist
+ALTER TABLE rrh_work_orders ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE rrh_work_orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE rrh_work_orders ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(100);
+
+ALTER TABLE rrh_excel_imports ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE rrh_excel_imports ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+
+ALTER TABLE rrh_inventory ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false;
 
 -- 1. RRH Work Orders
 CREATE INDEX IF NOT EXISTS idx_rrh_wo_id_upper_active ON rrh_work_orders(UPPER(TRIM(work_order_id))) WHERE is_deleted = false;
