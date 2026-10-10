@@ -297,14 +297,15 @@ export const createPostAoiSession = async (req: Request, res: Response) => {
 const fetchPostAoiSessionStatsHelper = async (client: any, sessionId: string, workOrderQty: number, sessionRow?: any) => {
     const statsRes = await client.query(
         `SELECT
-            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'PASS') AS passed,
-            COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) FILTER (WHERE status = 'FAIL') AS failed
-         FROM smt_inspections
-         WHERE post_aoi_session_id = $1`,
+            COUNT(DISTINCT UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text)))) FILTER (WHERE UPPER(TRIM(i.status)) IN ('PASS', 'PASSED', 'ACCEPTED')) AS passed,
+            COUNT(DISTINCT UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text)))) FILTER (WHERE UPPER(TRIM(i.status)) IN ('FAIL', 'FAILED')) AS failed
+        FROM smt_inspections i
+        LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+        WHERE i.post_aoi_session_id = $1`,
         [sessionId]
     );
-    const passed  = parseInt(statsRes.rows[0].passed,  10) || 0;
-    const failed  = parseInt(statsRes.rows[0].failed,  10) || 0;
+    const passed  = parseInt(statsRes.rows[0]?.passed,  10) || 0;
+    const failed  = parseInt(statsRes.rows[0]?.failed,  10) || 0;
     const pending = Math.max(0, workOrderQty - passed);
 
     return { passed, failed, pending, invalid: 0, duplicate: 0 };

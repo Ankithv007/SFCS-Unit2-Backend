@@ -277,20 +277,58 @@ export const createReworkSession = async (req: Request, res: Response) => {
 };
 
 const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, workOrderId: string, side: string) => {
-    // Target Quantity: total failed boards in Post AOI on this side
+    // 1. Session statistics: unique units in this rework session by latest status in this session
+    const statsRes = await client.query(
+        `WITH latest_rework_unit_inspections AS (
+            SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))))
+                i.id,
+                UPPER(TRIM(i.status)) AS status
+            FROM smt_inspections i
+            LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+            WHERE i.rework_session_id = $1
+            ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))), i.scanned_at DESC, i.id DESC
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'PASS') AS passed,
+            COUNT(*) FILTER (WHERE status = 'FAIL') AS failed
+        FROM latest_rework_unit_inspections`,
+        [sessionId]
+    );
+    const passed = parseInt(statsRes.rows[0]?.passed, 10) || 0;
+    const failed = parseInt(statsRes.rows[0]?.failed, 10) || 0;
+
+    // 2. Target Quantity: total units whose latest Post AOI status on this side is FAIL and have not yet passed Rework
     const targetRes = await client.query(
         `WITH latest_post_aoi AS (
-            SELECT DISTINCT ON (i.serial_id) 
-                i.serial_id, i.status, i.scanned_at
+            SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))))
+                UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))) AS clean_serial,
+                UPPER(TRIM(i.status)) AS status
             FROM smt_inspections i
             JOIN smt_post_aoi_sessions ps ON i.post_aoi_session_id = ps.id
-            WHERE i.work_order_id = $1 AND ps.side = $2 AND i.process_step = 'Post AOI'
-            ORDER BY i.serial_id, i.scanned_at DESC, i.id DESC
+            LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+            WHERE i.work_order_id = $1 AND LOWER(TRIM(ps.side)) = LOWER(TRIM($2)) AND i.process_step = 'Post AOI'
+              AND (ps.is_deleted = false OR ps.is_deleted IS NULL)
+            ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))), i.scanned_at DESC, i.id DESC
+        ),
+        latest_rework AS (
+            SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, ri.scanned_barcode, ri.serial_id::text))))
+                UPPER(TRIM(COALESCE(sn.serial_number, ri.scanned_barcode, ri.serial_id::text))) AS clean_serial,
+                UPPER(TRIM(ri.status)) AS status
+            FROM smt_inspections ri
+            JOIN smt_rework_sessions rs ON ri.rework_session_id = rs.id
+            LEFT JOIN smt_serial_numbers sn ON ri.serial_id = sn.id
+            WHERE ri.work_order_id = $1 AND LOWER(TRIM(rs.side)) = LOWER(TRIM($2)) AND ri.process_step = 'Rework'
+              AND (rs.is_deleted = false OR rs.is_deleted IS NULL)
+            ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, ri.scanned_barcode, ri.serial_id::text))), ri.scanned_at DESC, ri.id DESC
         )
-        SELECT COUNT(*) AS count FROM latest_post_aoi WHERE status = 'FAIL'`,
+        SELECT COUNT(*) AS count
+        FROM latest_post_aoi p
+        LEFT JOIN latest_rework r ON p.clean_serial = r.clean_serial
+        WHERE p.status = 'FAIL'
+          AND (r.clean_serial IS NULL OR r.status != 'PASS')`,
         [workOrderId, side]
     );
-    const reworkTargetQty = parseInt(targetRes.rows[0].count, 10) || 0;
+    const reworkTargetQty = parseInt(targetRes.rows[0]?.count, 10) || 0;
 
     // Actual Work Order Quantity
     const woRes = await client.query(
@@ -298,26 +336,7 @@ const fetchReworkSessionStatsHelper = async (client: any, sessionId: string, wor
         [workOrderId]
     );
     const workOrderQtyActual = woRes.rows[0]?.quantity || 0;
-
-    // Passed: unique serials with status PASS in this rework session
-    const passedRes = await client.query(
-        `SELECT COUNT(DISTINCT COALESCE(serial_id::text, scanned_barcode)) AS count 
-         FROM smt_inspections 
-         WHERE rework_session_id = $1 AND status = 'PASS'`,
-        [sessionId]
-    );
-    const passed = parseInt(passedRes.rows[0].count, 10) || 0;
-
-    // Failed: all failed scans in this rework session (history)
-    const failedRes = await client.query(
-        `SELECT COUNT(id) AS count 
-         FROM smt_inspections 
-         WHERE rework_session_id = $1 AND status = 'FAIL'`,
-        [sessionId]
-    );
-    const failed = parseInt(failedRes.rows[0].count, 10) || 0;
-
-    const pending = Math.max(0, workOrderQtyActual - passed);
+    const pending = Math.max(0, reworkTargetQty);
 
     return {
         passed,

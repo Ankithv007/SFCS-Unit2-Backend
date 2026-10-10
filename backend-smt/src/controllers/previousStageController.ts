@@ -200,12 +200,12 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                   AND LOWER(TRIM(side)) = LOWER(TRIM($2))
                   AND (is_deleted = false OR is_deleted IS NULL)
             ),
-            prev_stage_scans AS (
+            latest_prev_scans AS (
                 SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))))
                     i.id,
                     i.serial_id,
                     COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text) AS serial_number,
-                    UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, ''))) AS clean_serial,
+                    UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))) AS clean_serial,
                     COALESCE(i.work_order_id, ps.work_order_id) AS work_order_id,
                     COALESCE(ps.side, '') AS side,
                     i.process_step AS previous_stage,
@@ -216,16 +216,18 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                 JOIN prev_sessions ps ON i.${config.prevSessionJoinCol} = ps.id
                 LEFT JOIN smt_serial_numbers sn ON i.serial_id = sn.id
                 WHERE i.process_step = ANY($3::text[])
-                  AND UPPER(TRIM(i.status)) IN ('PASS', 'ACCEPTED', 'PASSED')
                 ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, i.scanned_barcode, i.serial_id::text))), i.scanned_at DESC, i.id DESC
             ),
-            current_stage_passed AS (
-                SELECT DISTINCT UPPER(TRIM(COALESCE(sn.serial_number, ci.scanned_barcode, ''))) as clean_serial
+            latest_current_scans AS (
+                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(sn.serial_number, ci.scanned_barcode, ci.serial_id::text))))
+                    ci.id,
+                    UPPER(TRIM(COALESCE(sn.serial_number, ci.scanned_barcode, ci.serial_id::text))) AS clean_serial,
+                    UPPER(TRIM(ci.status)) AS status
                 FROM smt_inspections ci
                 JOIN current_sessions cs ON ci.${config.currentSessionJoinCol} = cs.id
                 LEFT JOIN smt_serial_numbers sn ON ci.serial_id = sn.id
                 WHERE ci.process_step = ANY($4::text[])
-                  AND UPPER(TRIM(ci.status)) IN ('PASS', 'ACCEPTED', 'PASSED')
+                ORDER BY UPPER(TRIM(COALESCE(sn.serial_number, ci.scanned_barcode, ci.serial_id::text))), ci.scanned_at DESC, ci.id DESC
             )
             SELECT 
                 p.id,
@@ -239,9 +241,12 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                 p.scanned_at,
                 NULL as subsequent_smt_stage,
                 NULL as subsequent_smt_scanned_at
-            FROM prev_stage_scans p
-            LEFT JOIN current_stage_passed c ON p.clean_serial = c.clean_serial
-            WHERE c.clean_serial IS NULL OR p.clean_serial = ''
+            FROM latest_prev_scans p
+            LEFT JOIN latest_current_scans c ON p.clean_serial = c.clean_serial
+            WHERE (
+                ${normalizedStage === 'REWORK' ? "p.status IN ('FAIL', 'FAILED')" : "p.status IN ('PASS', 'ACCEPTED', 'PASSED')"}
+            )
+            AND (c.clean_serial IS NULL OR c.status NOT IN ('PASS', 'ACCEPTED', 'PASSED'))
             ORDER BY p.scanned_at DESC, p.id DESC
         `;
 
@@ -282,127 +287,7 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
             return s || 'PASS';
         };
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // Optional Backend Track Items Cross-Query:
-        // Cross-query backendPool (units ledger, mapping, and scans) only for first 200 units
-        // to keep latency low while providing full stage visibility
-        // ─────────────────────────────────────────────────────────────────────────────
-        const backendUnitMap = new Map<string, { currentStage: string; latestScanAt?: Date }>();
-
-        if (result.rows.length > 0) {
-            try {
-                const serials = result.rows
-                    .slice(0, 200)
-                    .map((r: any) => (r.serial_number || '').trim().toUpperCase())
-                    .filter(Boolean);
-
-                if (serials.length > 0) {
-                    const candidateMap = new Map<string, Set<string>>();
-                    serials.forEach(sn => candidateMap.set(sn, new Set([sn])));
-
-                    const mappingRes = await backendPool.query(
-                        `SELECT barcode, unit_serial_number 
-                         FROM unit_serial_mapping 
-                         WHERE UPPER(TRIM(unit_serial_number)) = ANY($1) 
-                            OR UPPER(TRIM(barcode)) = ANY($1)`,
-                        [serials]
-                    );
-
-                    mappingRes.rows.forEach((r: any) => {
-                        const bc = (r.barcode || '').trim().toUpperCase();
-                        const usn = (r.unit_serial_number || '').trim().toUpperCase();
-                        serials.forEach(sn => {
-                            if (sn === bc || sn === usn) {
-                                if (bc) candidateMap.get(sn)?.add(bc);
-                                if (usn) candidateMap.get(sn)?.add(usn);
-                            }
-                        });
-                    });
-
-                    const allCandidateBarcodes = Array.from(
-                        new Set(Array.from(candidateMap.values()).flatMap(s => Array.from(s)))
-                    );
-
-                    if (allCandidateBarcodes.length > 0) {
-                        const bScansRes = await backendPool.query(
-                            `SELECT 
-                                s.barcode,
-                                ps.stage_code,
-                                ps.stage_name AS station,
-                                ps.stage_order,
-                                s.scan_result AS status,
-                                s.scanned_by,
-                                s.scanned_at
-                            FROM scans s
-                            JOIN production_stages ps ON s.stage_id = ps.id
-                            WHERE UPPER(TRIM(s.barcode)) = ANY($1)
-                            ORDER BY s.scanned_at ASC, s.id ASC`,
-                            [allCandidateBarcodes]
-                        );
-
-                        const bUnitsRes = await backendPool.query(
-                            `SELECT 
-                                u.barcode,
-                                u.current_status,
-                                ps.stage_name AS current_stage,
-                                ps.stage_code
-                            FROM units u
-                            LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
-                            WHERE UPPER(TRIM(u.barcode)) = ANY($1)`,
-                            [allCandidateBarcodes]
-                        );
-
-                        serials.forEach(sn => {
-                            const candidates = candidateMap.get(sn) || new Set([sn]);
-                            const matchedScans = bScansRes.rows.filter((sRow: any) =>
-                                candidates.has((sRow.barcode || '').trim().toUpperCase())
-                            );
-
-                            if (matchedScans.length > 0) {
-                                const latestScan = matchedScans[matchedScans.length - 1];
-                                const resolvedStage = latestScan.station || latestScan.stage_name || latestScan.stage_code;
-                                backendUnitMap.set(sn, {
-                                    currentStage: resolvedStage,
-                                    latestScanAt: new Date(latestScan.scanned_at)
-                                });
-                            } else {
-                                const matchedUnit = bUnitsRes.rows.find((uRow: any) =>
-                                    candidates.has((uRow.barcode || '').trim().toUpperCase())
-                                );
-                                if (matchedUnit && matchedUnit.current_stage) {
-                                    backendUnitMap.set(sn, {
-                                        currentStage: matchedUnit.current_stage
-                                    });
-                                }
-                            }
-                        });
-                    }
-                }
-            } catch (bErr: any) {
-                logger.warn('Backend Track Items stage resolution warning (falling back to SMT stage):', bErr.message);
-            }
-        }
-
         const units = result.rows.map((row: any) => {
-            const snUpper = (row.serial_number || '').trim().toUpperCase();
-            const backendInfo = backendUnitMap.get(snUpper);
-
-            let resolvedCurrentStage = config.currentStageName;
-
-            if (backendInfo?.currentStage) {
-                if (backendInfo.latestScanAt && row.scanned_at) {
-                    const prevTime = new Date(row.scanned_at).getTime();
-                    const bTime = backendInfo.latestScanAt.getTime();
-                    if (bTime >= prevTime) {
-                        resolvedCurrentStage = formatStageName(backendInfo.currentStage);
-                    }
-                } else {
-                    resolvedCurrentStage = formatStageName(backendInfo.currentStage);
-                }
-            } else if (row.subsequent_smt_stage) {
-                resolvedCurrentStage = formatStageName(row.subsequent_smt_stage);
-            }
-
             const formattedPrevStage = formatStageName(row.previous_stage) || config.previousStageName;
 
             return {
@@ -410,7 +295,7 @@ export const getPreviousStagePassed = async (req: Request, res: Response) => {
                 serial_number: row.serial_number || '-',
                 work_order_id: row.work_order_id || workOrderId,
                 side: row.side || side,
-                current_stage: resolvedCurrentStage,
+                current_stage: config.currentStageName,
                 previous_stage: formattedPrevStage,
                 status: normalizeStatusDisplay(row.status),
                 scanned_by: row.scanned_by || '-',
