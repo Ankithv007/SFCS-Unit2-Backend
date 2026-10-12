@@ -1,7 +1,8 @@
 {
     "compilerOptions": {
         "target": "es2020",
-        "lib": ["es2020"],
+        "lib": ["es2020", "dom"],
+        "types": ["node", "express"],
         "module": "commonjs",
         "outDir": "./dist",
         "rootDir": "./src",
@@ -9,5 +10,6 @@
         "esModuleInterop": true,
         "skipLibCheck": true,
         "forceConsistentCasingInFileNames": true
-    }
+    },
+    "include": ["src/**/*"]
 }

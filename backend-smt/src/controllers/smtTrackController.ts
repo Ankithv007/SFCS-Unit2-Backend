@@ -35,6 +35,51 @@ const normalizeStatus = (status: string): string => {
     }
 };
 
+export const computeOverallStageStatus = (
+    topStatus: string | null | undefined,
+    bottomStatus: string | null | undefined
+): string => {
+    const top = normalizeStatus(topStatus || 'N/A');
+    const bottom = normalizeStatus(bottomStatus || 'N/A');
+
+    const topIsNA = top === 'N/A' || top === '-';
+    const bottomIsNA = bottom === 'N/A' || bottom === '-';
+
+    // If both sides are N/A, show overall N/A.
+    if (topIsNA && bottomIsNA) {
+        return 'N/A';
+    }
+
+    // If only one side is applicable and its status is PASS, show overall PASS.
+    // If an applicable side is FAIL, show overall FAIL.
+    // If an applicable side is PENDING and no failure exists, show overall PENDING.
+    if (!topIsNA && bottomIsNA) {
+        if (top === 'FAIL' || top === 'REWORK') return 'FAIL';
+        if (top === 'PASS') return 'PASS';
+        return 'PENDING';
+    }
+
+    if (topIsNA && !bottomIsNA) {
+        if (bottom === 'FAIL' || bottom === 'REWORK') return 'FAIL';
+        if (bottom === 'PASS') return 'PASS';
+        return 'PENDING';
+    }
+
+    // Both sides are applicable:
+    // If an applicable side is FAIL, show overall FAIL.
+    if (top === 'FAIL' || top === 'REWORK' || bottom === 'FAIL' || bottom === 'REWORK') {
+        return 'FAIL';
+    }
+
+    // If TOP = PASS and BOTTOM = PASS, show overall PASS.
+    if (top === 'PASS' && bottom === 'PASS') {
+        return 'PASS';
+    }
+
+    // If an applicable side is PENDING and no failure exists, show overall PENDING.
+    return 'PENDING';
+};
+
 export interface SmtStatusResolution {
     step_status: Record<string, string>;
     step_status_top: Record<string, string>;
@@ -49,13 +94,32 @@ export const resolveSerialSmtStatuses = (
     rawBottomStatuses: Record<string, any> | null | undefined,
     rawOverallStatuses: Record<string, any> | null | undefined,
     hasActiveFailure: boolean = false,
-    sqlIsCompleted?: boolean
+    sqlIsCompleted?: boolean,
+    hasSmt: boolean = true
 ): SmtStatusResolution => {
+    const smtStepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+
+    if (hasSmt === false) {
+        const step_status: Record<string, string> = {};
+        const step_status_top: Record<string, string> = {};
+        const step_status_bottom: Record<string, string> = {};
+        for (const step of smtStepNames) {
+            step_status_top[step] = 'N/A';
+            step_status_bottom[step] = 'N/A';
+            step_status[step] = 'N/A';
+        }
+        return {
+            step_status,
+            step_status_top,
+            step_status_bottom,
+            is_completed: false,
+            final_status_label: 'Pending'
+        };
+    }
+
     const isDoubleSided = isTopBottomWo(sides);
     const isBottomOnly = isBottomOnlyWo(sides);
     const isTopOnly = !isDoubleSided && !isBottomOnly;
-
-    const smtStepNames = ['Serial Number', 'Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
 
     const topMap: Record<string, string> = {};
     if (rawTopStatuses && typeof rawTopStatuses === 'object') {
@@ -83,44 +147,65 @@ export const resolveSerialSmtStatuses = (
     const step_status_bottom: Record<string, string> = {};
 
     if (isTopOnly) {
-        // TOP ONLY: Bottom is always '-'
+        // TOP ONLY: Bottom is always 'N/A'
         for (const step of smtStepNames) {
-            const val = topMap[step] || overallMap[step] || (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
-            step_status_top[step] = val;
-            step_status_bottom[step] = '-';
-            step_status[step] = val;
+            if (step === 'Serial Number') {
+                step_status_top[step] = 'PASS';
+                step_status_bottom[step] = 'N/A';
+                step_status[step] = 'PASS';
+            } else if (step === 'SMT FG') {
+                const val = topMap[step] || overallMap[step] || 'PENDING';
+                step_status_top[step] = val;
+                step_status_bottom[step] = 'N/A';
+                step_status[step] = computeOverallStageStatus(val, 'N/A');
+            } else {
+                const val = topMap[step] || overallMap[step] || (step === 'Rework' ? 'N/A' : 'PENDING');
+                step_status_top[step] = val;
+                step_status_bottom[step] = 'N/A';
+                step_status[step] = computeOverallStageStatus(val, 'N/A');
+            }
         }
     } else if (isBottomOnly) {
-        // BOTTOM ONLY: Top is always '-'
+        // BOTTOM ONLY: Top is always 'N/A'
         for (const step of smtStepNames) {
-            const val = botMap[step] || overallMap[step] || (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
-            step_status_top[step] = '-';
-            step_status_bottom[step] = val;
-            step_status[step] = val;
+            if (step === 'Serial Number') {
+                step_status_top[step] = 'N/A';
+                step_status_bottom[step] = 'PASS';
+                step_status[step] = 'PASS';
+            } else if (step === 'SMT FG') {
+                step_status_top[step] = 'N/A';
+                step_status_bottom[step] = 'N/A';
+                step_status[step] = 'N/A';
+            } else {
+                const val = botMap[step] || overallMap[step] || (step === 'Rework' ? 'N/A' : 'PENDING');
+                step_status_top[step] = 'N/A';
+                step_status_bottom[step] = val;
+                step_status[step] = computeOverallStageStatus('N/A', val);
+            }
         }
     } else {
         // DOUBLE SIDED (Top / Bottom)
         for (const step of smtStepNames) {
-            const topVal = topMap[step] || (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
-            const botVal = botMap[step] || (step === 'Serial Number' || step === 'Rework' ? '-' : 'PENDING');
-
-            step_status_top[step] = topVal;
-            step_status_bottom[step] = botVal;
-
             if (step === 'Serial Number') {
-                step_status[step] = '-';
-            } else if (step === 'Rework') {
-                if (topVal !== '-' && botVal !== '-') {
-                    step_status[step] = `TOP: ${topVal} / BTM: ${botVal}`;
-                } else if (topVal !== '-') {
-                    step_status[step] = `TOP: ${topVal}`;
-                } else if (botVal !== '-') {
-                    step_status[step] = `BTM: ${botVal}`;
-                } else {
-                    step_status[step] = '-';
+                step_status_top[step] = 'PASS';
+                step_status_bottom[step] = 'PASS';
+                step_status[step] = 'PASS';
+            } else if (step === 'SMT FG') {
+                // SMT-FG supports TOP only. Never use BOTTOM record or generate combined TOP/BOTTOM text.
+                let topVal = topMap['SMT FG'] || (overallMap['SMT FG'] && !botMap['SMT FG'] ? overallMap['SMT FG'] : null);
+                if (!topVal) {
+                    topVal = isBottomOnly ? 'N/A' : 'PENDING';
                 }
+                step_status_top[step] = topVal;
+                step_status_bottom[step] = 'N/A';
+                step_status[step] = computeOverallStageStatus(topVal, 'N/A');
             } else {
-                step_status[step] = `TOP: ${topVal} / BTM: ${botVal}`;
+                const topVal = topMap[step] || (overallMap[step] && !botMap[step] ? overallMap[step] : (step === 'Rework' ? 'N/A' : 'PENDING'));
+                const botVal = botMap[step] || (overallMap[step] && !topMap[step] ? overallMap[step] : (step === 'Rework' ? 'N/A' : 'PENDING'));
+
+                step_status_top[step] = topVal;
+                step_status_bottom[step] = botVal;
+                step_status[step] = computeOverallStageStatus(topVal, botVal);
             }
         }
     }
@@ -137,7 +222,7 @@ export const resolveSerialSmtStatuses = (
             const botFgPass = step_status_bottom['SMT FG'] === 'PASS';
             const overallFgPass = overallMap['SMT FG'] === 'PASS';
 
-            is_completed = overallFgPass || (topFgPass && botFgPass) || (topPostPass && botPostPass) || (topFgPass && botPostPass) || (botFgPass && topPostPass);
+            is_completed = topFgPass || overallFgPass || (topPostPass && botPostPass);
         } else if (isBottomOnly) {
             const botPostPass = step_status_bottom['Post AOI'] === 'PASS' || overallMap['Post AOI'] === 'PASS';
             const botFgPass = step_status_bottom['SMT FG'] === 'PASS' || overallMap['SMT FG'] === 'PASS';
@@ -168,15 +253,298 @@ const isBackendStageSelected = (stage: any, selectedStages: any): boolean => {
     } else if (typeof selectedStages === 'string') {
         try { list = JSON.parse(selectedStages); } catch { list = []; }
     }
-    if (list.length === 0) return true;
+    if (list.length === 0) return false;
     const codeNorm = normalizeStageId(stage.stage_code || stage.code || '');
     const nameNorm = normalizeStageId(stage.stage_name || stage.name || '');
     const labelNorm = normalizeStageId(stage.stage_label || stage.label || '');
     return list.some((item: any) => {
-        const s = typeof item === 'string' ? item : (item?.stage_code || item?.stage_name || item?.code || item?.name || '');
+        const s = typeof item === 'string' ? item : (item?.stage_code || item?.stage_name || item?.stage_label || item?.code || item?.name || item?.label || '');
         const sNorm = normalizeStageId(s);
-        return sNorm === codeNorm || sNorm === nameNorm || sNorm === labelNorm;
+        return sNorm === codeNorm || sNorm === nameNorm || sNorm === labelNorm ||
+            (codeNorm === 'PTH' && (sNorm === 'PRESOLDERING' || sNorm === 'PTH')) ||
+            (codeNorm === 'QA' && sNorm === 'QUALITYASSURANCE') ||
+            (codeNorm === 'VI' && sNorm === 'VISUALINSPECTION') ||
+            (codeNorm === 'QI' && sNorm === 'QUALITYINSPECTION') ||
+            (codeNorm === 'PCBA_FCT' && sNorm === 'PCBAFCT') ||
+            (codeNorm === 'UNIT_TESTING' && sNorm === 'UNITTESTING');
     });
+};
+
+export interface SerialBackendResolution {
+    current_stage: string;
+    current_status: string;
+    final_status_label: string;
+    backend_step_status: Record<string, string>;
+}
+
+export const resolveSerialsBackendTraceability = async (
+    serials: any[],
+    wo: any,
+    smtResolutions: Record<string, SmtStatusResolution>
+): Promise<{
+    activeBackendStages: any[];
+    serialResolutions: Record<string, SerialBackendResolution>;
+}> => {
+    let backendStagesList: any[] = [];
+    let selectedBackendStages: any[] = [];
+
+    if (wo.has_backend) {
+        try {
+            const bStagesRes = await backendPool.query(
+                `SELECT id, stage_code, stage_name, stage_order 
+                 FROM production_stages 
+                 WHERE is_active = TRUE AND workflow_type = 'STANDARD' 
+                 ORDER BY stage_order ASC`
+            );
+            backendStagesList = bStagesRes.rows.map((st: any) => ({
+                ...st,
+                stage_label: st.stage_code === 'PTH' ? 'PTH' : (st.stage_code === 'PCBA_FCT' ? 'PCBA-FCT' : st.stage_name)
+            }));
+            if (wo.selected_stages) {
+                try {
+                    selectedBackendStages = typeof wo.selected_stages === 'string' ? JSON.parse(wo.selected_stages) : wo.selected_stages;
+                } catch (e) {}
+            } else {
+                selectedBackendStages = backendStagesList;
+            }
+        } catch (err: any) {
+            logger.warn('Failed to fetch backend stages for WO tracking:', err.message);
+        }
+    }
+
+    if (backendStagesList.length === 0) {
+        backendStagesList = [
+            { stage_code: 'PTH', stage_name: 'Pre-Soldering', stage_label: 'PTH', stage_order: 1 },
+            { stage_code: 'VI', stage_name: 'Visual Inspection', stage_label: 'VI', stage_order: 2 },
+            { stage_code: 'QA', stage_name: 'Quality Assurance', stage_label: 'QA', stage_order: 3 },
+            { stage_code: 'FLASHING', stage_name: 'Flashing', stage_label: 'Flashing', stage_order: 4 },
+            { stage_code: 'PCBA_FCT', stage_name: 'PCBA FCT', stage_label: 'PCBA-FCT', stage_order: 5 },
+            { stage_code: 'ASSEMBLY', stage_name: 'Assembly', stage_label: 'Assembly', stage_order: 6 },
+            { stage_code: 'UNIT_TESTING', stage_name: 'Unit Testing', stage_label: 'Unit Testing', stage_order: 7 },
+            { stage_code: 'QI', stage_name: 'Quality Inspection', stage_label: 'QI', stage_order: 8 },
+            { stage_code: 'PACKING', stage_name: 'Packing', stage_label: 'Packing', stage_order: 9 }
+        ];
+    }
+
+    const selectedStages = backendStagesList.filter(st => isBackendStageSelected(st, selectedBackendStages));
+
+    const candidateSerialsMap: { [serial: string]: string[] } = {};
+    const allBarcodesToQuery = new Set<string>();
+
+    serials.forEach((s: any) => {
+        const sn = (s.serial_number || '').trim().toUpperCase();
+        if (sn) {
+            candidateSerialsMap[s.serial_number] = [sn];
+            allBarcodesToQuery.add(sn);
+        }
+    });
+
+    if (wo.has_backend && allBarcodesToQuery.size > 0) {
+        try {
+            const mapRes = await backendPool.query(
+                `SELECT barcode, unit_serial_number FROM unit_serial_mapping 
+                 WHERE UPPER(TRIM(unit_serial_number)) = ANY($1::text[]) 
+                    OR UPPER(TRIM(barcode)) = ANY($1::text[])`,
+                [Array.from(allBarcodesToQuery)]
+            );
+            mapRes.rows.forEach((r: any) => {
+                const bc = (r.barcode || '').trim().toUpperCase();
+                const usn = (r.unit_serial_number || '').trim().toUpperCase();
+                if (bc) allBarcodesToQuery.add(bc);
+                if (usn) allBarcodesToQuery.add(usn);
+                serials.forEach((s: any) => {
+                    const sn = (s.serial_number || '').trim().toUpperCase();
+                    if (sn === bc || sn === usn) {
+                        if (bc && !candidateSerialsMap[s.serial_number].includes(bc)) candidateSerialsMap[s.serial_number].push(bc);
+                        if (usn && !candidateSerialsMap[s.serial_number].includes(usn)) candidateSerialsMap[s.serial_number].push(usn);
+                    }
+                });
+            });
+        } catch (mErr: any) {
+            logger.warn('Backend unit_serial_mapping lookup warning for WO:', mErr.message);
+        }
+    }
+
+    const backendScansBySerial: { [key: string]: any[] } = {};
+    const backendUnitBySerial: { [key: string]: any } = {};
+
+    if (wo.has_backend && allBarcodesToQuery.size > 0) {
+        const queryBarcodes = Array.from(allBarcodesToQuery);
+        try {
+            const scansRes = await backendPool.query(`
+                SELECT s.barcode, ps.stage_code, ps.stage_name as station, ps.stage_order, s.scan_result as status, s.scanned_at
+                FROM scans s
+                JOIN production_stages ps ON s.stage_id = ps.id
+                WHERE UPPER(TRIM(s.barcode)) = ANY($1::text[])
+                ORDER BY s.scanned_at ASC, s.id ASC
+            `, [queryBarcodes]);
+
+            scansRes.rows.forEach((row: any) => {
+                const bc = (row.barcode || '').trim().toUpperCase();
+                serials.forEach((s: any) => {
+                    if (candidateSerialsMap[s.serial_number]?.includes(bc)) {
+                        if (!backendScansBySerial[s.serial_number]) backendScansBySerial[s.serial_number] = [];
+                        backendScansBySerial[s.serial_number].push({
+                            stage_code: row.stage_code,
+                            station: row.station,
+                            stage_order: row.stage_order,
+                            status: normalizeStatus(row.status),
+                            scanned_at: row.scanned_at
+                        });
+                    }
+                });
+            });
+
+            const unitsRes = await backendPool.query(`
+                SELECT u.barcode, u.current_status, ps.stage_code AS current_stage_code, ps.stage_name AS current_stage_name
+                FROM units u
+                LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                WHERE UPPER(TRIM(u.barcode)) = ANY($1::text[])
+            `, [queryBarcodes]);
+
+            unitsRes.rows.forEach((row: any) => {
+                const bc = (row.barcode || '').trim().toUpperCase();
+                serials.forEach((s: any) => {
+                    if (candidateSerialsMap[s.serial_number]?.includes(bc)) {
+                        backendUnitBySerial[s.serial_number] = row;
+                    }
+                });
+            });
+        } catch (err: any) {
+            logger.warn('Failed to fetch backend scans/units for WO:', err.message);
+        }
+    }
+
+    const serialResolutions: Record<string, SerialBackendResolution> = {};
+
+    serials.forEach((s: any) => {
+        const snKey = s.serial_number;
+        const bScans = backendScansBySerial[snKey] || [];
+        const bUnit = backendUnitBySerial[snKey];
+        const smtRes = smtResolutions[snKey];
+
+        const backend_step_status: Record<string, string> = {};
+
+        // 1. Resolve Backend stage statuses for ALL configured backend stages:
+        // non-applicable -> N/A, applicable completed -> PASS/FAIL/REWORK, applicable incomplete -> PENDING
+        backendStagesList.forEach((st: any) => {
+            const isSelected = isBackendStageSelected(st, selectedBackendStages);
+            const stepKey = st.stage_code;
+
+            let statusVal = 'PENDING';
+            if (!isSelected) {
+                statusVal = 'N/A';
+            } else {
+                const scNorm = normalizeStageId(st.stage_code);
+                const snNorm = normalizeStageId(st.stage_name);
+                const slNorm = normalizeStageId(st.stage_label);
+
+                const stageScans = bScans.filter((h: any) => {
+                    const hCode = normalizeStageId(h.stage_code);
+                    const hStat = normalizeStageId(h.station);
+                    return hCode === scNorm || hStat === scNorm || hStat === snNorm || (slNorm && hStat === slNorm) ||
+                        (scNorm === 'PTH' && (hCode === 'PRESOLDERING' || hStat === 'PRESOLDERING')) ||
+                        (scNorm === 'QA' && (hCode === 'QUALITYASSURANCE' || hStat === 'QUALITYASSURANCE')) ||
+                        (scNorm === 'VI' && (hCode === 'VISUALINSPECTION' || hStat === 'VISUALINSPECTION')) ||
+                        (scNorm === 'QI' && (hCode === 'QUALITYINSPECTION' || hStat === 'QUALITYINSPECTION')) ||
+                        (scNorm === 'PCBA_FCT' && (hCode === 'PCBAFCT' || hStat === 'PCBAFCT')) ||
+                        (scNorm === 'UNIT_TESTING' && (hCode === 'UNITTESTING' || hStat === 'UNITTESTING'));
+                });
+
+                if (stageScans.length > 0) {
+                    const lastStScan = stageScans[stageScans.length - 1];
+                    const rawSt = (lastStScan.status || '').toUpperCase();
+                    if (rawSt === 'ACCEPTED' || rawSt === 'PASS') {
+                        statusVal = 'PASS';
+                    } else if (rawSt === 'REWORK' || rawSt === 'DEBUG') {
+                        statusVal = 'REWORK';
+                    } else if (rawSt === 'FAIL' || rawSt === 'FAILED') {
+                        statusVal = 'FAIL';
+                    } else {
+                        statusVal = rawSt;
+                    }
+                } else {
+                    statusVal = 'PENDING';
+                }
+            }
+
+            backend_step_status[stepKey] = statusVal;
+            if (st.stage_name) backend_step_status[st.stage_name] = statusVal;
+            if (st.stage_label) backend_step_status[st.stage_label] = statusVal;
+            if (st.stage_code === 'PTH') {
+                backend_step_status['Pre-Soldering'] = statusVal;
+                backend_step_status['PTH'] = statusVal;
+            }
+            if (st.stage_code === 'PCBA_FCT') {
+                backend_step_status['PCBA FCT'] = statusVal;
+                backend_step_status['PCBA-FCT'] = statusVal;
+                backend_step_status['PCBA_FCT'] = statusVal;
+            }
+        });
+
+        // 2. Resolve authoritative current_stage & current_status
+        let resolvedCurrentStage = s.current_stage || 'Pending';
+        let resolvedCurrentStatus = normalizeStatus(s.current_status || 'PENDING');
+
+        if (bScans.length > 0) {
+            const lastBackendScan = bScans[bScans.length - 1];
+            const lastBackendStation = lastBackendScan.station || lastBackendScan.stage_code;
+
+            if (lastBackendScan.status === 'REWORK' || lastBackendScan.status === 'FAIL') {
+                resolvedCurrentStage = lastBackendStation;
+                resolvedCurrentStatus = lastBackendScan.status;
+            } else if (lastBackendStation.toUpperCase() === 'PACKING' && (lastBackendScan.status === 'PASS' || lastBackendScan.status === 'ACCEPTED')) {
+                resolvedCurrentStage = 'Packing';
+                resolvedCurrentStatus = 'PASS';
+            } else if (bUnit?.current_status === 'COMPLETED') {
+                resolvedCurrentStage = 'Packing';
+                resolvedCurrentStatus = 'PASS';
+            } else if (bUnit?.current_stage_name) {
+                resolvedCurrentStage = bUnit.current_stage_name;
+                resolvedCurrentStatus = bUnit.current_status || lastBackendScan.status;
+            } else {
+                resolvedCurrentStage = lastBackendStation;
+                resolvedCurrentStatus = lastBackendScan.status;
+            }
+        } else {
+            resolvedCurrentStage = s.current_stage || 'Pending';
+            resolvedCurrentStatus = normalizeStatus(s.current_status || 'PENDING');
+        }
+
+        // 3. Resolve authoritative final_status_label (overall status)
+        let resolvedOverallStatus = 'Pending';
+        const allStatuses = [
+            ...Object.values(smtRes?.step_status || {}),
+            ...Object.values(backend_step_status)
+        ];
+        const anyFail = allStatuses.some(v => v === 'FAIL' || v.includes('FAIL'));
+        const anyRework = allStatuses.some(v => v === 'REWORK' || v.includes('REWORK'));
+
+        if (anyRework) {
+            resolvedOverallStatus = 'In Rework';
+        } else if (anyFail) {
+            resolvedOverallStatus = 'Failed';
+        } else if (wo.has_backend) {
+            const allActiveBackendPassed = selectedStages.length > 0 && selectedStages.every((st: any) => backend_step_status[st.stage_code] === 'PASS');
+            const smtPass = smtRes ? smtRes.is_completed : false;
+            if (allActiveBackendPassed && smtPass) {
+                resolvedOverallStatus = 'Completed';
+            } else {
+                resolvedOverallStatus = 'Pending';
+            }
+        } else {
+            resolvedOverallStatus = smtRes?.is_completed ? 'Completed' : 'Pending';
+        }
+
+        serialResolutions[snKey] = {
+            current_stage: resolvedCurrentStage,
+            current_status: resolvedCurrentStatus,
+            final_status_label: resolvedOverallStatus,
+            backend_step_status
+        };
+    });
+
+    return { activeBackendStages: backendStagesList, serialResolutions };
 };
 
 export const trackSerialNumber = async (req: Request, res: Response) => {
@@ -310,15 +678,31 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         let backendStagesList: any[] = [];
         let backendScanHistory: any[] = [];
         let backendStagesResolved: any[] = [];
+        let backendUnitRecord: any = null;
 
         try {
+            const uRes = await backendPool.query(
+                `SELECT u.barcode, u.current_stage_id, ps.stage_name AS current_stage_name, ps.stage_code AS current_stage_code, u.current_status 
+                 FROM units u 
+                 LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                 WHERE UPPER(TRIM(u.barcode)) = ANY($1) 
+                 ORDER BY u.updated_at DESC LIMIT 1`,
+                [Array.from(candidateBarcodes)]
+            );
+            if (uRes.rows.length > 0) {
+                backendUnitRecord = uRes.rows[0];
+            }
+
             const bStagesRes = await backendPool.query(
                 `SELECT id, stage_code, stage_name, stage_order, workflow_type 
                  FROM production_stages 
                  WHERE is_active = TRUE AND workflow_type = 'STANDARD'
                  ORDER BY stage_order ASC`
             );
-            backendStagesList = bStagesRes.rows;
+            backendStagesList = bStagesRes.rows.map((st: any) => ({
+                ...st,
+                stage_label: st.stage_code === 'PTH' ? 'PTH' : (st.stage_code === 'PCBA_FCT' ? 'PCBA-FCT' : st.stage_name)
+            }));
 
             const bScansRes = await backendPool.query(
                 `SELECT 
@@ -344,6 +728,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                 id: row.id,
                 stage_code: row.stage_code || null,
                 station: row.station || row.stage_name || row.stage_code,
+                process_step: row.station || row.stage_name || row.stage_code,
                 stage_order: row.stage_order,
                 status: normalizeStatus(row.status),
                 scanned_by: row.scanned_by || '-',
@@ -379,7 +764,7 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                 if (stageScans.length > 0) {
                     const latest = stageScans[stageScans.length - 1];
                     const rawSt = latest.status;
-                    const stageStatus = (rawSt === 'PASS' || rawSt === 'ACCEPTED') ? 'PASSED' : (rawSt === 'FAIL' || rawSt === 'FAILED') ? 'FAILED' : rawSt;
+                    const stageStatus = (rawSt === 'PASS' || rawSt === 'ACCEPTED') ? 'PASS' : (rawSt === 'FAIL' || rawSt === 'FAILED') ? 'FAIL' : rawSt;
                     return {
                         code: stage.stage_code,
                         name: stage.stage_name,
@@ -432,10 +817,30 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             }))
         ].sort((a, b) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime());
 
-        // 7. Determine Current Stage & Status from the latest actual scan across BOTH SMT and Backend
+        // 7. Determine Current Stage & Status authoritatively across BOTH SMT and Backend
         let currentStage = 'Pending';
         let currentStatus = 'PENDING';
-        if (combinedHistory.length > 0) {
+
+        if (backendScanHistory.length > 0) {
+            const lastBScan = backendScanHistory[backendScanHistory.length - 1];
+            const lastBStation = lastBScan.station || lastBScan.stage_code;
+            if (lastBScan.status === 'REWORK' || lastBScan.status === 'FAIL') {
+                currentStage = lastBStation;
+                currentStatus = lastBScan.status;
+            } else if (lastBStation.toUpperCase() === 'PACKING' && (lastBScan.status === 'PASS' || lastBScan.status === 'ACCEPTED')) {
+                currentStage = 'Packing';
+                currentStatus = 'PASS';
+            } else if (backendUnitRecord?.current_status === 'COMPLETED') {
+                currentStage = 'Packing';
+                currentStatus = 'PASS';
+            } else if (backendUnitRecord?.current_stage_name) {
+                currentStage = backendUnitRecord.current_stage_name;
+                currentStatus = backendUnitRecord.current_status || lastBScan.status;
+            } else {
+                currentStage = lastBStation;
+                currentStatus = lastBScan.status;
+            }
+        } else if (combinedHistory.length > 0) {
             const lastRecord = combinedHistory[combinedHistory.length - 1];
             currentStage = lastRecord.process_step;
             currentStatus = lastRecord.status;
@@ -450,8 +855,6 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
         let finalStatusLabel = 'IN PRODUCTION';
         const hasBackend = serial.has_backend ?? true;
         const hasSmt = serial.has_smt ?? true;
-        const selectedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected).length;
-        const passedBackendCount = backendStagesResolved.filter((s: any) => s.is_selected && s.status === 'PASSED').length;
 
         const isDoubleSided = isTopBottomWo(serial.sides);
         const isBottomOnly = isBottomOnlyWo(serial.sides);
@@ -486,10 +889,9 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
                 const topPostPass = topStatuses['Post AOI'] === 'PASS' || topStatuses['Post_AOI'] === 'PASS';
                 const botPostPass = bottomStatuses['Post AOI'] === 'PASS' || bottomStatuses['Post_AOI'] === 'PASS';
                 const topFgPass = topStatuses['SMT FG'] === 'PASS' || topStatuses['SMT_FG'] === 'PASS';
-                const botFgPass = bottomStatuses['SMT FG'] === 'PASS' || bottomStatuses['SMT_FG'] === 'PASS';
                 const overallFgPass = overallStatuses['SMT FG'] === 'PASS' || overallStatuses['SMT_FG'] === 'PASS';
 
-                smtCompleted = overallFgPass || (topFgPass && botFgPass) || (topPostPass && botPostPass) || (topFgPass && botPostPass) || (botFgPass && topPostPass);
+                smtCompleted = topFgPass || overallFgPass || (topPostPass && botPostPass);
             } else if (isBottomOnly) {
                 const botPostPass = bottomStatuses['Post AOI'] === 'PASS' || bottomStatuses['Post_AOI'] === 'PASS' || overallStatuses['Post AOI'] === 'PASS' || overallStatuses['Post_AOI'] === 'PASS';
                 const botFgPass = bottomStatuses['SMT FG'] === 'PASS' || bottomStatuses['SMT_FG'] === 'PASS' || overallStatuses['SMT FG'] === 'PASS' || overallStatuses['SMT_FG'] === 'PASS';
@@ -501,22 +903,18 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             }
         }
 
-        const backendPassed = !hasBackend || selectedBackendCount === 0 || (passedBackendCount === selectedBackendCount);
+        const allActiveBackendPassed = backendStagesResolved.length > 0 &&
+            backendStagesResolved.filter((s: any) => s.is_selected).every((s: any) => s.status === 'PASS' || s.status === 'PASSED');
 
         if (anyRework) {
             finalStatusLabel = 'IN REWORK';
-            currentStatus = 'REWORK';
         } else if (anyFail) {
             finalStatusLabel = 'FAILED';
-            currentStatus = 'FAIL';
-        } else if (smtCompleted && backendPassed) {
+        } else if (hasBackend ? (smtCompleted && allActiveBackendPassed) : smtCompleted) {
             finalStatusLabel = 'COMPLETED';
             currentStatus = 'PASS';
         } else {
             finalStatusLabel = 'IN PRODUCTION';
-            if (currentStatus !== 'REWORK' && currentStatus !== 'FAIL') {
-                currentStatus = 'PENDING';
-            }
         }
 
         const resStatus = resolveSerialSmtStatuses(
@@ -525,7 +923,8 @@ export const trackSerialNumber = async (req: Request, res: Response) => {
             bottomStatuses,
             overallStatuses,
             hasActiveFailure,
-            smtCompleted
+            smtCompleted,
+            serial.has_smt !== false
         );
         const stepStatusTop = resStatus.step_status_top;
         const stepStatusBottom = resStatus.step_status_bottom;
@@ -596,9 +995,10 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
     }
 
     const inputValue = woId.trim().toUpperCase();
-    const pageNum = parseInt(page as string, 10);
-    const limitNum = parseInt(limit as string, 10);
-    const offset = (pageNum - 1) * limitNum;
+    const isFetchAll = limit === 'all' || req.query.fetchAll === 'true';
+    const pageNum = parseInt(page as string, 10) || 1;
+    const limitNum = isFetchAll ? 100000 : (parseInt(limit as string, 10) || 50);
+    const offset = isFetchAll ? 0 : (pageNum - 1) * limitNum;
     
     const searchStr = (search as string).trim() ? `%${(search as string).trim()}%` : null;
     const dateStr = (filterDate as string).trim() || null;
@@ -756,28 +1156,46 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             }
         }
 
-        const mappedSerials = serialRows.map((s: any) => {
-            const res = resolveSerialSmtStatuses(
+        const smtResolutions: Record<string, SmtStatusResolution> = {};
+        serialRows.forEach((s: any) => {
+            smtResolutions[s.serial_number] = resolveSerialSmtStatuses(
                 wo.sides,
                 s.step_statuses_top,
                 s.step_statuses_bottom,
                 s.step_statuses,
                 false,
-                Boolean(s.is_completed)
+                Boolean(s.is_completed),
+                wo.has_smt !== false
             );
+        });
+
+        const { activeBackendStages, serialResolutions } = await resolveSerialsBackendTraceability(
+            serialRows,
+            wo,
+            smtResolutions
+        );
+
+        const mappedSerials = serialRows.map((s: any) => {
+            const smtRes = smtResolutions[s.serial_number];
+            const bRes = serialResolutions[s.serial_number];
+
+            const finalStepStatus: Record<string, string> = {
+                ...smtRes.step_status,
+                ...(bRes?.backend_step_status || {})
+            };
 
             return {
                 serial_number: s.serial_number,
-                current_stage: s.current_stage || 'Pending',
-                current_status: s.current_status || 'PENDING',
-                final_status_label: res.final_status_label,
+                current_stage: bRes?.current_stage || s.current_stage || 'Pending',
+                current_status: bRes?.current_status || (s.current_status || 'PENDING'),
+                final_status_label: bRes?.final_status_label || (smtRes.is_completed ? 'Completed' : 'Pending'),
                 total_failures: Number(s.total_failures) || 0,
                 total_reworks: Number(s.total_reworks) || 0,
                 total_debugs: Number(s.total_debugs) || 0,
                 total_passed: Number(s.total_passed) || 0,
-                step_status: res.step_status,
-                step_status_top: res.step_status_top,
-                step_status_bottom: res.step_status_bottom,
+                step_status: finalStepStatus,
+                step_status_top: smtRes.step_status_top,
+                step_status_bottom: smtRes.step_status_bottom,
                 created_at: s.created_at
             };
         });
@@ -805,11 +1223,15 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
         return res.status(200).json({
             work_order_id: wo.id || wo.work_order_id,
             product_name: wo.product_name,
+            customer_name: wo.customer_name || '-',
+            model_name: wo.model_name || '-',
             quantity: wo.quantity,
             line_id: wo.line_id,
             sides: wo.sides || '-',
             has_smt: wo.has_smt ?? true,
             has_backend: wo.has_backend ?? true,
+            selected_stages: wo.selected_stages,
+            active_backend_stages: activeBackendStages,
             total_serials: totalAll,
             total_filtered: totalFiltered,
             completed_count: totalCompleted,
@@ -1598,103 +2020,53 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         const serials = serialsResult.rows;
 
-        // Fetch Backend Stages & History
-        let backendStagesList: any[] = [];
-        let selectedBackendStages: any[] = [];
-        if (wo.has_backend) {
-            try {
-                const bStagesRes = await backendPool.query('SELECT id, stage_code, stage_name FROM production_stages ORDER BY stage_order ASC');
-                backendStagesList = bStagesRes.rows;
-                if (wo.selected_stages) {
-                    try {
-                        selectedBackendStages = typeof wo.selected_stages === 'string' ? JSON.parse(wo.selected_stages) : wo.selected_stages;
-                    } catch (e) {}
-                } else {
-                    selectedBackendStages = backendStagesList;
-                }
-            } catch (err: any) {
-                logger.warn('Failed to fetch backend stages for excel:', err.message);
-            }
-        }
-
-        const isBackendStageSelected = (stage: any): boolean => {
-            if (!selectedBackendStages || selectedBackendStages.length === 0) return true;
-            const codeNorm = normalizeStageId(stage.stage_code);
-            const nameNorm = normalizeStageId(stage.stage_name);
-            const labelNorm = normalizeStageId(stage.stage_label);
-            return selectedBackendStages.some((item: any) => {
-                const s = typeof item === 'string' ? item : (item?.stage_code || item?.stage_name || '');
-                const sNorm = normalizeStageId(s);
-                return sNorm === codeNorm || sNorm === nameNorm || sNorm === labelNorm;
-            });
-        };
-
-        const activeBackendStages = backendStagesList.filter(isBackendStageSelected);
-
-        const backendHistoryBySerial: { [key: string]: any } = {};
-        if (wo.has_backend && serials.length > 0) {
-            const serialNumbers = serials.map((s: any) => s.serial_number);
-            try {
-                const bHistoryRes = await backendPool.query(`
-                    WITH latest_backend_steps AS (
-                        SELECT barcode, stage_code, station, status
-                        FROM (
-                            SELECT s.barcode, ps.stage_code, ps.stage_name as station, s.scan_result as status,
-                                   row_number() over(partition by s.barcode, ps.stage_code order by s.scanned_at desc, s.id desc) as rn
-                            FROM scans s
-                            JOIN production_stages ps ON s.stage_id = ps.id
-                            WHERE s.barcode = ANY($1)
-                        ) sub WHERE rn = 1
-                    )
-                    SELECT barcode, json_object_agg(stage_code, status) as step_statuses, json_object_agg(station, status) as station_statuses
-                    FROM latest_backend_steps
-                    GROUP BY barcode
-                `, [serialNumbers]);
-                
-                bHistoryRes.rows.forEach((row: any) => {
-                    backendHistoryBySerial[row.barcode] = row;
-                });
-            } catch (err: any) {
-                logger.warn('Failed to fetch backend history for excel:', err.message);
-            }
-        }
-
-        const smtStepNames = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
-
-        const mappedSerials = serials.map((s: any) => {
-            const res = resolveSerialSmtStatuses(
+        // Pre-resolve SMT statuses for all serials
+        const smtResolutions: Record<string, SmtStatusResolution> = {};
+        serials.forEach((s: any) => {
+            smtResolutions[s.serial_number] = resolveSerialSmtStatuses(
                 wo.sides,
                 s.step_statuses_top,
                 s.step_statuses_bottom,
                 s.step_statuses,
                 false,
-                Boolean(s.is_completed)
+                Boolean(s.is_completed),
+                wo.has_smt !== false
             );
+        });
 
-            const finalStepStatus: Record<string, string> = { ...res.step_status };
+        // Resolve Backend stages & traceability for all serials authoritatively
+        const { activeBackendStages, serialResolutions } = await resolveSerialsBackendTraceability(
+            serials,
+            wo,
+            smtResolutions
+        );
 
-            const bHistory = backendHistoryBySerial[s.serial_number] || {};
-            activeBackendStages.forEach((st: any) => {
-                const stepKey = st.stage_code;
-                let status = '-';
-                if (bHistory.step_statuses && bHistory.step_statuses[stepKey]) {
-                    status = bHistory.step_statuses[stepKey];
-                } else if (bHistory.station_statuses && bHistory.station_statuses[st.stage_name]) {
-                    status = bHistory.station_statuses[st.stage_name];
-                }
-                finalStepStatus[stepKey] = normalizeStatus(status);
-            });
+        const smtStepNames = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+
+        const mappedSerials = serials.map((s: any) => {
+            const smtRes = smtResolutions[s.serial_number];
+            const bRes = serialResolutions[s.serial_number];
+
+            const finalStepStatus: Record<string, string> = {
+                ...(smtRes?.step_status || {})
+            };
+
+            if (bRes?.backend_step_status) {
+                Object.assign(finalStepStatus, bRes.backend_step_status);
+            }
 
             return {
                 serial_number: s.serial_number,
-                current_stage: s.current_stage || 'Pending',
-                current_status: normalizeStatus(s.current_status || 'PENDING'),
-                final_status_label: res.final_status_label,
+                current_stage: bRes?.current_stage || s.current_stage || 'Pending',
+                current_status: bRes?.current_status || normalizeStatus(s.current_status || 'PENDING'),
+                final_status_label: bRes?.final_status_label || (smtRes?.is_completed ? 'Completed' : 'Pending'),
                 total_failures: Number(s.total_failures) || 0,
                 total_reworks: Number(s.total_reworks) || 0,
                 total_debugs: Number(s.total_debugs) || 0,
                 total_passed: Number(s.total_passed) || 0,
                 step_status: finalStepStatus,
+                step_status_top: smtRes?.step_status_top || {},
+                step_status_bottom: smtRes?.step_status_bottom || {},
                 created_at: s.created_at
             };
         });
@@ -1739,11 +2111,13 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         worksheet.addRow([]); // Blank spacer row
 
+        const smtTableHeaders = smtStepNames.map(s => s.toUpperCase());
+
         const tableHeaders = [
             'SERIAL NUMBER',
             'CURRENT STAGE',
             'OVERALL STATUS',
-            ...smtStepNames.map(s => s.toUpperCase()),
+            ...smtTableHeaders,
             ...activeBackendStages.map((st: any) => (st.stage_label || st.stage_name).toUpperCase()),
             'TOTAL FAILURES',
             'TOTAL REWORKS'
@@ -1767,12 +2141,37 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
 
         // Add Data Rows
         mappedSerials.forEach((s: any) => {
+            const hasSmt = wo.has_smt !== false;
+            let smtRowValues: string[] = [];
+            if (!hasSmt) {
+                smtRowValues = smtStepNames.map(() => 'N/A');
+            } else {
+                smtRowValues = smtStepNames.map(step => {
+                    const isSmtFg = step === 'SMT FG';
+                    const isRework = step === 'Rework';
+                    let top = s.step_status_top?.[step] || (isRework ? 'N/A' : 'PENDING');
+                    let bot = isSmtFg ? 'N/A' : (s.step_status_bottom?.[step] || (isRework ? 'N/A' : 'PENDING'));
+
+                    if (isDoubleSided) {
+                        if (isRework && (top === 'N/A' || top === '-') && (bot === 'N/A' || bot === '-')) return 'N/A';
+                        if (isSmtFg) return `TOP: ${top}, BOTTOM: N/A`;
+                        return `TOP: ${top}, BOTTOM: ${bot}`;
+                    } else if (isBottomOnly) {
+                        if (isRework && (bot === 'N/A' || bot === '-')) return 'N/A';
+                        return `BOTTOM: ${bot}`;
+                    } else {
+                        if (isRework && (top === 'N/A' || top === '-')) return 'N/A';
+                        return `TOP: ${top}`;
+                    }
+                });
+            }
+
             const rowData = [
                 s.serial_number,
                 s.current_stage || 'Pending',
                 s.final_status_label || 'Pending',
-                ...smtStepNames.map(step => s.step_status[step] || '-'),
-                ...activeBackendStages.map((st: any) => s.step_status[st.stage_code] || '-'),
+                ...smtRowValues,
+                ...activeBackendStages.map((st: any) => s.step_status[st.stage_code] || s.step_status[st.stage_name] || s.step_status[st.stage_label] || 'N/A'),
                 s.total_failures || 0,
                 s.total_reworks || 0
             ];
@@ -1802,14 +2201,16 @@ export const downloadWorkOrderExcel = async (req: Request, res: Response) => {
                 }
 
                 // Process Stage Statuses
-                if (colNumber >= 4 && colNumber <= (3 + smtStepNames.length + activeBackendStages.length)) {
-                    const statusText = cell.value?.toString().toUpperCase();
-                    if (statusText === 'PASS') {
-                        cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
-                    } else if (statusText === 'FAIL' || statusText === 'REWORK') {
-                        cell.font = { color: { argb: 'FFFF0000' }, bold: true, name: 'Segoe UI', size: 10 };
-                    } else if (statusText === '-') {
+                if (colNumber >= 4 && colNumber <= (3 + smtTableHeaders.length + activeBackendStages.length)) {
+                    const statusText = cell.value?.toString().toUpperCase() || '';
+                    if (statusText === 'N/A' || statusText === '-') {
                         cell.font = { color: { argb: 'FF94A3B8' }, name: 'Segoe UI', size: 10 };
+                    } else if (statusText.includes('FAIL') || statusText.includes('REWORK')) {
+                        cell.font = { color: { argb: 'FFFF0000' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (statusText.includes('PENDING')) {
+                        cell.font = { color: { argb: 'FFD97706' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (statusText.includes('PASS')) {
+                        cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
                     }
                 }
             });
@@ -1899,26 +2300,61 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
 
         const serial = serialResult.rows[0];
 
-        // 2. Fetch SMT Inspection History
+        // 2. Fetch SMT Inspection History with Side
         const historyResult = await pool.query(
-            `SELECT i.id, i.process_step, i.scanned_by, i.scanned_at, i.status, i.rework_reason
+            `SELECT i.id, i.process_step, i.scanned_by, i.scanned_at, i.status, i.rework_reason,
+                    COALESCE(ps.side, spis.side, pas.side, poas.side, rs.side, fgs.side) AS side
              FROM smt_inspections i
+             LEFT JOIN smt_printing_sessions ps ON i.printing_session_id = ps.id
+             LEFT JOIN smt_spi_sessions spis ON i.spi_session_id = spis.id
+             LEFT JOIN smt_pre_aoi_sessions pas ON i.pre_aoi_session_id = pas.id
+             LEFT JOIN smt_post_aoi_sessions poas ON i.post_aoi_session_id = poas.id
+             LEFT JOIN smt_rework_sessions rs ON i.rework_session_id = rs.id
+             LEFT JOIN smt_fg_sessions fgs ON i.fg_session_id = fgs.id
              WHERE i.serial_id = $1
-             ORDER BY i.scanned_at ASC`,
+             ORDER BY i.scanned_at ASC, i.id ASC`,
             [serial.id]
         );
 
-        const history = historyResult.rows.map((row: any) => ({
-            id: row.id,
-            source: 'SMT',
-            process_step: row.process_step || '-',
-            status: normalizeStatus(row.status || ''),
-            scanned_by: row.scanned_by || '-',
-            scanned_at: row.scanned_at,
-            remark: row.rework_reason || null
-        }));
+        const topStatuses: Record<string, string> = {};
+        const bottomStatuses: Record<string, string> = {};
+        const overallStatuses: Record<string, string> = {};
 
-        // 3. Resolve Backend Scans
+        const history = historyResult.rows.map((row: any) => {
+            const step = row.process_step || '-';
+            const st = normalizeStatus(row.status || '');
+            const side = (row.side || '').toUpperCase();
+            if (side === 'TOP') {
+                topStatuses[step] = st;
+            } else if (side === 'BOTTOM') {
+                bottomStatuses[step] = st;
+            } else {
+                overallStatuses[step] = st;
+            }
+            return {
+                id: row.id,
+                source: 'SMT',
+                process_step: step,
+                side: row.side || null,
+                status: st,
+                scanned_by: row.scanned_by || '-',
+                scanned_at: row.scanned_at,
+                remark: row.rework_reason || null
+            };
+        });
+
+        const smtResolved = resolveSerialSmtStatuses(
+            serial.sides,
+            topStatuses,
+            bottomStatuses,
+            overallStatuses,
+            false,
+            undefined,
+            serial.has_smt !== false
+        );
+
+        // 3. Resolve Backend Unit Identifiers & Scans
+        let unitSerialNumber: string | null = null;
         const candidateBarcodes = new Set<string>([serial.serial_number.toUpperCase()]);
         try {
             const mapRes = await backendPool.query(
@@ -1928,7 +2364,10 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
             );
             mapRes.rows.forEach((r: any) => {
                 if (r.barcode) candidateBarcodes.add(r.barcode.toUpperCase());
-                if (r.unit_serial_number) candidateBarcodes.add(r.unit_serial_number.toUpperCase());
+                if (r.unit_serial_number) {
+                    candidateBarcodes.add(r.unit_serial_number.toUpperCase());
+                    if (!unitSerialNumber) unitSerialNumber = r.unit_serial_number;
+                }
             });
 
             const unitsRes = await backendPool.query(
@@ -1943,36 +2382,146 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
         }
 
         let backendScanHistory: any[] = [];
-        try {
-            const bScansRes = await backendPool.query(
-                `SELECT s.id, ps.stage_code, ps.stage_name AS station, s.scan_result AS status, s.scanned_by, s.scanned_at, s.remarks
-                 FROM scans s
-                 JOIN production_stages ps ON s.stage_id = ps.id
-                 WHERE UPPER(TRIM(s.barcode)) = ANY($1)
-                 ORDER BY s.scanned_at ASC, s.id ASC`,
-                [Array.from(candidateBarcodes)]
-            );
-            backendScanHistory = bScansRes.rows.map((row: any) => ({
-                id: row.id,
-                source: 'Backend',
-                process_step: row.station || row.stage_name || row.stage_code || '-',
-                status: normalizeStatus(row.status),
-                scanned_by: row.scanned_by || '-',
-                scanned_at: row.scanned_at,
-                remark: row.remarks || null
-            }));
-        } catch (bErr: any) {
-            logger.warn('Failed to fetch backend scans:', bErr.message);
+        let backendStagesList: any[] = [];
+        let backendUnitRecord: any = null;
+
+        if (serial.has_backend) {
+            try {
+                const uRes = await backendPool.query(
+                    `SELECT u.barcode, u.current_stage_id, ps.stage_name AS current_stage_name, ps.stage_code AS current_stage_code, u.current_status 
+                     FROM units u 
+                     LEFT JOIN production_stages ps ON u.current_stage_id = ps.id
+                     WHERE UPPER(TRIM(u.barcode)) = ANY($1) 
+                     ORDER BY u.updated_at DESC LIMIT 1`,
+                    [Array.from(candidateBarcodes)]
+                );
+                if (uRes.rows.length > 0) {
+                    backendUnitRecord = uRes.rows[0];
+                }
+
+                const bStagesRes = await backendPool.query(
+                    `SELECT id, stage_code, stage_name, stage_order 
+                     FROM production_stages 
+                     WHERE is_active = TRUE AND workflow_type = 'STANDARD' 
+                     ORDER BY stage_order ASC`
+                );
+                backendStagesList = bStagesRes.rows.map((st: any) => ({
+                    ...st,
+                    stage_label: st.stage_code === 'PTH' ? 'PTH' : (st.stage_code === 'PCBA_FCT' ? 'PCBA-FCT' : st.stage_name)
+                }));
+
+                const bScansRes = await backendPool.query(
+                    `SELECT s.id, ps.stage_code, ps.stage_name AS station, ps.stage_order, s.scan_result AS status, s.scanned_by, s.scanned_at, s.remarks
+                     FROM scans s
+                     JOIN production_stages ps ON s.stage_id = ps.id
+                     WHERE UPPER(TRIM(s.barcode)) = ANY($1)
+                     ORDER BY s.scanned_at ASC, s.id ASC`,
+                    [Array.from(candidateBarcodes)]
+                );
+                backendScanHistory = bScansRes.rows.map((row: any) => ({
+                    id: row.id,
+                    source: 'Backend',
+                    stage_code: row.stage_code || null,
+                    process_step: row.station || row.stage_name || row.stage_code || '-',
+                    side: null,
+                    status: normalizeStatus(row.status),
+                    scanned_by: row.scanned_by || '-',
+                    scanned_at: row.scanned_at,
+                    remark: row.remarks || null
+                }));
+            } catch (bErr: any) {
+                logger.warn('Failed to fetch backend scans for serial excel:', bErr.message);
+            }
         }
+
+        if (backendStagesList.length === 0) {
+            backendStagesList = [
+                { stage_code: 'PTH', stage_name: 'Pre-Soldering', stage_label: 'PTH' },
+                { stage_code: 'VI', stage_name: 'Visual Inspection', stage_label: 'VI' },
+                { stage_code: 'QA', stage_name: 'Quality Assurance', stage_label: 'QA' },
+                { stage_code: 'FLASHING', stage_name: 'Flashing', stage_label: 'Flashing' },
+                { stage_code: 'PCBA_FCT', stage_name: 'PCBA FCT', stage_label: 'PCBA-FCT' },
+                { stage_code: 'ASSEMBLY', stage_name: 'Assembly', stage_label: 'Assembly' },
+                { stage_code: 'UNIT_TESTING', stage_name: 'Unit Testing', stage_label: 'Unit Testing' },
+                { stage_code: 'QI', stage_name: 'Quality Inspection', stage_label: 'QI' },
+                { stage_code: 'PACKING', stage_name: 'Packing', stage_label: 'Packing' }
+            ];
+        }
+
+        const activeBackendStages = backendStagesList.filter(st => isBackendStageSelected(st, serial.selected_stages));
+
+        const backendStepStatus: Record<string, string> = {};
+        backendStagesList.forEach((stage: any) => {
+            const isSelected = isBackendStageSelected(stage, serial.selected_stages);
+            let statusVal = 'PENDING';
+            if (!isSelected) {
+                statusVal = 'N/A';
+            } else {
+                const stageScans = backendScanHistory.filter((h: any) => {
+                    const sc = normalizeStageId(h.stage_code || '');
+                    const st = normalizeStageId(h.process_step || '');
+                    const cn = normalizeStageId(stage.stage_code);
+                    const nn = normalizeStageId(stage.stage_name);
+                    const ln = normalizeStageId(stage.stage_label || '');
+                    return sc === cn || st === cn || st === nn || (ln && st === ln) ||
+                        (cn === 'PTH' && (sc === 'PRESOLDERING' || st === 'PRESOLDERING')) ||
+                        (cn === 'QA' && (sc === 'QUALITYASSURANCE' || st === 'QUALITYASSURANCE')) ||
+                        (cn === 'VI' && (sc === 'VISUALINSPECTION' || st === 'VISUALINSPECTION')) ||
+                        (cn === 'QI' && (sc === 'QUALITYINSPECTION' || st === 'QUALITYINSPECTION')) ||
+                        (cn === 'PCBA_FCT' && (sc === 'PCBAFCT' || st === 'PCBAFCT')) ||
+                        (cn === 'UNIT_TESTING' && (sc === 'UNITTESTING' || st === 'UNITTESTING'));
+                });
+                if (stageScans.length > 0) {
+                    const latest = stageScans[stageScans.length - 1];
+                    const rawSt = latest.status;
+                    statusVal = (rawSt === 'PASS' || rawSt === 'ACCEPTED') ? 'PASS' : (rawSt === 'FAIL' || rawSt === 'FAILED') ? 'FAIL' : rawSt;
+                } else {
+                    statusVal = 'PENDING';
+                }
+            }
+            backendStepStatus[stage.stage_code] = statusVal;
+            if (stage.stage_name) backendStepStatus[stage.stage_name] = statusVal;
+            if (stage.stage_label) backendStepStatus[stage.stage_label] = statusVal;
+            if (stage.stage_code === 'PTH') {
+                backendStepStatus['Pre-Soldering'] = statusVal;
+                backendStepStatus['PTH'] = statusVal;
+            }
+            if (stage.stage_code === 'PCBA_FCT') {
+                backendStepStatus['PCBA FCT'] = statusVal;
+                backendStepStatus['PCBA-FCT'] = statusVal;
+                backendStepStatus['PCBA_FCT'] = statusVal;
+            }
+        });
 
         // Combined History in Chronological Order
         const combinedHistory = [...history, ...backendScanHistory].sort(
             (a, b) => new Date(a.scanned_at).getTime() - new Date(b.scanned_at).getTime()
         );
 
+        // Authoritative Current Stage & Status
         let currentStage = 'Pending';
         let currentStatus = 'PENDING';
-        if (combinedHistory.length > 0) {
+
+        if (backendScanHistory.length > 0) {
+            const lastBScan = backendScanHistory[backendScanHistory.length - 1];
+            const lastBStation = lastBScan.process_step;
+            if (lastBScan.status === 'REWORK' || lastBScan.status === 'FAIL') {
+                currentStage = lastBStation;
+                currentStatus = lastBScan.status;
+            } else if (lastBStation.toUpperCase() === 'PACKING' && (lastBScan.status === 'PASS' || lastBScan.status === 'ACCEPTED')) {
+                currentStage = 'Packing';
+                currentStatus = 'PASS';
+            } else if (backendUnitRecord?.current_status === 'COMPLETED') {
+                currentStage = 'Packing';
+                currentStatus = 'PASS';
+            } else if (backendUnitRecord?.current_stage_name) {
+                currentStage = backendUnitRecord.current_stage_name;
+                currentStatus = backendUnitRecord.current_status || lastBScan.status;
+            } else {
+                currentStage = lastBStation;
+                currentStatus = lastBScan.status;
+            }
+        } else if (combinedHistory.length > 0) {
             const lastRecord = combinedHistory[combinedHistory.length - 1];
             currentStage = lastRecord.process_step;
             currentStatus = lastRecord.status;
@@ -1981,6 +2530,32 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
         const totalFailures = combinedHistory.filter(h => h.status === 'REWORK' || h.status === 'FAIL').length;
         const totalReworks = combinedHistory.filter(h => h.process_step === 'Rework' || h.status === 'REWORK').length;
         const totalPassed = combinedHistory.filter(h => h.status === 'PASS').length;
+
+        // Authoritative Overall Status
+        const anyFail = combinedHistory.some(h => h.status === 'FAIL');
+        const anyRework = combinedHistory.some(h => h.status === 'REWORK' || h.process_step === 'Rework');
+        let overallStatusLabel = 'PENDING';
+
+        if (anyRework) {
+            overallStatusLabel = 'IN REWORK';
+        } else if (anyFail) {
+            overallStatusLabel = 'FAILED';
+        } else if (serial.has_backend) {
+            const allActiveBackendPassed = activeBackendStages.length > 0 && activeBackendStages.every((st: any) => backendStepStatus[st.stage_code] === 'PASS');
+            if (allActiveBackendPassed && smtResolved.is_completed) {
+                overallStatusLabel = 'COMPLETED';
+                currentStatus = 'PASS';
+            } else {
+                overallStatusLabel = 'IN PRODUCTION';
+            }
+        } else {
+            if (smtResolved.is_completed) {
+                overallStatusLabel = 'COMPLETED';
+                currentStatus = 'PASS';
+            } else {
+                overallStatusLabel = 'IN PRODUCTION';
+            }
+        }
 
         // Build Excel Workbook
         const ExcelJS = require('exceljs');
@@ -1997,18 +2572,20 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
         };
 
         const metadata = [
-            { label: 'Serial Number:', val: serial.serial_number },
+            { label: 'PCB Barcode / Serial Number:', val: serial.serial_number },
+            { label: 'Unit Serial Number:', val: unitSerialNumber || '-' },
             { label: 'Work Order ID:', val: serial.work_order_id },
             { label: 'Product Name:', val: serial.product_name || '-' },
+            { label: 'Customer / Model:', val: `${serial.customer_name || ''} ${serial.model_name || ''}`.trim() || '-' },
             { label: 'Line ID:', val: serial.line_id || '-' },
             { label: 'Process Selection:', val: serial.has_smt && serial.has_backend ? 'SMT + Backend' : serial.has_smt ? 'SMT' : 'Backend' },
             { label: 'Sides:', val: serial.sides || '-' },
             { label: 'Current Stage:', val: currentStage },
-            { label: 'Overall Status:', val: currentStatus },
+            { label: 'Overall Status:', val: overallStatusLabel },
             { label: 'Total Stages Passed:', val: totalPassed },
             { label: 'Rework Events:', val: totalReworks },
             { label: 'Total Failures:', val: totalFailures },
-            { label: 'Report Generated:', val: new Date().toLocaleString() }
+            { label: 'Report Generated:', val: new Date().toLocaleString('en-IN') }
         ];
 
         metadata.forEach((item, index) => {
@@ -2021,8 +2598,100 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
 
         worksheet.addRow([]); // Blank spacer
 
-        const tableHeaders = ['#', 'SOURCE', 'PROCESS STEP', 'STATUS', 'SCANNED BY', 'SCANNED AT', 'REMARK'];
-        const headerRow = worksheet.addRow(tableHeaders);
+        // ── Section 1: SMT Stage Traceability Summary (TOP / BOTTOM Breakout) ──
+        const smtSummaryHeaders = ['SMT STAGE', 'TOP SIDE STATUS', 'BOTTOM SIDE STATUS', 'OVERALL STATUS'];
+        const smtHeaderRow = worksheet.addRow(smtSummaryHeaders);
+        smtHeaderRow.height = 22;
+        const smtHeaderFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
+        smtHeaderRow.eachCell((cell: any) => {
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI', size: 10 };
+            cell.fill = smtHeaderFill;
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = borderStyle;
+        });
+
+        const smtStagesList = ['Printing', 'SPI', 'Pre AOI', 'Post AOI', 'Rework', 'SMT FG'];
+        smtStagesList.forEach((stage: string) => {
+            const isSmtFg = stage === 'SMT FG';
+            let topStatus = 'N/A';
+            let bottomStatus = 'N/A';
+            let overallStatus = 'N/A';
+
+            if (serial.has_smt !== false) {
+                topStatus = smtResolved.step_status_top[stage] || (stage === 'Rework' ? 'N/A' : 'PENDING');
+                bottomStatus = isSmtFg ? 'N/A' : (smtResolved.step_status_bottom[stage] || (stage === 'Rework' ? 'N/A' : 'PENDING'));
+                overallStatus = computeOverallStageStatus(topStatus, bottomStatus);
+            }
+
+            const rowData = [stage, topStatus, bottomStatus, overallStatus];
+            const dataRow = worksheet.addRow(rowData);
+            dataRow.height = 18;
+
+            dataRow.eachCell((cell: any, colIdx: number) => {
+                cell.font = { name: 'Segoe UI', size: 10 };
+                cell.border = borderStyle;
+                cell.alignment = { horizontal: colIdx === 1 ? 'left' : 'center', vertical: 'middle' };
+                if (colIdx > 1) {
+                    const st = cell.value ? cell.value.toString().toUpperCase() : '';
+                    if (st === 'PASS' || (st.includes('PASS') && !st.includes('PENDING') && !st.includes('FAIL'))) {
+                        cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (st === 'FAIL' || st.includes('FAIL') || st === 'REWORK' || st.includes('REWORK')) {
+                        cell.font = { color: { argb: 'FFFF0000' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (st === 'PENDING' || st.includes('PENDING')) {
+                        cell.font = { color: { argb: 'FFD97706' }, bold: true, name: 'Segoe UI', size: 10 };
+                    } else if (st === 'N/A') {
+                        cell.font = { color: { argb: 'FF808080' }, name: 'Segoe UI', size: 10 };
+                    }
+                }
+            });
+        });
+
+        worksheet.addRow([]); // Blank spacer
+
+        // ── Section 2: Backend Pipeline Stage Summary (if applicable) ──
+        if (serial.has_backend && backendStagesList.length > 0) {
+            const bSummaryHeaders = ['BACKEND STAGE', 'STATUS'];
+            const bHeaderRow = worksheet.addRow(bSummaryHeaders);
+            bHeaderRow.height = 22;
+            const bHeaderFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+            bHeaderRow.eachCell((cell: any) => {
+                cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI', size: 10 };
+                cell.fill = bHeaderFill;
+                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                cell.border = borderStyle;
+            });
+
+            backendStagesList.forEach((stage: any) => {
+                const bStatus = backendStepStatus[stage.stage_code] || backendStepStatus[stage.stage_name] || backendStepStatus[stage.stage_label] || 'N/A';
+                const rowData = [stage.stage_label || stage.stage_name, bStatus];
+                const dataRow = worksheet.addRow(rowData);
+                dataRow.height = 18;
+
+                dataRow.eachCell((cell: any, colIdx: number) => {
+                    cell.font = { name: 'Segoe UI', size: 10 };
+                    cell.border = borderStyle;
+                    cell.alignment = { horizontal: colIdx === 1 ? 'left' : 'center', vertical: 'middle' };
+                    if (colIdx === 2) {
+                        const st = bStatus.toUpperCase();
+                        if (st === 'PASS') {
+                            cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
+                        } else if (st === 'FAIL' || st === 'REWORK') {
+                            cell.font = { color: { argb: 'FFFF0000' }, bold: true, name: 'Segoe UI', size: 10 };
+                        } else if (st === 'PENDING') {
+                            cell.font = { color: { argb: 'FFD97706' }, bold: true, name: 'Segoe UI', size: 10 };
+                        } else if (st === 'N/A') {
+                            cell.font = { color: { argb: 'FF808080' }, name: 'Segoe UI', size: 10 };
+                        }
+                    }
+                });
+            });
+
+            worksheet.addRow([]); // Blank spacer
+        }
+
+        // ── Section 3: Chronological Audit Scan Logs ──
+        const logHeaders = ['#', 'SOURCE', 'PROCESS STEP', 'SIDE', 'STATUS', 'OPERATOR', 'DATE & TIME', 'REMARK'];
+        const headerRow = worksheet.addRow(logHeaders);
         headerRow.height = 24;
 
         headerRow.eachCell((cell: any) => {
@@ -2037,9 +2706,10 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
                 idx + 1,
                 row.source,
                 row.process_step,
+                row.side || '-',
                 row.status,
                 row.scanned_by,
-                row.scanned_at ? new Date(row.scanned_at).toLocaleString() : '-',
+                row.scanned_at ? new Date(row.scanned_at).toLocaleString('en-IN') : '-',
                 row.remark || '-'
             ];
             const dataRow = worksheet.addRow(rowData);
@@ -2048,12 +2718,12 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
             dataRow.eachCell((cell: any, colNumber: number) => {
                 cell.font = { name: 'Segoe UI', size: 10 };
                 cell.border = borderStyle;
-                cell.alignment = { horizontal: colNumber === 1 || colNumber === 2 || colNumber === 4 ? 'center' : 'left', vertical: 'middle' };
+                cell.alignment = { horizontal: colNumber === 1 || colNumber === 2 || colNumber === 4 || colNumber === 5 ? 'center' : 'left', vertical: 'middle' };
 
                 if (colNumber === 2) {
                     cell.font = { bold: true, color: { argb: row.source === 'SMT' ? 'FF2563EB' : 'FF059669' }, name: 'Segoe UI', size: 10 };
                 }
-                if (colNumber === 4) {
+                if (colNumber === 5) {
                     const st = row.status.toUpperCase();
                     if (st === 'PASS') {
                         cell.font = { color: { argb: 'FF00B050' }, bold: true, name: 'Segoe UI', size: 10 };
@@ -2067,16 +2737,17 @@ export const downloadSerialNumberExcel = async (req: Request, res: Response) => 
         worksheet.columns.forEach((column: any) => {
             let maxLen = 0;
             column.eachCell!({ includeEmpty: true }, (cell: any) => {
-                if (cell.row && (cell.row as any).number <= 13) return;
+                if (cell.row && (cell.row as any).number <= 15) return;
                 const len = cell.value ? cell.value.toString().length : 0;
                 if (len > maxLen) maxLen = len;
             });
             column.width = maxLen < 15 ? 15 : maxLen + 5;
         });
 
-        worksheet.getColumn(1).width = 8;
-        worksheet.getColumn(2).width = 12;
+        worksheet.getColumn(1).width = 10;
+        worksheet.getColumn(2).width = 16;
         worksheet.getColumn(3).width = 25;
+        worksheet.getColumn(4).width = 15;
 
         const safeSn = inputValue.replace(/[^a-zA-Z0-9_-]/g, '_');
         const nowStr = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
