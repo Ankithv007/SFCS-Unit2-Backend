@@ -22,7 +22,6 @@ const RRH_TABLES = [
     'rrh_excel_imports',
     'rrh_excel_sheets',
     'rrh_excel_rows',
-    'rrh_excel_cells',
     'rrh_excel_merged_cells',
     'rrh_inventory',
     'rrh_existing_inventory',

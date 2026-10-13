@@ -60,7 +60,7 @@ const getRangeBounds = (range: string): { startColumn: number; startRow: number;
     // e.g. "A1:B2" -> { startColumn: 1, startRow: 1, endColumn: 2, endRow: 2 }
     const match = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
     if (!match) return null;
-    
+
     const colToNum = (col: string) => {
         let num = 0;
         for (let i = 0; i < col.length; i++) {
@@ -93,7 +93,7 @@ export const calculateFileHash = async (filePath: string): Promise<{ hash: strin
 
 export const parseExcelFile = async (filePath: string): Promise<ParsedSheet> => {
     logger.info(`Starting dynamic parse of ${filePath}`);
-    
+
     // Calculate SHA-256 hash and file size
     const { hash: fileHash, size: fileSize } = await calculateFileHash(filePath);
 

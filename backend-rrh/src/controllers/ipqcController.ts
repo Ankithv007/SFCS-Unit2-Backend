@@ -98,7 +98,7 @@ export const getEligibleIpqcWorkOrders = async (_req: Request, res: Response) =>
                 w.status,
                 w.created_at,
                 (
-                    SELECT COUNT(*)::int
+                    SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))))::int
                     FROM rrh_ivi_inspections ivi
                     JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
                     WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM(w.work_order_id))
@@ -107,13 +107,13 @@ export const getEligibleIpqcWorkOrders = async (_req: Request, res: Response) =>
                       AND ivi.is_deleted = false
                 ) as ivi_passed_count
             FROM rrh_work_orders w
-            WHERE w.status != 'Completed'
+            WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
               AND NOT EXISTS (
                 SELECT 1
                 FROM rrh_ipqc_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
-                  AND s.status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+                  AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
             )
             ORDER BY w.created_at DESC, w.id DESC
         `);
@@ -144,7 +144,7 @@ export const getWorkOrderIviDetails = async (req: Request, res: Response) => {
         );
 
         const countRes = await pool.query(
-            `SELECT COUNT(*)::int as count
+            `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))))::int as count
              FROM rrh_ivi_inspections ivi
              JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
              WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
@@ -499,37 +499,69 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
                     OR ivi.tejas_obd_no ILIKE $${queryParams.length}
                     OR ivi.bat_lot_no ILIKE $${queryParams.length}
                     OR ivi.rrh_unit ILIKE $${queryParams.length}
-                    OR COALESCE(ivi.sl_no, ins.sl_no, ri.sl_no) ILIKE $${queryParams.length}
+                    OR ivi.sl_no ILIKE $${queryParams.length}
                 )
             `;
         }
 
+        // Base CTE to get the latest IVI inspection per physical unit
+        const cteQuery = `
+            WITH latest_ivi AS (
+                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))))
+                    ivi.id as ivi_id,
+                    COALESCE(
+                        ivi.sl_no,
+                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE ins.id = ivi.inward_scan_id LIMIT 1),
+                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number)) LIMIT 1),
+                        (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))) LIMIT 1)
+                    ) as sl_no,
+                    ivi.work_order_id,
+                    ivi.serial_number,
+                    COALESCE(ivi.band_serial_no, ivi.serial_number) as band_serial_no,
+                    ivi.physical_tpn,
+                    ivi.band,
+                    ivi.duplexer_main,
+                    ivi.duplexer_part_no,
+                    ivi.rrh_unit,
+                    ivi.status as ivi_status,
+                    ivi.tejas_dc_no,
+                    ivi.tejas_obd_no,
+                    ivi.bat_lot_no as lot,
+                    ivi.bat_lot_no,
+                    ivi.remarks,
+                    ivi.scanned_at as ivi_scanned_at,
+                    ivi.passed_to_next_stage,
+                    ivi.is_deleted
+                FROM rrh_ivi_inspections ivi
+                JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
+                WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
+                  AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
+                  AND COALESCE(ivi.route, 'ECN') = 'ECN'
+                  AND ivi.is_deleted = false
+                ORDER BY UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))), ivi.scanned_at DESC, ivi.id DESC
+            )
+        `;
+
         // Count total remaining units
         const countQuery = `
+            ${cteQuery}
             SELECT COUNT(*)::int as total
-            FROM rrh_ivi_inspections ivi
-            JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
-            LEFT JOIN rrh_inward_scans ins ON ins.id = ivi.inward_scan_id
-                OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
-            LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
-            WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
-              AND COALESCE(ivi.route, 'ECN') = 'ECN'
-              AND NOT EXISTS (
-                  SELECT 1 FROM rrh_ipqc_inspections ipqc
-                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
-                    AND ipqc.is_deleted = false
-                    AND (
-                        ipqc.ivi_inspection_id = ivi.id
-                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
-                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
-                        OR (ivi.band_serial_no IS NOT NULL AND (
-                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
-                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
-                        ))
-                    )
-              )
-              ${searchClause}
+            FROM latest_ivi ivi
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rrh_ipqc_inspections ipqc
+                WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                  AND ipqc.is_deleted = false
+                  AND (
+                      ipqc.ivi_inspection_id = ivi.ivi_id
+                      OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
+                      OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
+                      OR (ivi.band_serial_no IS NOT NULL AND (
+                          UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                          OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                      ))
+                  )
+            )
+            ${searchClause}
         `;
 
         const countRes = await pool.query(countQuery, queryParams);
@@ -537,49 +569,42 @@ export const getRemainingIviMasterData = async (req: Request, res: Response) => 
 
         // Fetch paginated data
         const dataQuery = `
+            ${cteQuery}
             SELECT 
-                ivi.id as ivi_id,
-                COALESCE(ivi.sl_no, ins.sl_no, ri.sl_no) as sl_no,
+                ivi.ivi_id,
+                ivi.sl_no,
                 ivi.work_order_id,
                 ivi.serial_number,
-                COALESCE(ivi.band_serial_no, ivi.serial_number) as band_serial_no,
+                ivi.band_serial_no,
                 ivi.physical_tpn,
                 ivi.band,
                 ivi.duplexer_main,
                 ivi.duplexer_part_no,
                 ivi.rrh_unit,
-                ivi.status as ivi_status,
+                ivi.ivi_status,
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
-                ivi.bat_lot_no as lot,
+                ivi.lot,
                 ivi.bat_lot_no,
                 ivi.remarks,
-                ivi.scanned_at as ivi_scanned_at
-            FROM rrh_ivi_inspections ivi
-            JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
-            LEFT JOIN rrh_inward_scans ins ON ins.id = ivi.inward_scan_id
-                OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
-            LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
-            WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
-              AND COALESCE(ivi.route, 'ECN') = 'ECN'
-              AND ivi.is_deleted = false
-              AND NOT EXISTS (
-                  SELECT 1 FROM rrh_ipqc_inspections ipqc
-                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
-                    AND ipqc.is_deleted = false
-                    AND (
-                        ipqc.ivi_inspection_id = ivi.id
-                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
-                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
-                        OR (ivi.band_serial_no IS NOT NULL AND (
-                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
-                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
-                        ))
-                    )
-              )
-              ${searchClause}
-            ORDER BY ivi.scanned_at DESC, ivi.id DESC
+                ivi.ivi_scanned_at
+            FROM latest_ivi ivi
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rrh_ipqc_inspections ipqc
+                WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                  AND ipqc.is_deleted = false
+                  AND (
+                      ipqc.ivi_inspection_id = ivi.ivi_id
+                      OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
+                      OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
+                      OR (ivi.band_serial_no IS NOT NULL AND (
+                          UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                          OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                      ))
+                  )
+            )
+            ${searchClause}
+            ORDER BY ivi.ivi_scanned_at DESC, ivi.ivi_id DESC
             LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
         `;
 
@@ -617,7 +642,12 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
         let iviQuery = `
             SELECT 
                 ivi.id as ivi_id,
-                COALESCE(ivi.sl_no, ins.sl_no, ri.sl_no) as sl_no,
+                COALESCE(
+                    ivi.sl_no,
+                    (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE ins.id = ivi.inward_scan_id LIMIT 1),
+                    (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number)) LIMIT 1),
+                    (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))) LIMIT 1)
+                ) as sl_no,
                 ivi.work_order_id,
                 ivi.serial_number,
                 COALESCE(ivi.band_serial_no, ivi.serial_number) as band_serial_no,
@@ -635,9 +665,6 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                 ivi.remarks as ivi_remarks
             FROM rrh_ivi_inspections ivi
             JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
-            LEFT JOIN rrh_inward_scans ins ON ins.id = ivi.inward_scan_id
-                OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
-            LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
             WHERE (
                 UPPER(TRIM(ivi.serial_number)) = $1
                 OR UPPER(TRIM(COALESCE(ivi.band_serial_no, ''))) = $1
@@ -1298,42 +1325,57 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
         const woId = sessionRes.rows[0].work_order_id;
 
         const dataRes = await pool.query(
-            `SELECT 
-                ivi.id as ivi_id,
-                COALESCE(ivi.sl_no, ins.sl_no, ri.sl_no) as sl_no,
+            `WITH latest_ivi AS (
+                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))))
+                    ivi.id as ivi_id,
+                    COALESCE(
+                        ivi.sl_no,
+                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE ins.id = ivi.inward_scan_id LIMIT 1),
+                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number)) LIMIT 1),
+                        (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))) LIMIT 1)
+                    ) as sl_no,
+                    ivi.physical_tpn,
+                    COALESCE(ivi.band_serial_no, ivi.serial_number) as band_serial_no,
+                    ivi.duplexer_main,
+                    ivi.duplexer_part_no,
+                    ivi.rrh_unit,
+                    ivi.status as ivi_status,
+                    ivi.tejas_dc_no,
+                    ivi.bat_lot_no as lot,
+                    ivi.remarks,
+                    ivi.scanned_at as ivi_scanned_at
+                FROM rrh_ivi_inspections ivi
+                JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
+                WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
+                  AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
+                  AND COALESCE(ivi.route, 'ECN') = 'ECN'
+                  AND ivi.is_deleted = false
+                ORDER BY UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))), ivi.scanned_at DESC, ivi.id DESC
+            )
+            SELECT 
+                ivi.ivi_id,
+                ivi.sl_no,
                 ivi.physical_tpn,
-                COALESCE(ivi.band_serial_no, ivi.serial_number) as band_serial_no,
+                ivi.band_serial_no,
                 ivi.duplexer_main,
                 ivi.duplexer_part_no,
                 ivi.rrh_unit,
-                ivi.status as ivi_status,
+                ivi.ivi_status,
                 ivi.tejas_dc_no,
-                ivi.bat_lot_no as lot,
+                ivi.lot,
                 ivi.remarks
-            FROM rrh_ivi_inspections ivi
-            JOIN rrh_ivi_sessions ivis ON ivis.id = ivi.session_id AND ivis.is_deleted = false
-            LEFT JOIN rrh_inward_scans ins ON ins.id = ivi.inward_scan_id
-                OR (ivi.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(ivi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(ivi.serial_number))))
-            LEFT JOIN rrh_inventory ri ON (ri.id = ins.matched_inventory_id OR ri.band_serial_no = ivi.band_serial_no)
-            WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
-              AND (ivi.status = 'PASS' OR (ivi.status = 'FAIL' AND ivi.passed_to_next_stage = true))
-              AND COALESCE(ivi.route, 'ECN') = 'ECN'
-              AND ivi.is_deleted = false
-              AND NOT EXISTS (
-                  SELECT 1 FROM rrh_ipqc_inspections ipqc
-                  WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
-                    AND ipqc.is_deleted = false
-                    AND (
-                        ipqc.ivi_inspection_id = ivi.id
-                        OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.serial_number))
-                        OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.serial_number))
-                        OR (ivi.band_serial_no IS NOT NULL AND (
-                            UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
-                            OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
-                        ))
-                    )
-              )
-            ORDER BY ivi.scanned_at DESC, ivi.id DESC`,
+            FROM latest_ivi ivi
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rrh_ipqc_inspections ipqc
+                WHERE (ipqc.session_id = $2 OR UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1)))
+                  AND ipqc.is_deleted = false
+                  AND (
+                      ipqc.ivi_inspection_id = ivi.ivi_id
+                      OR UPPER(TRIM(ipqc.serial_number)) = UPPER(TRIM(ivi.band_serial_no))
+                      OR UPPER(TRIM(COALESCE(ipqc.band_serial_no, ''))) = UPPER(TRIM(ivi.band_serial_no))
+                  )
+            )
+            ORDER BY ivi.ivi_scanned_at DESC, ivi.ivi_id DESC`,
             [woId, sessionId]
         );
 

@@ -97,12 +97,13 @@ export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
                 w.status,
                 w.created_at
             FROM rrh_work_orders w
-            WHERE NOT EXISTS (
+            WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
+              AND NOT EXISTS (
                 SELECT 1
                 FROM rrh_ivi_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
-                  AND s.status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+                  AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
             )
             ORDER BY w.created_at DESC, w.id DESC
         `);

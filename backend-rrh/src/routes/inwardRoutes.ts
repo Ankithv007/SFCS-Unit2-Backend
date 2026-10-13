@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { 
-    createInwardSession, 
-    getInwardSessions, 
-    getSessionById, 
+import {
+    createInwardSession,
+    getInwardSessions,
+    getSessionById,
     updateSessionStatus,
     checkBottom,
     downloadSessionFile,

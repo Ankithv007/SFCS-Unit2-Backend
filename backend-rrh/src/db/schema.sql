@@ -100,22 +100,17 @@ CREATE TABLE IF NOT EXISTS rrh_excel_rows (
     id SERIAL PRIMARY KEY,
     sheet_id INTEGER NOT NULL REFERENCES rrh_excel_sheets(id) ON DELETE CASCADE,
     row_number INTEGER NOT NULL,
-    row_type VARCHAR(50) -- HEADER, SUB_HEADER, DATA, BLANK
+    row_type VARCHAR(50), -- HEADER, SUB_HEADER, DATA, BLANK
+    cells JSONB NOT NULL DEFAULT '[]'::jsonb,
+    search_text TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_rrh_excel_rows_sheet_num ON rrh_excel_rows(sheet_id, row_number);
-
-CREATE TABLE IF NOT EXISTS rrh_excel_cells (
-    id SERIAL PRIMARY KEY,
-    row_id INTEGER NOT NULL REFERENCES rrh_excel_rows(id) ON DELETE CASCADE,
-    column_number INTEGER NOT NULL,
-    column_letter VARCHAR(10),
-    raw_value TEXT,
-    display_value TEXT,
-    data_type VARCHAR(50)
-);
-
-CREATE INDEX IF NOT EXISTS idx_rrh_excel_cells_row_col ON rrh_excel_cells(row_id, column_number);
+CREATE INDEX IF NOT EXISTS idx_rrh_excel_rows_sheet_row_type ON rrh_excel_rows(sheet_id, row_type);
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_rrh_excel_rows_search_trgm ON rrh_excel_rows USING gin (search_text gin_trgm_ops);
+ALTER TABLE rrh_excel_rows ALTER COLUMN cells SET STORAGE EXTENDED;
+ALTER TABLE rrh_excel_rows ALTER COLUMN search_text SET STORAGE EXTENDED;
 
 CREATE TABLE IF NOT EXISTS rrh_excel_merged_cells (
     id SERIAL PRIMARY KEY,
@@ -159,7 +154,6 @@ BEGIN
     ALTER TABLE rrh_inventory ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_rrh_inventory_import_id ON rrh_inventory(import_id);
 CREATE INDEX IF NOT EXISTS idx_rrh_inventory_import_band_ci ON rrh_inventory(import_id, UPPER(TRIM(band_serial_no)));
 CREATE INDEX IF NOT EXISTS idx_rrh_inventory_import_sl_ci ON rrh_inventory(import_id, UPPER(TRIM(sl_no)));
 CREATE INDEX IF NOT EXISTS idx_rrh_inventory_physical_tpn ON rrh_inventory(physical_tpn);
@@ -206,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_rrh_replaced_inv_id ON rrh_replaced_inventory(inv
 CREATE TABLE IF NOT EXISTS rrh_inward_sessions (
     id SERIAL PRIMARY KEY,
     work_order_id VARCHAR(100) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'In Progress' CHECK (status IN ('In Progress', 'Completed', 'Closed', 'CANCELLED')),
+    status VARCHAR(50) NOT NULL DEFAULT 'In Progress' CHECK (status IN ('Pending', 'In Progress', 'Paused', 'Completed', 'Closed', 'CANCELLED', 'Aborted', 'ARCHIVED')),
     duplicate_scan_count INTEGER NOT NULL DEFAULT 0,
     created_by VARCHAR(100),
     created_by_name VARCHAR(100),
@@ -251,15 +245,14 @@ BEGIN
     ALTER TABLE rrh_inward_scans ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
 END $$;
 
+CREATE INDEX IF NOT EXISTS idx_inward_sessions_exact_wo ON rrh_inward_sessions(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_inward_scans_exact_wo ON rrh_inward_scans(work_order_id) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_inward_scans_session_scanned ON rrh_inward_scans(rrh_inward_session_id, scanned_at DESC, id DESC) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_inward_scans_wo_status ON rrh_inward_scans(work_order_id, status) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_inward_scans_wo_serial_active ON rrh_inward_scans(work_order_id, UPPER(TRIM(serial_number))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_inward_scans_wo_band_active ON rrh_inward_scans(work_order_id, UPPER(TRIM(band_serial_no))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_inward_scans_serial_ci ON rrh_inward_scans(UPPER(TRIM(serial_number))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_inward_scans_band_serial_ci ON rrh_inward_scans(UPPER(TRIM(band_serial_no))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_inward_scans_sl_no ON rrh_inward_scans(sl_no);
 CREATE INDEX IF NOT EXISTS idx_inward_scans_matched_inv ON rrh_inward_scans(matched_inventory_id);
-CREATE INDEX IF NOT EXISTS idx_inward_scans_wo_ci ON rrh_inward_scans(UPPER(TRIM(work_order_id))) WHERE is_deleted = false;
 
 CREATE TABLE IF NOT EXISTS rrh_inward_session_master_consumption (
     id SERIAL PRIMARY KEY,
@@ -279,7 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_inward_consumption_scan_id ON rrh_inward_session_
 CREATE TABLE IF NOT EXISTS rrh_ivi_sessions (
     id SERIAL PRIMARY KEY,
     work_order_id VARCHAR(100) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'In Progress' CHECK (status IN ('In Progress', 'Completed', 'Closed', 'CANCELLED')),
+    status VARCHAR(50) NOT NULL DEFAULT 'In Progress' CHECK (status IN ('In Progress', 'Completed', 'Closed', 'CANCELLED', 'Aborted', 'ARCHIVED')),
     created_by VARCHAR(100),
     created_by_name VARCHAR(100),
     updated_by VARCHAR(100),
@@ -336,21 +329,30 @@ CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session_status_scanned ON rrh
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session_band_ci ON rrh_ivi_inspections(session_id, UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_wo_serial_active ON rrh_ivi_inspections(work_order_id, UPPER(TRIM(serial_number))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_wo_band_active ON rrh_ivi_inspections(work_order_id, UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_serial_ci ON rrh_ivi_inspections(UPPER(TRIM(serial_number))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_band_serial_ci ON rrh_ivi_inspections(UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_sl_no ON rrh_ivi_inspections(sl_no);
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_inward_scan_id ON rrh_ivi_inspections(inward_scan_id);
-CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_wo_ci ON rrh_ivi_inspections(UPPER(TRIM(work_order_id))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ivi_image_urls_gin ON rrh_ivi_inspections USING GIN (image_urls);
+CREATE INDEX IF NOT EXISTS idx_ivi_sessions_exact_wo ON rrh_ivi_sessions(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_ivi_inspections_exact_wo ON rrh_ivi_inspections(work_order_id) WHERE is_deleted = false;
 
 -- Duplicate-scan guard: exactly one active inspection per serial per session in IVI
 DO $$
 BEGIN
+    WITH ivi_duplicates AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY session_id, UPPER(TRIM(serial_number))
+                   ORDER BY scanned_at DESC, id DESC
+               ) as rn
+        FROM rrh_ivi_inspections
+        WHERE is_deleted = false
+    )
+    UPDATE rrh_ivi_inspections
+    SET is_deleted = true
+    WHERE id IN (SELECT id FROM ivi_duplicates WHERE rn > 1);
+
     CREATE UNIQUE INDEX IF NOT EXISTS uq_rrh_ivi_active_serial
         ON rrh_ivi_inspections(session_id, UPPER(TRIM(serial_number)))
         WHERE is_deleted = false;
-EXCEPTION WHEN unique_violation THEN
-    RAISE NOTICE 'uq_rrh_ivi_active_serial skipped: duplicate active IVI rows exist, clean them up first';
 END $$;
 
 -- ----------------------------------------------------------------------------
@@ -402,7 +404,7 @@ CREATE TABLE IF NOT EXISTS rrh_ipqc_inspections (
     checkpoints JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(checkpoints) = 'array'),
     is_reinspected BOOLEAN NOT NULL DEFAULT false,
     defect_fixed TEXT,
-    sl_no VARCHAR(100),
+    sl_no VARCHAR(255),
     is_deleted BOOLEAN NOT NULL DEFAULT false
 );
 
@@ -411,26 +413,35 @@ BEGIN
     ALTER TABLE rrh_ipqc_inspections ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
 END $$;
 
+CREATE INDEX IF NOT EXISTS idx_ipqc_sessions_exact_wo ON rrh_ipqc_sessions(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_ipqc_inspections_exact_wo ON rrh_ipqc_inspections(work_order_id) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_session_status_scanned ON rrh_ipqc_inspections(session_id, status, scanned_at DESC, id DESC) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_session_band_ci ON rrh_ipqc_inspections(session_id, UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_wo_serial_active ON rrh_ipqc_inspections(work_order_id, UPPER(TRIM(serial_number))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_wo_band_active ON rrh_ipqc_inspections(work_order_id, UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_serial_ci ON rrh_ipqc_inspections(UPPER(TRIM(serial_number))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_band_serial_ci ON rrh_ipqc_inspections(UPPER(TRIM(COALESCE(band_serial_no, '')))) WHERE is_deleted = false;
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_phys_serial ON rrh_ipqc_inspections(physical_serial_number);
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_sl_no ON rrh_ipqc_inspections(sl_no);
 CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_ivi_id ON rrh_ipqc_inspections(ivi_inspection_id);
-CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_inspections_wo_ci ON rrh_ipqc_inspections(UPPER(TRIM(work_order_id))) WHERE is_deleted = false;
-CREATE INDEX IF NOT EXISTS idx_rrh_ipqc_checkpoints_gin ON rrh_ipqc_inspections USING GIN (checkpoints);
 
 -- Duplicate-scan guard: exactly one active inspection per serial per session in IPQC
 DO $$
 BEGIN
+    WITH ipqc_duplicates AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY session_id, UPPER(TRIM(serial_number))
+                   ORDER BY scanned_at DESC, id DESC
+               ) as rn
+        FROM rrh_ipqc_inspections
+        WHERE is_deleted = false
+    )
+    UPDATE rrh_ipqc_inspections
+    SET is_deleted = true
+    WHERE id IN (SELECT id FROM ipqc_duplicates WHERE rn > 1);
+
     CREATE UNIQUE INDEX IF NOT EXISTS uq_rrh_ipqc_active_serial
         ON rrh_ipqc_inspections(session_id, UPPER(TRIM(serial_number)))
         WHERE is_deleted = false;
-EXCEPTION WHEN unique_violation THEN
-    RAISE NOTICE 'uq_rrh_ipqc_active_serial skipped: duplicate active IPQC rows exist, clean them up first';
 END $$;
 
 -- ----------------------------------------------------------------------------
@@ -561,3 +572,203 @@ BEGIN
         FOR EACH ROW EXECUTE FUNCTION update_timestamp_column();
     END IF;
 END $$;
+
+-- ----------------------------------------------------------------------------
+-- 10. HOT In-Place Updates & Autovacuum Tuning (Migration 025)
+-- ----------------------------------------------------------------------------
+ALTER TABLE rrh_inward_scans SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_ivi_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_ipqc_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_programming_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_pre_burn_in_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_hipot_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+ALTER TABLE rrh_post_burn_in_inspections SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
+
+-- Cross-Module Lineage Foreign Key Indexes
+CREATE INDEX IF NOT EXISTS idx_rrh_pbi_ipqc_fk ON rrh_pre_burn_in_inspections(ipqc_inspection_id) WHERE ipqc_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_pbi_ivi_fk ON rrh_pre_burn_in_inspections(ivi_inspection_id) WHERE ivi_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_hipot_prog_fk ON rrh_hipot_inspections(programming_inspection_id) WHERE programming_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_hipot_ipqc_fk ON rrh_hipot_inspections(ipqc_inspection_id) WHERE ipqc_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_hipot_ivi_fk ON rrh_hipot_inspections(ivi_inspection_id) WHERE ivi_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_post_bi_pbi_fk ON rrh_post_burn_in_inspections(pre_burn_in_inspection_id) WHERE pre_burn_in_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_post_bi_prog_fk ON rrh_post_burn_in_inspections(programming_inspection_id) WHERE programming_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_post_bi_ipqc_fk ON rrh_post_burn_in_inspections(ipqc_inspection_id) WHERE ipqc_inspection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rrh_post_bi_ivi_fk ON rrh_post_burn_in_inspections(ivi_inspection_id) WHERE ivi_inspection_id IS NOT NULL;
+
+-- ----------------------------------------------------------------------------
+-- 11. Integer Surrogate Foreign Keys & Auto-Sync Triggers (Migration 026)
+-- ----------------------------------------------------------------------------
+DO $$
+BEGIN
+    ALTER TABLE rrh_inward_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_inward_scans ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_ivi_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_ipqc_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_ipqc_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_programming_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_programming_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_pre_burn_in_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_pre_burn_in_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_hipot_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_hipot_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_post_burn_in_sessions ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+    ALTER TABLE rrh_post_burn_in_inspections ADD COLUMN IF NOT EXISTS work_order_internal_id INTEGER REFERENCES rrh_work_orders(id) ON DELETE RESTRICT;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_inward_sessions_wo_int ON rrh_inward_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_inward_scans_wo_int ON rrh_inward_scans(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_ivi_sessions_wo_int ON rrh_ivi_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_ivi_inspections_wo_int ON rrh_ivi_inspections(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_ipqc_sessions_wo_int ON rrh_ipqc_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_ipqc_inspections_wo_int ON rrh_ipqc_inspections(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_prog_sessions_wo_int ON rrh_programming_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_prog_inspections_wo_int ON rrh_programming_inspections(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_pbi_sessions_wo_int ON rrh_pre_burn_in_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_pbi_inspections_wo_int ON rrh_pre_burn_in_inspections(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_hipot_sessions_wo_int ON rrh_hipot_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_hipot_inspections_wo_int ON rrh_hipot_inspections(work_order_internal_id) WHERE is_deleted = false;
+CREATE INDEX IF NOT EXISTS idx_post_bi_sessions_wo_int ON rrh_post_burn_in_sessions(work_order_internal_id);
+CREATE INDEX IF NOT EXISTS idx_post_bi_inspections_wo_int ON rrh_post_burn_in_inspections(work_order_internal_id) WHERE is_deleted = false;
+
+-- ----------------------------------------------------------------------------
+-- 12. Hot-Cold Archive Tables (Migration 026)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rrh_inward_scans_archive (LIKE rrh_inward_scans INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_ivi_inspections_archive (LIKE rrh_ivi_inspections INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_ipqc_inspections_archive (LIKE rrh_ipqc_inspections INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_programming_inspections_archive (LIKE rrh_programming_inspections INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_pre_burn_in_inspections_archive (LIKE rrh_pre_burn_in_inspections INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_hipot_inspections_archive (LIKE rrh_hipot_inspections INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS rrh_post_burn_in_inspections_archive (LIKE rrh_post_burn_in_inspections INCLUDING ALL);
+
+-- ----------------------------------------------------------------------------
+-- 13. Micro-Batched Archival & C-Level Trigger Bypasses (Migration 029)
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION archive_closed_work_orders_history(p_retention_days INT DEFAULT 180, p_max_orders INT DEFAULT 5)
+RETURNS INTEGER AS $$
+DECLARE
+    v_archived_orders INTEGER := 0;
+    v_rows_moved INTEGER;
+    r_wo RECORD;
+BEGIN
+    FOR r_wo IN (
+        SELECT id, work_order_id
+        FROM rrh_work_orders
+        WHERE status IN ('COMPLETED', 'CLOSED')
+          AND updated_at < (CURRENT_TIMESTAMP - (p_retention_days || ' days')::INTERVAL)
+        ORDER BY updated_at ASC
+        LIMIT p_max_orders
+    ) LOOP
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_inward_scans 
+                WHERE id IN (
+                    SELECT id FROM rrh_inward_scans 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_inward_scans_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_ivi_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_ivi_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_ivi_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_ipqc_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_ipqc_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_ipqc_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_programming_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_programming_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_programming_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_pre_burn_in_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_pre_burn_in_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_pre_burn_in_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_hipot_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_hipot_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_hipot_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        LOOP
+            WITH moved AS (
+                DELETE FROM rrh_post_burn_in_inspections 
+                WHERE id IN (
+                    SELECT id FROM rrh_post_burn_in_inspections 
+                    WHERE work_order_internal_id = r_wo.id 
+                    LIMIT 500
+                )
+                RETURNING *
+            )
+            INSERT INTO rrh_post_burn_in_inspections_archive SELECT * FROM moved;
+            GET DIAGNOSTICS v_rows_moved = ROW_COUNT;
+            EXIT WHEN v_rows_moved = 0;
+        END LOOP;
+
+        UPDATE rrh_work_orders SET status = 'ARCHIVED', updated_at = NOW() WHERE id = r_wo.id;
+        v_archived_orders := v_archived_orders + 1;
+    END LOOP;
+
+    RETURN v_archived_orders;
+END;
+$$ LANGUAGE plpgsql;

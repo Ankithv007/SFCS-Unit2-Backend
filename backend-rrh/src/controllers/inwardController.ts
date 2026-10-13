@@ -1,64 +1,11 @@
-import jwt from 'jsonwebtoken';
 import { Request, Response } from 'express';
-import { pool } from '../utils/db';
+import { pool, getCachedWorkOrderInternalId, withTransaction } from '../utils/db';
 import { createLogger } from '../utils/logger';
 import { downloadWorkOrderExcel } from './masterDataController';
+import { getSessionUser } from '../utils/authHelper';
 
 const logger = createLogger('InwardController');
 
-export const getSessionUser = (req: Request) => {
-    let user = (req as any).user;
-
-    // Fallback: decode directly from Authorization header if not already decoded
-    if (!user) {
-        const authHeader = req.headers.authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.split(' ')[1];
-            try {
-                user = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
-                (req as any).user = user;
-            } catch (e) { }
-        }
-    }
-
-    const headerName = (req.headers['x-user-name'] as string)
-        || (req.headers['x-username'] as string)
-        || (req.headers['x-backend-user-id'] as string);
-
-    let resolvedName = '';
-    if (user) {
-        if (typeof user.name === 'string' && user.name.trim().length > 0) {
-            resolvedName = user.name.trim();
-        } else if (typeof user.employee_code === 'string' && user.employee_code.trim().length > 0) {
-            resolvedName = user.employee_code.trim();
-        } else if (typeof user.employeeCode === 'string' && user.employeeCode.trim().length > 0) {
-            resolvedName = user.employeeCode.trim();
-        } else if (typeof user.email === 'string' && user.email.trim().length > 0) {
-            resolvedName = user.email.trim();
-        } else if (typeof user.username === 'string' && user.username.trim().length > 0) {
-            resolvedName = user.username.trim();
-        }
-    }
-
-    if (!resolvedName && headerName && typeof headerName === 'string' && headerName.trim().length > 0) {
-        resolvedName = headerName.trim();
-    }
-
-    if (!resolvedName && req.body?.scanned_by && typeof req.body.scanned_by === 'string' && req.body.scanned_by.trim().length > 0) {
-        resolvedName = req.body.scanned_by.trim();
-    }
-
-    if (!resolvedName) {
-        resolvedName = 'Unknown User';
-    }
-
-    return {
-        id: user?.id || user?.userId || null,
-        name: resolvedName,
-        username: resolvedName,
-        role: user?.role || 'OPERATOR'
-    };
-};
 
 /**
  * GET /api/rrh/inward/eligible-work-orders
@@ -76,13 +23,13 @@ export const getEligibleInwardWorkOrders = async (_req: Request, res: Response) 
                 w.status,
                 w.created_at
             FROM rrh_work_orders w
-            WHERE w.status != 'Completed'
+            WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
               AND NOT EXISTS (
                 SELECT 1
                 FROM rrh_inward_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
-                  AND s.status IN ('In Progress', 'Pending', 'Paused', 'Completed')
+                  AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
             )
             ORDER BY w.created_at DESC, w.id DESC
         `);
@@ -101,84 +48,83 @@ export const createInwardSession = async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'work_order_id is required.' });
     }
 
-    const client = await pool.connect();
+    const cleanWoId = String(work_order_id).trim();
+
     try {
-        await client.query('BEGIN');
+        const sessionData = await withTransaction(async (client) => {
+            // Check if there is already an active session for this Work Order
+            const activeCheck = await client.query(
+                `SELECT * FROM rrh_inward_sessions 
+                 WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+                   AND status IN ('Pending', 'In Progress', 'Paused') 
+                   AND is_deleted = false
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                [cleanWoId]
+            );
 
-        // Check if there is already an active session for this Work Order
-        const activeCheck = await client.query(
-            `SELECT * FROM rrh_inward_sessions 
-             WHERE work_order_id = $1
-               AND status IN ('Pending', 'In Progress', 'Paused') 
-               AND is_deleted = false
-             ORDER BY created_at DESC
-             LIMIT 1`,
-            [work_order_id]
-        );
-
-        if (activeCheck.rows.length > 0) {
-            const existingSession = activeCheck.rows[0];
-            if (existingSession.status !== 'In Progress') {
-                await client.query(
-                    `UPDATE rrh_inward_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                    [existingSession.id]
-                );
-                existingSession.status = 'In Progress';
+            if (activeCheck.rows.length > 0) {
+                const existingSession = activeCheck.rows[0];
+                if (existingSession.status !== 'In Progress') {
+                    await client.query(
+                        `UPDATE rrh_inward_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                        [existingSession.id]
+                    );
+                    existingSession.status = 'In Progress';
+                }
+                return { session: existingSession, isExisting: true };
             }
-            await client.query('COMMIT');
-            return res.status(200).json(existingSession);
-        }
 
-        // Check if a completed session already exists for this Work Order
-        const completedCheck = await client.query(
-            `SELECT id FROM rrh_inward_sessions 
-             WHERE work_order_id = $1
-               AND status = 'Completed'
-               AND is_deleted = false`,
-            [work_order_id]
-        );
-        if (completedCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({
-                message: `INWARD has already been Completed for Work Order ${work_order_id}.`
-            });
-        }
+            // Check if a completed session already exists for this Work Order
+            const completedCheck = await client.query(
+                `SELECT id FROM rrh_inward_sessions 
+                 WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+                   AND status = 'Completed'
+                   AND is_deleted = false`,
+                [cleanWoId]
+            );
+            if (completedCheck.rows.length > 0) {
+                const err: any = new Error(`INWARD has already been Completed for Work Order ${work_order_id}.`);
+                err.statusCode = 400;
+                throw err;
+            }
 
-        const insertQuery = `
-            INSERT INTO rrh_inward_sessions (
-                work_order_id, status, created_by, created_by_name, updated_by, updated_by_name
-            ) VALUES ($1, 'In Progress', $2, $3, $2, $3)
-            RETURNING *
-        `;
-        const result = await client.query(insertQuery, [work_order_id, operator.id || operator.name, operator.name]);
-        const session = result.rows[0];
+            const woInternalId = await getCachedWorkOrderInternalId(client, work_order_id);
+            const insertQuery = `
+                INSERT INTO rrh_inward_sessions (
+                    work_order_id, work_order_internal_id, status, created_by, created_by_name, updated_by, updated_by_name
+                ) VALUES ($1, $2, 'In Progress', $3, $4, $3, $4)
+                RETURNING *
+            `;
+            const result = await client.query(insertQuery, [work_order_id, woInternalId, operator.id || operator.name, operator.name]);
+            return { session: result.rows[0], isExisting: false };
+        });
 
-        await client.query('COMMIT');
-        return res.status(201).json(session);
+        return res.status(sessionData.isExisting ? 200 : 201).json(sessionData.session);
     } catch (err: any) {
-        await client.query('ROLLBACK');
+        if (err.statusCode === 400) {
+            return res.status(400).json({ message: err.message });
+        }
         if (err.code === '23505') {
             try {
                 const fallbackCheck = await pool.query(
                     `SELECT * FROM rrh_inward_sessions 
-                     WHERE work_order_id = $1
+                     WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
                        AND status IN ('Pending', 'In Progress', 'Paused') 
                        AND is_deleted = false
                      ORDER BY created_at DESC
                      LIMIT 1`,
-                    [work_order_id]
+                    [cleanWoId]
                 );
                 if (fallbackCheck.rows.length > 0) {
                     return res.status(200).json(fallbackCheck.rows[0]);
                 }
-            } catch (fallbackErr) {
-                logger.error('Error during fallback query after 23505: ' + fallbackErr);
+            } catch (fallbackErr: any) {
+                logger.error('Error during fallback query after 23505: ' + fallbackErr.message);
             }
         }
-        logger.error('Error starting INWARD session: ' + err);
+        logger.error('Error starting INWARD session: ' + err.message);
         return res.status(500).json({ message: 'Internal server error while starting INWARD session.' });
-    } finally {
-        client.release();
     }
 };
 
@@ -187,7 +133,7 @@ export const checkBottom = async (req: Request, res: Response) => {
     try {
         const query = `
             SELECT id FROM rrh_inward_sessions 
-            WHERE work_order_id = $1 
+            WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1)) 
               AND LOWER(side) = 'bottom' 
               AND status = 'Completed' 
               AND is_deleted = false

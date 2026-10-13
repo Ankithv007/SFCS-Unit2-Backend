@@ -64,7 +64,7 @@ const parseSafeDate = (val: string | null | undefined): string | null => {
                 }
             }
         }
-    } catch {}
+    } catch { }
     return null;
 };
 
@@ -175,57 +175,23 @@ export const insertMasterDataIntoDb = async (
         );
     }
 
-    // 2. Batch Insert Rows with explicit row_number mapping
-    const rowParams = {
-        sheetId: parsedData.rows.map(() => sheetId),
-        rowNumber: parsedData.rows.map(r => r.rowNumber),
-        rowType: parsedData.rows.map(r => r.rowType)
-    };
+    // 2. High-Performance Document-Row Batch Insertion (cells JSONB + search_text)
+    const BATCH_SIZE = 1000;
+    for (let i = 0; i < parsedData.rows.length; i += BATCH_SIZE) {
+        const chunk = parsedData.rows.slice(i, i + BATCH_SIZE);
+        const sheetIds = chunk.map(() => sheetId);
+        const rowNumbers = chunk.map(r => r.rowNumber);
+        const rowTypes = chunk.map(r => r.rowType);
+        const cellsJson = chunk.map(r => JSON.stringify(r.cells || []));
+        const searchTexts = chunk.map(r =>
+            (r.cells || []).map((c: any) => c.displayValue || c.rawValue || '').join(' ')
+        );
 
-    const rowsInsertRes = await client.query(
-        `INSERT INTO rrh_excel_rows (sheet_id, row_number, row_type)
-         SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[])
-         RETURNING id, row_number`,
-        [rowParams.sheetId, rowParams.rowNumber, rowParams.rowType]
-    );
-
-    // Explicit Map: row_number -> DB row_id
-    const rowIdMap = new Map<number, number>();
-    for (const row of rowsInsertRes.rows) {
-        rowIdMap.set(parseInt(row.row_number, 10), parseInt(row.id, 10));
-    }
-
-    // 3. Batch Insert Cells (attached strictly to dbRowId resolved by row_number)
-    const allCellRowIds: number[] = [];
-    const allCellColNums: number[] = [];
-    const allCellColLetters: string[] = [];
-    const allCellRawValues: (string | null)[] = [];
-    const allCellDisplayValues: (string | null)[] = [];
-    const allCellDataTypes: string[] = [];
-
-    for (const r of parsedData.rows) {
-        const dbRowId = rowIdMap.get(r.rowNumber);
-        if (!dbRowId) continue;
-        for (const c of r.cells) {
-            allCellRowIds.push(dbRowId);
-            allCellColNums.push(c.columnNumber);
-            allCellColLetters.push(c.columnLetter);
-            allCellRawValues.push(c.rawValue !== undefined ? c.rawValue : null);
-            allCellDisplayValues.push(c.displayValue !== undefined ? c.displayValue : null);
-            allCellDataTypes.push(c.dataType || 'string');
-        }
-    }
-
-    if (allCellRowIds.length > 0) {
-        const CHUNK = 5000;
-        for (let i = 0; i < allCellRowIds.length; i += CHUNK) {
-            const s = <T>(arr: T[]): T[] => arr.slice(i, i + CHUNK);
-            await client.query(
-                `INSERT INTO rrh_excel_cells (row_id, column_number, column_letter, raw_value, display_value, data_type)
-                 SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[])`,
-                [s(allCellRowIds), s(allCellColNums), s(allCellColLetters), s(allCellRawValues), s(allCellDisplayValues), s(allCellDataTypes)]
-            );
-        }
+        await client.query(
+            `INSERT INTO rrh_excel_rows (sheet_id, row_number, row_type, cells, search_text)
+             SELECT * FROM UNNEST($1::int[], $2::int[], $3::text[], $4::jsonb[], $5::text[])`,
+            [sheetIds, rowNumbers, rowTypes, cellsJson, searchTexts]
+        );
     }
 
     // 4. Batch Insert Normalized Inventory Data (Row 3+)
@@ -456,7 +422,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
             fs.copyFileSync(excelSourcePath, finalFilePath);
             try {
                 fs.unlinkSync(excelSourcePath);
-            } catch {}
+            } catch { }
             tempPathToCleanup = null;
             logger.info(`Physical file promoted cleanly to: ${finalFilePath}`);
         }
@@ -483,7 +449,7 @@ export const createWorkOrder = async (req: Request, res: Response) => {
             try {
                 fs.unlinkSync(tempPathToCleanup);
                 logger.info(`[Cleanup] Deleted temporary file after failure: ${tempPathToCleanup}`);
-            } catch {}
+            } catch { }
         }
 
         if (error.code === '23505') {
@@ -626,7 +592,7 @@ export const confirmMasterData = async (req: Request, res: Response) => {
         fs.copyFileSync(tempFilePath, finalFilePath);
         try {
             fs.unlinkSync(tempFilePath);
-        } catch {}
+        } catch { }
         tempPathToCleanup = null;
         logger.info(`Promoted confirmed file to: ${finalFilePath}`);
 
@@ -642,7 +608,7 @@ export const confirmMasterData = async (req: Request, res: Response) => {
         if (tempPathToCleanup && fs.existsSync(tempPathToCleanup)) {
             try {
                 fs.unlinkSync(tempPathToCleanup);
-            } catch {}
+            } catch { }
         }
 
         return res.status(500).json({
@@ -777,14 +743,12 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
                     [sheet.id]
                 );
 
-                // Fetch Rows & Cells
+                // Fetch Rows & Cells directly from Document-Row model (zero joins)
                 const rowsRes = await client.query(
-                    `SELECT r.id as row_id, r.row_number, r.row_type,
-                            c.column_number, c.column_letter, c.raw_value, c.display_value, c.data_type
+                    `SELECT r.id as row_id, r.row_number, r.row_type, r.cells
                      FROM rrh_excel_rows r
-                     LEFT JOIN rrh_excel_cells c ON r.id = c.row_id
                      WHERE r.sheet_id = $1
-                     ORDER BY r.row_number ASC, c.column_number ASC`,
+                     ORDER BY r.row_number ASC`,
                     [sheet.id]
                 );
 
@@ -801,36 +765,33 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
                 }
 
                 for (const rowItem of rowsRes.rows) {
-                    if (!rowMap.has(rowItem.row_number)) {
-                        rowMap.set(rowItem.row_number, {
-                            rowNumber: rowItem.row_number,
-                            rowType: rowItem.row_type,
-                            cells: []
-                        });
-                    }
-
-                    if (rowItem.column_number !== null) {
-                        const mInfo = mergeLookup.get(`${rowItem.row_number}:${rowItem.column_number}`);
-                        const isMerged = !!mInfo;
-                        const mergeType = isMerged ? (mInfo.isMaster ? 'MASTER' : 'SLAVE') : 'NONE';
-                        const rowSpan = mInfo && mInfo.isMaster ? (mInfo.m.row_span || 1) : 1;
-                        const colSpan = mInfo && mInfo.isMaster ? (mInfo.m.column_span || 1) : 1;
-
-                        rowMap.get(rowItem.row_number).cells.push({
-                            columnNumber: rowItem.column_number,
-                            c: rowItem.column_number,
-                            columnLetter: rowItem.column_letter,
-                            rawValue: rowItem.raw_value,
-                            displayValue: rowItem.display_value,
-                            v: rowItem.display_value,
-                            dataType: rowItem.data_type,
-                            t: rowItem.data_type,
-                            isMerged,
-                            mergeType,
-                            rowSpan,
-                            colSpan
-                        });
-                    }
+                    const rowCells = (rowItem.cells && Array.isArray(rowItem.cells)) ? rowItem.cells : [];
+                    rowMap.set(rowItem.row_number, {
+                        rowNumber: rowItem.row_number,
+                        rowType: rowItem.row_type,
+                        cells: rowCells.map((c: any) => {
+                            const colNum = c.columnNumber || c.c;
+                            const mInfo = mergeLookup.get(`${rowItem.row_number}:${colNum}`);
+                            const isMerged = !!mInfo;
+                            const mergeType = isMerged ? (mInfo.isMaster ? 'MASTER' : 'SLAVE') : (c.mergeType || 'NONE');
+                            const rowSpan = mInfo && mInfo.isMaster ? (mInfo.m.row_span || 1) : (c.rowSpan || 1);
+                            const colSpan = mInfo && mInfo.isMaster ? (mInfo.m.column_span || 1) : (c.colSpan || 1);
+                            return {
+                                columnNumber: colNum,
+                                c: colNum,
+                                columnLetter: c.columnLetter,
+                                rawValue: c.rawValue,
+                                displayValue: c.displayValue,
+                                v: c.displayValue !== undefined && c.displayValue !== null ? c.displayValue : c.v,
+                                dataType: c.dataType || 'string',
+                                t: c.dataType || 'string',
+                                isMerged,
+                                mergeType,
+                                rowSpan,
+                                colSpan
+                            };
+                        })
+                    });
                 }
 
                 structuralData = {
@@ -1049,21 +1010,23 @@ export const getMasterViewData = async (req: Request, res: Response) => {
 
         // Helper to format cells
         const formatCell = (rowNum: number, c: any) => {
-            const mInfo = mergeLookup.get(`${rowNum}:${c.column_number}`);
+            const colNum = c.columnNumber || c.c;
+            const mInfo = mergeLookup.get(`${rowNum}:${colNum}`);
             const isMerged = !!mInfo;
-            const mergeType = isMerged ? (mInfo.isMaster ? 'MASTER' : 'SLAVE') : 'NONE';
-            const rowSpan = mInfo && mInfo.isMaster ? (mInfo.m.row_span || 1) : 1;
-            const colSpan = mInfo && mInfo.isMaster ? (mInfo.m.column_span || 1) : 1;
+            const mergeType = isMerged ? (mInfo.isMaster ? 'MASTER' : 'SLAVE') : (c.mergeType || 'NONE');
+            const rowSpan = mInfo && mInfo.isMaster ? (mInfo.m.row_span || 1) : (c.rowSpan || 1);
+            const colSpan = mInfo && mInfo.isMaster ? (mInfo.m.column_span || 1) : (c.colSpan || 1);
 
             return {
-                columnNumber: c.column_number,
-                c: c.column_number,
-                columnLetter: c.column_letter,
-                rawValue: c.raw_value,
-                displayValue: c.display_value,
-                v: c.display_value,
-                dataType: c.data_type,
-                t: c.data_type,
+                columnNumber: colNum,
+                c: colNum,
+                columnLetter: c.columnLetter,
+                rawValue: c.rawValue,
+                displayValue: c.displayValue,
+                v: c.displayValue !== undefined && c.displayValue !== null ? c.displayValue : c.v,
+                value: c.displayValue !== undefined && c.displayValue !== null ? c.displayValue : (c.value || c.rawValue),
+                dataType: c.dataType || 'string',
+                t: c.dataType || 'string',
                 isMerged,
                 mergeType,
                 rowSpan,
@@ -1071,31 +1034,23 @@ export const getMasterViewData = async (req: Request, res: Response) => {
             };
         };
 
-        // 4. Fetch Header Rows (Row 1 & Row 2) unconditionally
+        // 4. Fetch Header Rows (Row 1 & Row 2) directly from rrh_excel_rows
         const headerRowsRes = await client.query(
-            `SELECT r.id as row_id, r.row_number, r.row_type,
-                    c.column_number, c.column_letter, c.raw_value, c.display_value, c.data_type
+            `SELECT r.id as row_id, r.row_number, r.row_type, r.cells
              FROM rrh_excel_rows r
-             LEFT JOIN rrh_excel_cells c ON r.id = c.row_id
              WHERE r.sheet_id = $1 AND (r.row_type IN ('HEADER', 'SUB_HEADER') OR r.row_number <= 2)
-             ORDER BY r.row_number ASC, c.column_number ASC`,
+             ORDER BY r.row_number ASC`,
             [sheetId]
         );
 
-        const headerRowMap = new Map<number, any>();
-        for (const rItem of headerRowsRes.rows) {
-            if (!headerRowMap.has(rItem.row_number)) {
-                headerRowMap.set(rItem.row_number, {
-                    rowNumber: rItem.row_number,
-                    rowType: rItem.row_type,
-                    cells: []
-                });
-            }
-            if (rItem.column_number !== null) {
-                headerRowMap.get(rItem.row_number).cells.push(formatCell(rItem.row_number, rItem));
-            }
-        }
-        const headerRows = Array.from(headerRowMap.values());
+        const headerRows = headerRowsRes.rows.map((rItem: any) => {
+            const rawCells = (rItem.cells && Array.isArray(rItem.cells)) ? rItem.cells : [];
+            return {
+                rowNumber: rItem.row_number,
+                rowType: rItem.row_type,
+                cells: rawCells.map((c: any) => formatCell(rItem.row_number, c))
+            };
+        });
 
         // 5. Total Data Rows in Sheet (row_number > 2)
         const totalDataRowsRes = await client.query(
@@ -1104,19 +1059,15 @@ export const getMasterViewData = async (req: Request, res: Response) => {
         );
         const totalDataRows = parseInt(totalDataRowsRes.rows[0].count, 10) || 0;
 
-        // 6. Filtered Data Rows Count & Slice
+        // 6. Filtered Data Rows Count & Slice (Instant Indexed search_text evaluation)
         let countSql = `SELECT COUNT(*) FROM rrh_excel_rows r WHERE r.sheet_id = $1 AND r.row_number > 2`;
-        let dataRowSql = `SELECT r.id, r.row_number, r.row_type FROM rrh_excel_rows r WHERE r.sheet_id = $1 AND r.row_number > 2`;
+        let dataRowSql = `SELECT r.id, r.row_number, r.row_type, r.cells FROM rrh_excel_rows r WHERE r.sheet_id = $1 AND r.row_number > 2`;
         const queryParams: any[] = [sheetId];
 
         if (search) {
             const searchParam = `%${search}%`;
             queryParams.push(searchParam);
-            const searchClause = ` AND EXISTS (
-                SELECT 1 FROM rrh_excel_cells c 
-                WHERE c.row_id = r.id 
-                  AND (c.display_value ILIKE $2 OR c.raw_value ILIKE $2)
-            )`;
+            const searchClause = ` AND (r.search_text ILIKE $2 OR r.cells::text ILIKE $2)`;
             countSql += searchClause;
             dataRowSql += searchClause;
         }
@@ -1128,35 +1079,14 @@ export const getMasterViewData = async (req: Request, res: Response) => {
         dataRowSql += ` ORDER BY r.row_number ASC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
         const paginatedDataRowsRes = await client.query(dataRowSql, [...queryParams, limit, offset]);
 
-        const dataRows: any[] = [];
-        if (paginatedDataRowsRes.rows.length > 0) {
-            const rowIds = paginatedDataRowsRes.rows.map((r: any) => r.id);
-            const cellsRes = await client.query(
-                `SELECT row_id, column_number, column_letter, raw_value, display_value, data_type
-                 FROM rrh_excel_cells
-                 WHERE row_id = ANY($1)
-                 ORDER BY column_number ASC`,
-                [rowIds]
-            );
-
-            const cellMapByRowId = new Map<number, any[]>();
-            for (const c of cellsRes.rows) {
-                if (!cellMapByRowId.has(c.row_id)) {
-                    cellMapByRowId.set(c.row_id, []);
-                }
-                cellMapByRowId.get(c.row_id)!.push(c);
-            }
-
-            for (const r of paginatedDataRowsRes.rows) {
-                const rawCells = cellMapByRowId.get(r.id) || [];
-                const formattedCells = rawCells.map((c: any) => formatCell(r.row_number, c));
-                dataRows.push({
-                    rowNumber: r.row_number,
-                    rowType: r.row_type,
-                    cells: formattedCells
-                });
-            }
-        }
+        const dataRows = paginatedDataRowsRes.rows.map((r: any) => {
+            const rawCells = (r.cells && Array.isArray(r.cells)) ? r.cells : [];
+            return {
+                rowNumber: r.row_number,
+                rowType: r.row_type,
+                cells: rawCells.map((c: any) => formatCell(r.row_number, c))
+            };
+        });
 
         const totalPages = Math.ceil(filteredDataRows / limit) || 1;
 
