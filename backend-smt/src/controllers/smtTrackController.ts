@@ -112,8 +112,8 @@ export const resolveSerialSmtStatuses = (
             step_status,
             step_status_top,
             step_status_bottom,
-            is_completed: false,
-            final_status_label: 'Pending'
+            is_completed: true,
+            final_status_label: 'Completed'
         };
     }
 
@@ -330,12 +330,19 @@ export const resolveSerialsBackendTraceability = async (
 
     const candidateSerialsMap: { [serial: string]: string[] } = {};
     const allBarcodesToQuery = new Set<string>();
+    const barcodeToSerialMap = new Map<string, string>();
 
     serials.forEach((s: any) => {
         const sn = (s.serial_number || '').trim().toUpperCase();
         if (sn) {
             candidateSerialsMap[s.serial_number] = [sn];
             allBarcodesToQuery.add(sn);
+            barcodeToSerialMap.set(sn, s.serial_number);
+        }
+        if (s.barcode) {
+            const bc = s.barcode.trim().toUpperCase();
+            allBarcodesToQuery.add(bc);
+            barcodeToSerialMap.set(bc, s.serial_number);
         }
     });
 
@@ -352,13 +359,19 @@ export const resolveSerialsBackendTraceability = async (
                 const usn = (r.unit_serial_number || '').trim().toUpperCase();
                 if (bc) allBarcodesToQuery.add(bc);
                 if (usn) allBarcodesToQuery.add(usn);
-                serials.forEach((s: any) => {
-                    const sn = (s.serial_number || '').trim().toUpperCase();
-                    if (sn === bc || sn === usn) {
-                        if (bc && !candidateSerialsMap[s.serial_number].includes(bc)) candidateSerialsMap[s.serial_number].push(bc);
-                        if (usn && !candidateSerialsMap[s.serial_number].includes(usn)) candidateSerialsMap[s.serial_number].push(usn);
+
+                // O(1) map resolution to link barcode/unit_serial_number to canonical serial
+                const targetSerial = (bc && barcodeToSerialMap.get(bc)) || (usn && barcodeToSerialMap.get(usn));
+                if (targetSerial) {
+                    if (bc) {
+                        barcodeToSerialMap.set(bc, targetSerial);
+                        if (!candidateSerialsMap[targetSerial].includes(bc)) candidateSerialsMap[targetSerial].push(bc);
                     }
-                });
+                    if (usn) {
+                        barcodeToSerialMap.set(usn, targetSerial);
+                        if (!candidateSerialsMap[targetSerial].includes(usn)) candidateSerialsMap[targetSerial].push(usn);
+                    }
+                }
             });
         } catch (mErr: any) {
             logger.warn('Backend unit_serial_mapping lookup warning for WO:', mErr.message);
@@ -381,18 +394,17 @@ export const resolveSerialsBackendTraceability = async (
 
             scansRes.rows.forEach((row: any) => {
                 const bc = (row.barcode || '').trim().toUpperCase();
-                serials.forEach((s: any) => {
-                    if (candidateSerialsMap[s.serial_number]?.includes(bc)) {
-                        if (!backendScansBySerial[s.serial_number]) backendScansBySerial[s.serial_number] = [];
-                        backendScansBySerial[s.serial_number].push({
-                            stage_code: row.stage_code,
-                            station: row.station,
-                            stage_order: row.stage_order,
-                            status: normalizeStatus(row.status),
-                            scanned_at: row.scanned_at
-                        });
-                    }
-                });
+                const matchedSn = barcodeToSerialMap.get(bc);
+                if (matchedSn) {
+                    if (!backendScansBySerial[matchedSn]) backendScansBySerial[matchedSn] = [];
+                    backendScansBySerial[matchedSn].push({
+                        stage_code: row.stage_code,
+                        station: row.station,
+                        stage_order: row.stage_order,
+                        status: normalizeStatus(row.status),
+                        scanned_at: row.scanned_at
+                    });
+                }
             });
 
             const unitsRes = await backendPool.query(`
@@ -404,11 +416,10 @@ export const resolveSerialsBackendTraceability = async (
 
             unitsRes.rows.forEach((row: any) => {
                 const bc = (row.barcode || '').trim().toUpperCase();
-                serials.forEach((s: any) => {
-                    if (candidateSerialsMap[s.serial_number]?.includes(bc)) {
-                        backendUnitBySerial[s.serial_number] = row;
-                    }
-                });
+                const matchedSn = barcodeToSerialMap.get(bc);
+                if (matchedSn) {
+                    backendUnitBySerial[matchedSn] = row;
+                }
             });
         } catch (err: any) {
             logger.warn('Failed to fetch backend scans/units for WO:', err.message);
@@ -526,7 +537,7 @@ export const resolveSerialsBackendTraceability = async (
             resolvedOverallStatus = 'Failed';
         } else if (wo.has_backend) {
             const allActiveBackendPassed = selectedStages.length > 0 && selectedStages.every((st: any) => backend_step_status[st.stage_code] === 'PASS');
-            const smtPass = smtRes ? smtRes.is_completed : false;
+            const smtPass = smtRes ? (wo.has_smt === false ? true : smtRes.is_completed) : (wo.has_smt === false ? true : false);
             if (allActiveBackendPassed && smtPass) {
                 resolvedOverallStatus = 'Completed';
             } else {
@@ -1200,10 +1211,15 @@ export const trackWorkOrder = async (req: Request, res: Response) => {
             };
         });
 
-        const totalFilteredCount = totalFiltered;
-        const totalCompletedCount = totalCompleted;
-        const totalPendingCount = totalPending;
-        const totalAllCount = totalAll;
+        let totalFilteredCount = totalFiltered;
+        let totalCompletedCount = totalCompleted;
+        let totalPendingCount = totalPending;
+        let totalAllCount = totalAll;
+
+        if ((wo.has_backend || wo.has_smt === false) && serialRows.length > 0 && serialRows.length === totalAll) {
+            totalCompletedCount = mappedSerials.filter((s: any) => s.final_status_label === 'Completed').length;
+            totalPendingCount = totalAllCount - totalCompletedCount;
+        }
 
         const spLogsResult = await pool.query(
             `SELECT process_step, scanned_by, scanned_at, status, rework_reason

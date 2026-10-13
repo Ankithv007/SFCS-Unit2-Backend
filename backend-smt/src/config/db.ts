@@ -21,10 +21,10 @@ export const backendPool = new Pool({
     database: process.env.DB_NAME_BACKEND || 'backend_process_db',
     password: process.env.DB_PASSWORD,
     port:     parseInt(process.env.DB_PORT || '5432', 10),
-    // Secondary pool — lower max since this is read-only backend history queries
-    max:                     5,    // conservative for secondary read pool
+    // Secondary pool — increased max for concurrent traceability and history queries
+    max:                    20,
     idleTimeoutMillis:   30000,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 10000,
 });
 
 export const authPool = new Pool({

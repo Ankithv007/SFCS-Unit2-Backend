@@ -6,6 +6,9 @@ const pool = new Pool({
     database: process.env.DB_NAME || 'backend_process_db',
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
 
 export const smtPool = new Pool({
@@ -14,6 +17,9 @@ export const smtPool = new Pool({
     database: process.env.DB_NAME_SMT || 'smt_db',
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
 
 pool.on('connect', () => {
