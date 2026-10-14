@@ -1402,22 +1402,23 @@ export const getCountDetails = async (req: Request, res: Response) => {
         }
 
         // 2. Work Order Level Query (e.g. from Work Order History / Tracking)
-        const serialsResult = await pool.query(
-            `SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at, sn.created_by, sn.status as main_status
-             FROM smt_serial_numbers sn
-             WHERE sn.work_order_id = $1
-             ORDER BY sn.id ASC`,
-            [woIdStr]
-        );
-
-        const inspectionsResult = await pool.query(
-            `SELECT i.serial_id, i.process_step, i.scanned_by, i.scanned_at, UPPER(TRIM(i.status)) as status, i.rework_reason, i.repair_time, i.repair_remark
-             FROM smt_inspections i
-             JOIN smt_serial_numbers sn ON i.serial_id = sn.id
-             WHERE sn.work_order_id = $1
-             ORDER BY i.scanned_at ASC, i.id ASC`,
-            [woIdStr]
-        );
+        const [serialsResult, inspectionsResult] = await Promise.all([
+            pool.query(
+                `SELECT sn.id, sn.serial_number, sn.serial_format, sn.created_at, sn.created_by, sn.status as main_status
+                 FROM smt_serial_numbers sn
+                 WHERE sn.work_order_id = $1
+                 ORDER BY sn.id ASC`,
+                [woIdStr]
+            ),
+            pool.query(
+                `SELECT i.serial_id, i.process_step, i.scanned_by, i.scanned_at, UPPER(TRIM(i.status)) as status, i.rework_reason, i.repair_time, i.repair_remark
+                 FROM smt_inspections i
+                 JOIN smt_serial_numbers sn ON i.serial_id = sn.id
+                 WHERE sn.work_order_id = $1
+                 ORDER BY i.scanned_at ASC, i.id ASC`,
+                [woIdStr]
+            )
+        ]);
 
         const inspectionsBySerial: Record<number, any[]> = {};
         inspectionsResult.rows.forEach((row: any) => {
