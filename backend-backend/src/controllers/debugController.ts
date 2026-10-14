@@ -62,7 +62,10 @@ export const createDebugScan = async (req: Request, res: Response) => {
     }
 
     try {
-        const resolvedScannedBy = determineScannedBy((req as any).user, scanned_by);
+        const resolvedScannedBy = determineScannedBy((req as any).user);
+        if (!resolvedScannedBy) {
+            return sendError(res, "Unauthorized: Valid authenticated employee identity required for scanning.", 401);
+        }
         const result = await ScanProcessingService.processStageScan('DEBUG', {
             work_order_id: null,
             batch_id,

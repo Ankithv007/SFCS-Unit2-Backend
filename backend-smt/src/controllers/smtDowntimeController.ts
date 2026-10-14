@@ -12,7 +12,7 @@ const getSessionUser = (req: Request) => {
         id: user?.id || user?.userId || null,
         name: decodedName || user?.name || user?.email || 'Unknown User',
         role: user?.role || 'OPERATOR',
-        email: user?.email || 'unknown@example.com'
+        email: user?.email || null
     };
 };
 

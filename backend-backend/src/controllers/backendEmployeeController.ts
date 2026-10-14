@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import pool from '../config/db';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 export const getEmployees = async (req: Request, res: Response) => {
     try {
@@ -114,9 +115,22 @@ export const loginEmployee = async (req: Request, res: Response) => {
             return res.status(403).json({ error: "Account deactivated" });
         }
 
+        const secret = process.env.JWT_SECRET || 'sfcs_unit2_secure_jwt_secret_2026_production_grade_99';
+        const token = jwt.sign(
+            {
+                id: employee.id,
+                user_id: employee.user_id,
+                employee_code: employee.user_id,
+                name: employee.name,
+                role: employee.role || 'OPERATOR'
+            },
+            secret,
+            { expiresIn: process.env.JWT_EXPIRES_IN || '24h' } as jwt.SignOptions
+        );
+
         // Do not return password hash
         const { password: _, ...employeeData } = employee;
-        res.status(200).json({ message: "Login successful", employee: employeeData });
+        res.status(200).json({ message: "Login successful", employee: employeeData, token });
     } catch (err) {
         console.error("Error logging in backend employee:", err);
         res.status(500).json({ error: "Login failed" });

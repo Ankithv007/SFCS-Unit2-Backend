@@ -1,5 +1,6 @@
 import pool from '../../config/db';
 import { createLogger } from '../../utils/logger';
+import { isValidIdentity } from '../../utils/scanUser';
 
 const logger = createLogger('AuditService');
 
@@ -14,6 +15,11 @@ export class AuditService {
         resolutionRemarks?: string,
         dbClient?: any
     ): Promise<void> {
+        if (!scannedBy || !isValidIdentity(scannedBy)) {
+            logger.error(`Audit violation: Attempted to log scan event for barcode [${barcode}] with missing or invalid scannedBy identity: [${scannedBy}]`);
+            throw new Error(`Audit violation: Cannot record scan with missing or invalid employee identity: "${scannedBy}"`);
+        }
+
         const db = dbClient || pool;
         try {
             const query = `

@@ -5,6 +5,7 @@ import { BatchManagementService } from '../batches/BatchManagementService';
 import { TraceabilityService } from '../traceability/TraceabilityService';
 import { AuditService } from '../audit/AuditService';
 import { ValidationError } from '../../utils/ValidationError';
+import { isValidIdentity } from '../../utils/scanUser';
 
 const logger = createLogger('ScanProcessingService');
 
@@ -40,6 +41,15 @@ export class ScanProcessingService {
             failed_stage_id?: number;
         }
     ): Promise<{ success: boolean; message?: string; data?: any }> {
+        // Strict production audit validation: verified employee identity required
+        if (!payload.scanned_by || !isValidIdentity(payload.scanned_by)) {
+            throw new ValidationError({
+                errorCode: 'UNAUTHENTICATED_SCAN',
+                message: 'A verified employee identity is required to perform process scans.',
+                severity: 'error'
+            });
+        }
+
         const client = await pool.connect();
         try {
             await client.query('BEGIN');

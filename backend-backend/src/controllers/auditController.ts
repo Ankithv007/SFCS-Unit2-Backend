@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { AuditService } from '../services/audit/AuditService';
+import { determineScannedBy } from '../utils/scanUser';
 
 export const deleteScan = async (req: Request, res: Response) => {
     const userRole = (req as any).user?.role;
@@ -8,7 +9,7 @@ export const deleteScan = async (req: Request, res: Response) => {
         return res.status(403).json({ error: 'You do not have permission to delete this record.' });
     }
     const scanId = req.params.scanId || req.params.scan_id;
-    const actor = (req as any).user ? ((req as any).user.name || (req as any).user.email || 'system') : 'system';
+    const actor = determineScannedBy((req as any).user) || 'system';
     try {
         await AuditService.deleteScanById(scanId, actor);
         return res.status(200).json({ message: 'Record deleted successfully.' });

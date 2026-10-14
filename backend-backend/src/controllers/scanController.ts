@@ -21,6 +21,9 @@ export const updateScan = async (req: AuthRequest, res: Response) => {
     }
 
     const actor = determineScannedBy(req.user);
+    if (!actor) {
+        return res.status(401).json({ error: 'Unauthorized: Valid authenticated employee identity required.' });
+    }
 
     const client = await pool.connect();
     try {

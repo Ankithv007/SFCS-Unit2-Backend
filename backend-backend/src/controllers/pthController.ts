@@ -40,7 +40,10 @@ import { determineScannedBy } from '../utils/scanUser';
 
 export const createPthScan = async (req: Request, res: Response) => {
     try {
-        const scannedBy = determineScannedBy((req as any).user, req.body.scanned_by);
+        const scannedBy = determineScannedBy((req as any).user);
+        if (!scannedBy) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: Valid authenticated employee identity required for scanning.' });
+        }
         const result = await ScanProcessingService.processStageScan('PTH', {
             ...req.body,
             scanned_by: scannedBy
