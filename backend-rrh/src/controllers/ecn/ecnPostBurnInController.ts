@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import { pool } from '../utils/db';
-import { createLogger } from '../utils/logger';
+import { pool } from '../../utils/db';
+import { createLogger } from '../../utils/logger';
 import jwt from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
 
@@ -79,6 +79,7 @@ export const getEligiblePostBurnInWorkOrders = async (_req: Request, res: Respon
                 FROM rrh_post_burn_in_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
+                  AND REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'
                   AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
               )
             ORDER BY w.created_at DESC, w.id DESC
@@ -156,28 +157,25 @@ export const createPostBurnInSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if an active session already exists for this Work Order
-        const activeCheck = await client.query(
+        // Check if an active or completed session already exists for this Work Order under ECN
+        const sessionCheck = await client.query(
             `SELECT * FROM rrh_post_burn_in_sessions 
              WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
-               AND status IN ('Pending', 'In Progress', 'Paused') 
+               AND REPLACE(COALESCE(route, 'ECN'), '-', '_') = 'ECN'
+               AND UPPER(TRIM(status)) IN ('PENDING', 'IN PROGRESS', 'PAUSED', 'COMPLETED') 
                AND is_deleted = false
              ORDER BY created_at DESC 
              LIMIT 1`,
             [cleanWo]
         );
 
-        if (activeCheck.rows.length > 0) {
-            const existing = activeCheck.rows[0];
-            if (existing.status !== 'In Progress') {
-                await client.query(
-                    `UPDATE rrh_post_burn_in_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                    [existing.id]
-                );
-                existing.status = 'In Progress';
+        if (sessionCheck.rows.length > 0) {
+            const existing = sessionCheck.rows[0];
+            await client.query('ROLLBACK');
+            if (String(existing.status).toUpperCase() === 'COMPLETED') {
+                return res.status(409).json({ message: `Work order "${cleanWo}" has already been completed in Post Burn In.` });
             }
-            await client.query('COMMIT');
-            return res.status(200).json(existing);
+            return res.status(409).json({ message: `An active session already exists for work order "${cleanWo}".`, session: existing });
         }
 
         // Create new Post Burn In session
@@ -186,8 +184,10 @@ export const createPostBurnInSession = async (req: Request, res: Response) => {
                 work_order_id, 
                 status, 
                 created_by, 
-                created_by_name
-             ) VALUES ($1, 'In Progress', $2, $3)
+                created_by_name,
+                route,
+                post_burn_in_type
+             ) VALUES ($1, 'In Progress', $2, $3, 'ECN', 'FINAL')
              RETURNING *`,
             [cleanWo, operator.username, operator.name]
         );
@@ -217,7 +217,10 @@ export const getPostBurnInSessions = async (req: Request, res: Response) => {
         const status = (req.query.status as string || '').trim();
 
         const queryParams: any[] = [];
-        let whereClauses: string[] = ['s.is_deleted = false'];
+        let whereClauses: string[] = [
+            's.is_deleted = false',
+            "REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'"
+        ];
 
         if (search) {
             queryParams.push(`%${search}%`);
@@ -1044,16 +1047,8 @@ export const getScannedInspections = async (req: Request, res: Response) => {
         const queryParams: any[] = [sessionId];
         let searchClause = '';
 
-        if (statusParam && statusParam !== 'ALL') {
-            if (statusParam === 'PASS') {
-                queryParams.push('COMPLETED');
-                queryParams.push('PASS');
-                searchClause += ` AND p.status IN ($${queryParams.length - 1}, $${queryParams.length})`;
-            } else {
-                queryParams.push(statusParam);
-                searchClause += ` AND p.status = $${queryParams.length}`;
-            }
-        }
+        // Recent inspections strictly means PASSED inspections (never FAIL/FAILED)
+        searchClause += ` AND (p.status IN ('COMPLETED', 'PASS') OR p.status ILIKE '%pass%' OR p.status ILIKE '%complete%') AND UPPER(TRIM(p.status)) NOT IN ('FAIL', 'FAILED')`;
 
         if (search) {
             queryParams.push(`%${search}%`);

@@ -10,9 +10,13 @@ RUN npm install
 COPY . .
 RUN npm run build
 RUN mkdir -p dist/db/migrations && cp -r src/db/migrations/* dist/db/migrations/
-# Add a non-root user to avoid running as root
-# Using the same standard as backend-smt
+
+# Ensure uploads directory exists and is owned by non-root user
+RUN mkdir -p /app/uploads && chown -R node:node /app
+
+USER node
+
 EXPOSE 5007
 
-# Run the app
-CMD ["npm", "start"]
+# Run directly with node for instant POSIX signal handling (graceful shutdown)
+CMD ["node", "dist/index.js"]

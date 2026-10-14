@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware } from '../../middleware/auth';
 import {
     getEligiblePreBurnInWorkOrders,
     getWorkOrderProgrammingDetails,
@@ -18,25 +18,20 @@ import {
     exportPreBurnInExcel,
     exportUnscannedExcel,
     exportDebugExcel
-} from '../controllers/preBurnInController';
+} from '../../controllers/ecn/ecnPreBurnInController';
 
 const router = Router();
 
-// Eligible work orders for Pre Burn In
 router.get('/eligible-work-orders', authMiddleware, getEligiblePreBurnInWorkOrders as (req: Request, res: Response) => void);
 router.get('/work-orders/:woId/programming-details', authMiddleware, getWorkOrderProgrammingDetails as (req: Request, res: Response) => void);
-
-// Serial lookup for Pre Burn In inspection (authenticated)
 router.get('/lookup', authMiddleware, lookupSerialDetails as (req: Request, res: Response) => void);
 
-// Session management
 router.post('/sessions', authMiddleware, createPreBurnInSession as (req: Request, res: Response) => void);
 router.get('/sessions', authMiddleware, getPreBurnInSessions as (req: Request, res: Response) => void);
 router.get('/sessions/:id', authMiddleware, getPreBurnInSessionById as (req: Request, res: Response) => void);
 router.patch('/sessions/:id/status', authMiddleware, updatePreBurnInSessionStatus as (req: Request, res: Response) => void);
 router.delete('/sessions/:id', authMiddleware, deletePreBurnInSession as (req: Request, res: Response) => void);
 
-// Inspection submission & logs & export
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingProgrammingMasterData as (req: Request, res: Response) => void);
 router.post('/sessions/:id/inspections', authMiddleware, submitInspection as (req: Request, res: Response) => void);
 router.get('/sessions/:id/inspections', authMiddleware, getScannedInspections as (req: Request, res: Response) => void);

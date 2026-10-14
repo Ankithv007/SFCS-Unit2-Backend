@@ -1,10 +1,10 @@
 import { Request, Response } from 'express';
-import { pool } from '../utils/db';
-import { createLogger } from '../utils/logger';
+import { pool } from '../../utils/db';
+import { createLogger } from '../../utils/logger';
 import jwt from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
 
-const logger = createLogger('RRH-HIPOT');
+const logger = createLogger('RRH-PRE-BURN-IN');
 
 // ─── SKU to Band Mapping ──────────────────────────────────────────────────────
 const SKU_TO_BAND_MAP: Record<string, string> = {
@@ -48,11 +48,11 @@ const getSessionUser = (req: Request): { username: string; name: string } => {
 };
 
 /**
- * GET /api/rrh/hipot/eligible-work-orders
- * Return RRH work orders that have passed units in Pre Burn In, and are NOT currently
- * active (In Progress, Pending, Paused) or Completed in Hipot.
+ * GET /api/rrh/pre-burn-in/eligible-work-orders
+ * Return RRH work orders that have passed units in Programming, and are NOT currently
+ * active (In Progress, Pending, Paused) or Completed in Pre Burn In.
  */
-export const getEligibleHipotWorkOrders = async (_req: Request, res: Response) => {
+export const getEligiblePreBurnInWorkOrders = async (_req: Request, res: Response) => {
     try {
         const result = await pool.query(`
             SELECT 
@@ -63,21 +63,22 @@ export const getEligibleHipotWorkOrders = async (_req: Request, res: Response) =
                 w.status,
                 w.created_at,
                 (
-                    SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))))::int
-                    FROM rrh_pre_burn_in_inspections pbi
-                    LEFT JOIN rrh_pre_burn_in_sessions pbis ON pbis.id = pbi.session_id
-                    WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM(w.work_order_id))
-                      AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-                      AND pbi.is_deleted = false
-                      AND (pbis.is_deleted IS NULL OR pbis.is_deleted = false)
-                ) as pre_burn_in_passed_count
+                    SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))))::int
+                    FROM rrh_programming_inspections prog
+                    LEFT JOIN rrh_programming_sessions progs ON progs.id = prog.session_id
+                    WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM(w.work_order_id))
+                      AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+                      AND prog.is_deleted = false
+                      AND (progs.is_deleted IS NULL OR progs.is_deleted = false)
+                ) as programming_passed_count
             FROM rrh_work_orders w
             WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
               AND NOT EXISTS (
                 SELECT 1
-                FROM rrh_hipot_sessions s
+                FROM rrh_pre_burn_in_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
+                  AND REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'
                   AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
               )
             ORDER BY w.created_at DESC, w.id DESC
@@ -85,16 +86,16 @@ export const getEligibleHipotWorkOrders = async (_req: Request, res: Response) =
 
         return res.status(200).json({ success: true, data: result.rows });
     } catch (err: any) {
-        logger.error('Error in getEligibleHipotWorkOrders: ' + err.message);
-        return res.status(500).json({ message: 'Failed to fetch eligible work orders for Hipot.', error: err.message });
+        logger.error('Error in getEligiblePreBurnInWorkOrders: ' + err.message);
+        return res.status(500).json({ message: 'Failed to fetch eligible work orders for Pre Burn In.', error: err.message });
     }
 };
 
 /**
- * GET /api/rrh/hipot/work-orders/:woId/pre-burn-in-details
- * Returns Pre Burn In passed count and work order details for a specific work order
+ * GET /api/rrh/pre-burn-in/work-orders/:woId/programming-details
+ * Returns Programming passed count and work order details for a specific work order
  */
-export const getWorkOrderPreBurnInDetails = async (req: Request, res: Response) => {
+export const getWorkOrderProgrammingDetails = async (req: Request, res: Response) => {
     try {
         const { woId } = req.params;
         if (!woId) return res.status(400).json({ message: 'Work order ID required.' });
@@ -109,18 +110,18 @@ export const getWorkOrderPreBurnInDetails = async (req: Request, res: Response) 
         );
 
         const countRes = await pool.query(
-            `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))))::int as count
-             FROM rrh_pre_burn_in_inspections pbi
-             LEFT JOIN rrh_pre_burn_in_sessions pbis ON pbis.id = pbi.session_id
-             WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1))
-               AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-               AND pbi.is_deleted = false
-               AND (pbis.is_deleted IS NULL OR pbis.is_deleted = false)`,
+            `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))))::int as count
+             FROM rrh_programming_inspections prog
+             LEFT JOIN rrh_programming_sessions progs ON progs.id = prog.session_id
+             WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1))
+               AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+               AND prog.is_deleted = false
+               AND (progs.is_deleted IS NULL OR progs.is_deleted = false)`,
             [cleanWoId]
         );
 
         const wo = woRes.rows[0] || null;
-        const pbiPassedCount = countRes.rows[0]?.count || 0;
+        const progPassedCount = countRes.rows[0]?.count || 0;
 
         return res.status(200).json({
             success: true,
@@ -128,20 +129,20 @@ export const getWorkOrderPreBurnInDetails = async (req: Request, res: Response) 
                 work_order_id: wo?.work_order_id || cleanWoId,
                 work_order_date: wo?.work_order_date || null,
                 lot_quantity: Number(wo?.lot_quantity) || 0,
-                pre_burn_in_passed_count: pbiPassedCount
+                programming_passed_count: progPassedCount
             }
         });
     } catch (err: any) {
-        logger.error(`Error in getWorkOrderPreBurnInDetails: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to fetch Pre Burn In details.', error: err.message });
+        logger.error(`Error in getWorkOrderProgrammingDetails: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to fetch Programming details.', error: err.message });
     }
 };
 
 /**
- * POST /api/rrh/hipot/sessions
- * Start or resume a Hipot session
+ * POST /api/rrh/pre-burn-in/sessions
+ * Start or resume a Pre Burn In session
  */
-export const createHipotSession = async (req: Request, res: Response) => {
+export const createPreBurnInSession = async (req: Request, res: Response) => {
     const { work_order_id } = req.body;
     const operator = getSessionUser(req);
 
@@ -155,59 +156,57 @@ export const createHipotSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if an active session already exists for this Work Order
-        const activeCheck = await client.query(
-            `SELECT * FROM rrh_hipot_sessions 
+        // Check if an active or completed session already exists for this Work Order under ECN
+        const sessionCheck = await client.query(
+            `SELECT * FROM rrh_pre_burn_in_sessions 
              WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
-               AND status IN ('Pending', 'In Progress', 'Paused') 
+               AND REPLACE(COALESCE(route, 'ECN'), '-', '_') = 'ECN'
+               AND UPPER(TRIM(status)) IN ('PENDING', 'IN PROGRESS', 'PAUSED', 'COMPLETED') 
                AND is_deleted = false
              ORDER BY created_at DESC 
              LIMIT 1`,
             [cleanWo]
         );
 
-        if (activeCheck.rows.length > 0) {
-            const existing = activeCheck.rows[0];
-            if (existing.status !== 'In Progress') {
-                await client.query(
-                    `UPDATE rrh_hipot_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                    [existing.id]
-                );
-                existing.status = 'In Progress';
+        if (sessionCheck.rows.length > 0) {
+            const existing = sessionCheck.rows[0];
+            await client.query('ROLLBACK');
+            if (String(existing.status).toUpperCase() === 'COMPLETED') {
+                return res.status(409).json({ message: `Work order "${cleanWo}" has already been completed in Pre Burn In.` });
             }
-            await client.query('COMMIT');
-            return res.status(200).json(existing);
+            return res.status(409).json({ message: `An active session already exists for work order "${cleanWo}".`, session: existing });
         }
 
-        // Create new Hipot session
+        // Create new Pre Burn In session
         const insertRes = await client.query(
-            `INSERT INTO rrh_hipot_sessions (
+            `INSERT INTO rrh_pre_burn_in_sessions (
                 work_order_id, 
                 status, 
                 created_by, 
-                created_by_name
-             ) VALUES ($1, 'In Progress', $2, $3)
+                created_by_name,
+                route
+             ) VALUES ($1, 'In Progress', $2, $3, 'ECN')
              RETURNING *`,
             [cleanWo, operator.username, operator.name]
         );
 
         await client.query('COMMIT');
-        logger.info(`Started new Hipot session ID ${insertRes.rows[0].id} for Work Order ${work_order_id}`);
+        logger.info(`Started new Pre Burn In session ID ${insertRes.rows[0].id} for Work Order ${work_order_id}`);
         return res.status(201).json(insertRes.rows[0]);
     } catch (err: any) {
         await client.query('ROLLBACK');
-        logger.error(`Error in createHipotSession: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to create Hipot session.', error: err.message });
+        logger.error(`Error in createPreBurnInSession: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to create Pre Burn In session.', error: err.message });
     } finally {
         client.release();
     }
 };
 
 /**
- * GET /api/rrh/hipot/sessions
- * List Hipot sessions with status, search and pagination
+ * GET /api/rrh/pre-burn-in/sessions
+ * List Pre Burn In sessions with status, search and pagination
  */
-export const getHipotSessions = async (req: Request, res: Response) => {
+export const getPreBurnInSessions = async (req: Request, res: Response) => {
     try {
         const page = Math.max(1, parseInt(req.query.page as string) || 1);
         const limit = Math.max(1, parseInt(req.query.limit as string) || 5);
@@ -216,7 +215,10 @@ export const getHipotSessions = async (req: Request, res: Response) => {
         const status = (req.query.status as string || '').trim();
 
         const queryParams: any[] = [];
-        let whereClauses: string[] = ['s.is_deleted = false'];
+        let whereClauses: string[] = [
+            's.is_deleted = false',
+            "REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'"
+        ];
 
         if (search) {
             queryParams.push(`%${search}%`);
@@ -236,7 +238,7 @@ export const getHipotSessions = async (req: Request, res: Response) => {
 
         const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
-        const countQuery = `SELECT COUNT(*)::int as total FROM rrh_hipot_sessions s ${whereSql}`;
+        const countQuery = `SELECT COUNT(*)::int as total FROM rrh_pre_burn_in_sessions s ${whereSql}`;
         const countRes = await pool.query(countQuery, queryParams);
         const total = countRes.rows[0]?.total || 0;
 
@@ -248,26 +250,26 @@ export const getHipotSessions = async (req: Request, res: Response) => {
                 w.date,
                 COALESCE((
                     SELECT COUNT(*)::int 
-                    FROM rrh_hipot_inspections insp 
+                    FROM rrh_pre_burn_in_inspections insp 
                     WHERE insp.session_id = s.id 
                       AND insp.is_deleted = false 
                       AND (UPPER(TRIM(insp.status)) IN ('COMPLETED', 'PASS') OR insp.status ILIKE '%pass%' OR insp.status ILIKE '%complete%')
                 ), 0) as completed_count,
                 COALESCE((
                     SELECT COUNT(*)::int 
-                    FROM rrh_hipot_inspections insp 
+                    FROM rrh_pre_burn_in_inspections insp 
                     WHERE insp.session_id = s.id 
                       AND insp.is_deleted = false 
                       AND UPPER(TRIM(insp.status)) = 'FAIL'
                 ), 0) as failed_count,
                 COALESCE((
                     SELECT COUNT(*)::int 
-                    FROM rrh_hipot_inspections insp 
+                    FROM rrh_pre_burn_in_inspections insp 
                     WHERE insp.session_id = s.id 
                       AND insp.is_deleted = false 
                       AND (insp.debug_status IS NOT NULL OR insp.is_reinspected = true OR insp.defect_fixed IS NOT NULL)
                 ), 0) as debug_count
-            FROM rrh_hipot_sessions s
+            FROM rrh_pre_burn_in_sessions s
             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
             ${whereSql}
             ORDER BY s.created_at DESC, s.id DESC
@@ -284,16 +286,16 @@ export const getHipotSessions = async (req: Request, res: Response) => {
             totalPages: Math.ceil(total / limit) || 1
         });
     } catch (err: any) {
-        logger.error(`Error in getHipotSessions: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to fetch Hipot sessions.', error: err.message });
+        logger.error(`Error in getPreBurnInSessions: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to fetch Pre Burn In sessions.', error: err.message });
     }
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id
+ * GET /api/rrh/pre-burn-in/sessions/:id
  * Retrieve session info and live statistics
  */
-export const getHipotSessionById = async (req: Request, res: Response) => {
+export const getPreBurnInSessionById = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     try {
@@ -309,28 +311,28 @@ export const getHipotSessionById = async (req: Request, res: Response) => {
                            OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
                         LIMIT 1
                     ) as lot_number
-             FROM rrh_hipot_sessions s
+             FROM rrh_pre_burn_in_sessions s
              LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
              WHERE s.id = $1 AND s.is_deleted = false`,
             [id]
         );
 
         if (sessionRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         const session = sessionRes.rows[0];
 
-        // Fetch Pre Burn In passed count and aggregated Hipot session stats concurrently
-        const [pbiPassedRes, hipotStatsRes] = await Promise.all([
+        // Fetch Programming passed count and aggregated Pre Burn In session stats concurrently
+        const [progPassedRes, pbiStatsRes] = await Promise.all([
             pool.query(
                 `SELECT COUNT(*)::int as total
-                 FROM rrh_pre_burn_in_inspections pbi
-                 LEFT JOIN rrh_pre_burn_in_sessions pbis ON pbis.id = pbi.session_id
-                 WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1))
-                   AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-                   AND pbi.is_deleted = false
-                   AND (pbis.is_deleted IS NULL OR pbis.is_deleted = false)`,
+                 FROM rrh_programming_inspections prog
+                 LEFT JOIN rrh_programming_sessions progs ON progs.id = prog.session_id
+                 WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1))
+                   AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+                   AND prog.is_deleted = false
+                   AND (progs.is_deleted IS NULL OR progs.is_deleted = false)`,
                 [session.work_order_id]
             ),
             pool.query(
@@ -339,27 +341,27 @@ export const getHipotSessionById = async (req: Request, res: Response) => {
                     COUNT(*) FILTER (WHERE status = 'FAIL')::int AS failed,
                     COUNT(*) FILTER (WHERE debug_status IS NOT NULL OR is_reinspected = true OR defect_fixed IS NOT NULL)::int AS debug_count,
                     COUNT(*) FILTER (WHERE status IN ('COMPLETED', 'PASS') AND is_reinspected = true)::int AS edited_pass
-                 FROM rrh_hipot_inspections
+                 FROM rrh_pre_burn_in_inspections
                  WHERE session_id = $1 AND is_deleted = false`,
                 [id]
             )
         ]);
 
-        const pbiPassedCount = pbiPassedRes.rows[0]?.total || 0;
-        const statsRow = hipotStatsRes.rows[0] || {};
+        const progPassedCount = progPassedRes.rows[0]?.total || 0;
+        const statsRow = pbiStatsRes.rows[0] || {};
         const completedCount = statsRow.completed || 0;
         const failedCount = statsRow.failed || 0;
         const debugCount = statsRow.debug_count || 0;
         const editedPassCount = statsRow.edited_pass || 0;
 
         const lotQuantity = session.lot_quantity || 0;
-        const pending = Math.max(0, (lotQuantity || pbiPassedCount) - completedCount);
+        const pending = Math.max(0, (lotQuantity || progPassedCount) - completedCount);
 
         return res.status(200).json({
             session,
             stats: {
                 lotQuantity,
-                preBurnInPassed: pbiPassedCount,
+                programmingPassed: progPassedCount,
                 totalScanned: completedCount + failedCount,
                 completed: completedCount,
                 passed: completedCount,
@@ -370,16 +372,16 @@ export const getHipotSessionById = async (req: Request, res: Response) => {
             }
         });
     } catch (err: any) {
-        logger.error(`Error in getHipotSessionById: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to fetch Hipot session details.', error: err.message });
+        logger.error(`Error in getPreBurnInSessionById: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to fetch Pre Burn In session details.', error: err.message });
     }
 };
 
 /**
- * PATCH /api/rrh/hipot/sessions/:id/status
+ * PATCH /api/rrh/pre-burn-in/sessions/:id/status
  * Update session status (e.g. Completed, Paused, In Progress)
  */
-export const updateHipotSessionStatus = async (req: Request, res: Response) => {
+export const updatePreBurnInSessionStatus = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { status } = req.body;
     const operator = getSessionUser(req);
@@ -390,7 +392,7 @@ export const updateHipotSessionStatus = async (req: Request, res: Response) => {
 
     try {
         const updateRes = await pool.query(
-            `UPDATE rrh_hipot_sessions 
+            `UPDATE rrh_pre_burn_in_sessions 
              SET status = $1, 
                  updated_by = $2, 
                  updated_by_name = $3, 
@@ -401,27 +403,27 @@ export const updateHipotSessionStatus = async (req: Request, res: Response) => {
         );
 
         if (updateRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         return res.status(200).json(updateRes.rows[0]);
     } catch (err: any) {
-        logger.error(`Error in updateHipotSessionStatus: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to update Hipot session status.', error: err.message });
+        logger.error(`Error in updatePreBurnInSessionStatus: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to update Pre Burn In session status.', error: err.message });
     }
 };
 
 /**
- * DELETE /api/rrh/hipot/sessions/:id
- * Soft delete a Hipot session
+ * DELETE /api/rrh/pre-burn-in/sessions/:id
+ * Soft delete a Pre Burn In session
  */
-export const deleteHipotSession = async (req: Request, res: Response) => {
+export const deletePreBurnInSession = async (req: Request, res: Response) => {
     const { id } = req.params;
     const operator = getSessionUser(req);
 
     try {
         const delRes = await pool.query(
-            `UPDATE rrh_hipot_sessions 
+            `UPDATE rrh_pre_burn_in_sessions 
              SET is_deleted = true, 
                  deleted_by = $1, 
                  deleted_by_name = $2, 
@@ -432,12 +434,12 @@ export const deleteHipotSession = async (req: Request, res: Response) => {
         );
 
         if (delRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         // Soft-delete child inspections of this session
         await pool.query(
-            `UPDATE rrh_hipot_inspections 
+            `UPDATE rrh_pre_burn_in_inspections 
              SET is_deleted = true, 
                  deleted_by = $1, 
                  deleted_at = CURRENT_TIMESTAMP 
@@ -445,18 +447,18 @@ export const deleteHipotSession = async (req: Request, res: Response) => {
             [operator.username, id]
         );
 
-        return res.status(200).json({ success: true, message: 'Hipot session deleted successfully.' });
+        return res.status(200).json({ success: true, message: 'Pre Burn In session deleted successfully.' });
     } catch (err: any) {
-        logger.error(`Error in deleteHipotSession: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to delete Hipot session.', error: err.message });
+        logger.error(`Error in deletePreBurnInSession: ${err.message}`);
+        return res.status(500).json({ message: 'Failed to delete Pre Burn In session.', error: err.message });
     }
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/remaining-master-data
- * Fetch units passed from Pre Burn In that are ready for Hipot and have not yet been inspected in this Hipot session.
+ * GET /api/rrh/pre-burn-in/sessions/:id/remaining-master-data
+ * Fetch units passed from Programming that are ready for Pre Burn In and have not yet been inspected in this Pre Burn In session.
  */
-export const getRemainingPreBurnInMasterData = async (req: Request, res: Response) => {
+export const getRemainingProgrammingMasterData = async (req: Request, res: Response) => {
     const { id } = req.params;
     const search = (req.query.search as string || '').trim();
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -465,12 +467,12 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
 
     try {
         const sessionRes = await pool.query(
-            `SELECT work_order_id FROM rrh_hipot_sessions WHERE id = $1 AND is_deleted = false`,
+            `SELECT work_order_id FROM rrh_pre_burn_in_sessions WHERE id = $1 AND is_deleted = false`,
             [id]
         );
 
         if (sessionRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         const woId = sessionRes.rows[0].work_order_id;
@@ -481,55 +483,53 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
             queryParams.push(`%${search}%`);
             searchClause = `
                 AND (
-                    pbi.serial_number ILIKE $${queryParams.length}
-                    OR pbi.band_serial_no ILIKE $${queryParams.length}
-                    OR pbi.physical_tpn ILIKE $${queryParams.length}
-                    OR pbi.duplexer_main ILIKE $${queryParams.length}
-                    OR pbi.duplexer_part_no ILIKE $${queryParams.length}
-                    OR pbi.tejas_dc_no ILIKE $${queryParams.length}
-                    OR pbi.tejas_obd_no ILIKE $${queryParams.length}
-                    OR pbi.lot ILIKE $${queryParams.length}
-                    OR pbi.rrh_unit ILIKE $${queryParams.length}
-                    OR pbi.sl_no ILIKE $${queryParams.length}
+                    prog.serial_number ILIKE $${queryParams.length}
+                    OR prog.band_serial_no ILIKE $${queryParams.length}
+                    OR prog.physical_tpn ILIKE $${queryParams.length}
+                    OR prog.duplexer_main ILIKE $${queryParams.length}
+                    OR prog.duplexer_part_no ILIKE $${queryParams.length}
+                    OR prog.tejas_dc_no ILIKE $${queryParams.length}
+                    OR prog.tejas_obd_no ILIKE $${queryParams.length}
+                    OR prog.lot ILIKE $${queryParams.length}
+                    OR prog.rrh_unit ILIKE $${queryParams.length}
+                    OR prog.sl_no ILIKE $${queryParams.length}
                 )
             `;
         }
 
-        // Base CTE to get the latest Pre Burn In inspection per physical unit
+        // Base CTE to get the latest Programming inspection per physical unit
         const cteQuery = `
-            WITH latest_pbi AS (
-                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))))
-                    pbi.id as pre_burn_in_id,
-                    pbi.programming_inspection_id,
-                    pbi.ipqc_inspection_id,
-                    pbi.ivi_inspection_id,
+            WITH latest_prog AS (
+                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))))
+                    prog.id as programming_id,
+                    prog.ipqc_inspection_id,
+                    prog.ivi_inspection_id,
                     COALESCE(
-                        pbi.sl_no,
                         prog.sl_no,
                         ipqc.sl_no,
                         ivi.sl_no,
                         (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE ins.id = ivi.inward_scan_id LIMIT 1),
-                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(pbi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(pbi.serial_number)) LIMIT 1),
-                        (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))) LIMIT 1)
+                        (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(prog.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(prog.serial_number)) LIMIT 1),
+                        (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))) LIMIT 1)
                     ) as sl_no,
-                    pbi.work_order_id,
-                    pbi.serial_number,
-                    COALESCE(pbi.band_serial_no, pbi.serial_number) as band_serial_no,
-                    pbi.physical_serial_number,
-                    pbi.physical_tpn,
-                    pbi.band,
-                    pbi.status as pre_burn_in_status,
-                    pbi.remarks,
-                    pbi.scanned_at as pre_burn_in_scanned_at,
-                    pbi.scanned_by as pre_burn_in_scanned_by,
-                    pbi.e_label,
-                    pbi.pam_tpn,
-                    pbi.pam1,
-                    pbi.pam2,
-                    pbi.pam3,
-                    pbi.pam4,
-                    pbi.rfpc_tpn,
-                    pbi.rfpc_sl_no,
+                    prog.work_order_id,
+                    prog.serial_number,
+                    COALESCE(prog.band_serial_no, prog.serial_number) as band_serial_no,
+                    prog.physical_serial_number,
+                    prog.physical_tpn,
+                    prog.band,
+                    prog.status as programming_status,
+                    prog.remarks,
+                    prog.scanned_at as programming_scanned_at,
+                    prog.scanned_by as programming_scanned_by,
+                    prog.e_label,
+                    prog.pam_tpn,
+                    prog.pam1,
+                    prog.pam2,
+                    prog.pam3,
+                    prog.pam4,
+                    prog.rfpc_tpn,
+                    prog.rfpc_sl_no,
                     ivi.duplexer_main,
                     ivi.duplexer_part_no,
                     ivi.rrh_unit,
@@ -537,14 +537,13 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
                     ivi.tejas_obd_no,
                     ivi.bat_lot_no as lot,
                     ivi.bat_lot_no
-                FROM rrh_pre_burn_in_inspections pbi
-                LEFT JOIN rrh_programming_inspections prog ON prog.id = pbi.programming_inspection_id
-                LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-                LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
-                WHERE (UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1)) OR UPPER(TRIM(COALESCE(prog.work_order_id, ''))) = UPPER(TRIM($1)) OR UPPER(TRIM(COALESCE(ivi.work_order_id, ''))) = UPPER(TRIM($1)))
-                  AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-                  AND pbi.is_deleted = false
-                ORDER BY UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))), pbi.scanned_at DESC, pbi.id DESC
+                FROM rrh_programming_inspections prog
+                LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = prog.ipqc_inspection_id
+                LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+                WHERE (UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1)) OR UPPER(TRIM(COALESCE(ivi.work_order_id, ''))) = UPPER(TRIM($1)))
+                  AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+                  AND prog.is_deleted = false
+                ORDER BY UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))), prog.scanned_at DESC, prog.id DESC
             )
         `;
 
@@ -552,25 +551,25 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
         const countQuery = `
             ${cteQuery}
             SELECT COUNT(*)::int as total
-            FROM latest_pbi pbi
+            FROM latest_prog prog
             WHERE NOT EXISTS (
-                SELECT 1 FROM rrh_hipot_inspections hipot
-                JOIN rrh_hipot_sessions s ON s.id = hipot.session_id AND s.is_deleted = false
-                WHERE (hipot.session_id = $2 OR UPPER(TRIM(hipot.work_order_id)) = UPPER(TRIM($1)))
-                  AND hipot.is_deleted = false
+                SELECT 1 FROM rrh_pre_burn_in_inspections pbi
+                JOIN rrh_pre_burn_in_sessions s ON s.id = pbi.session_id AND s.is_deleted = false
+                WHERE (pbi.session_id = $2 OR UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1)))
+                  AND pbi.is_deleted = false
                   AND (
-                      hipot.pre_burn_in_inspection_id = pbi.pre_burn_in_id
-                      OR (hipot.serial_number IS NOT NULL AND (
-                          UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
-                          OR UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
+                      pbi.programming_inspection_id = prog.programming_id
+                      OR (pbi.serial_number IS NOT NULL AND (
+                          UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
+                          OR UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
                       ))
-                      OR (hipot.band_serial_no IS NOT NULL AND (
-                          UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
-                          OR UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
+                      OR (pbi.band_serial_no IS NOT NULL AND (
+                          UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
+                          OR UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
                       ))
-                      OR (hipot.physical_serial_number IS NOT NULL AND (
-                          UPPER(TRIM(hipot.physical_serial_number)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
-                          OR UPPER(TRIM(hipot.physical_serial_number)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
+                      OR (pbi.physical_serial_number IS NOT NULL AND (
+                          UPPER(TRIM(pbi.physical_serial_number)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
+                          OR UPPER(TRIM(pbi.physical_serial_number)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
                       ))
                   )
             )
@@ -584,60 +583,59 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
         const dataQuery = `
             ${cteQuery}
             SELECT 
-                pbi.pre_burn_in_id,
-                pbi.programming_inspection_id as prog_id,
-                pbi.ipqc_inspection_id as ipqc_id,
-                pbi.ivi_inspection_id as ivi_id,
-                pbi.sl_no,
-                pbi.work_order_id,
-                pbi.serial_number,
-                pbi.band_serial_no,
-                pbi.physical_serial_number,
-                pbi.physical_tpn,
-                pbi.band,
-                pbi.duplexer_main,
-                pbi.duplexer_part_no,
-                pbi.rrh_unit,
-                pbi.pre_burn_in_status,
-                pbi.tejas_dc_no,
-                pbi.tejas_obd_no,
-                pbi.lot,
-                pbi.bat_lot_no,
-                pbi.remarks,
-                pbi.pre_burn_in_scanned_at as scanned_at,
-                pbi.pre_burn_in_scanned_at,
-                pbi.e_label,
-                pbi.pam_tpn,
-                pbi.pam1,
-                pbi.pam2,
-                pbi.pam3,
-                pbi.pam4,
-                pbi.rfpc_tpn,
-                pbi.rfpc_sl_no
-            FROM latest_pbi pbi
+                prog.programming_id,
+                prog.ipqc_inspection_id as ipqc_id,
+                prog.ivi_inspection_id as ivi_id,
+                prog.sl_no,
+                prog.work_order_id,
+                prog.serial_number,
+                prog.band_serial_no,
+                prog.physical_serial_number,
+                prog.physical_tpn,
+                prog.band,
+                prog.duplexer_main,
+                prog.duplexer_part_no,
+                prog.rrh_unit,
+                prog.programming_status,
+                prog.tejas_dc_no,
+                prog.tejas_obd_no,
+                prog.lot,
+                prog.bat_lot_no,
+                prog.remarks,
+                prog.programming_scanned_at as scanned_at,
+                prog.programming_scanned_at,
+                prog.e_label,
+                prog.pam_tpn,
+                prog.pam1,
+                prog.pam2,
+                prog.pam3,
+                prog.pam4,
+                prog.rfpc_tpn,
+                prog.rfpc_sl_no
+            FROM latest_prog prog
             WHERE NOT EXISTS (
-                SELECT 1 FROM rrh_hipot_inspections hipot
-                JOIN rrh_hipot_sessions s ON s.id = hipot.session_id AND s.is_deleted = false
-                WHERE (hipot.session_id = $2 OR UPPER(TRIM(hipot.work_order_id)) = UPPER(TRIM($1)))
-                  AND hipot.is_deleted = false
+                SELECT 1 FROM rrh_pre_burn_in_inspections pbi
+                JOIN rrh_pre_burn_in_sessions s ON s.id = pbi.session_id AND s.is_deleted = false
+                WHERE (pbi.session_id = $2 OR UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1)))
+                  AND pbi.is_deleted = false
                   AND (
-                      hipot.pre_burn_in_inspection_id = pbi.pre_burn_in_id
-                      OR (hipot.serial_number IS NOT NULL AND (
-                          UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
-                          OR UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
+                      pbi.programming_inspection_id = prog.programming_id
+                      OR (pbi.serial_number IS NOT NULL AND (
+                          UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
+                          OR UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
                       ))
-                      OR (hipot.band_serial_no IS NOT NULL AND (
-                          UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
-                          OR UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
+                      OR (pbi.band_serial_no IS NOT NULL AND (
+                          UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
+                          OR UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
                       ))
-                      OR (hipot.physical_serial_number IS NOT NULL AND (
-                          UPPER(TRIM(hipot.physical_serial_number)) = UPPER(TRIM(COALESCE(pbi.serial_number, '')))
-                          OR UPPER(TRIM(hipot.physical_serial_number)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, '')))
+                      OR (pbi.physical_serial_number IS NOT NULL AND (
+                          UPPER(TRIM(pbi.physical_serial_number)) = UPPER(TRIM(COALESCE(prog.serial_number, '')))
+                          OR UPPER(TRIM(pbi.physical_serial_number)) = UPPER(TRIM(COALESCE(prog.band_serial_no, '')))
                       ))
                   )
             )
             ${searchClause}
-            ORDER BY pbi.pre_burn_in_scanned_at DESC, pbi.pre_burn_in_id DESC
+            ORDER BY prog.programming_scanned_at DESC, prog.programming_id DESC
             LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
         `;
 
@@ -652,14 +650,14 @@ export const getRemainingPreBurnInMasterData = async (req: Request, res: Respons
             totalPages: Math.ceil(total / limit) || 1
         });
     } catch (err: any) {
-        logger.error('Error fetching remaining Pre Burn In master data for Hipot: ' + err);
+        logger.error('Error fetching remaining Programming master data for Pre Burn In: ' + err);
         return res.status(500).json({ message: 'Internal server error while fetching remaining units.', error: err.message });
     }
 };
 
 /**
- * GET /api/rrh/hipot/lookup
- * Query unit details by serial number from Pre Burn In passed inspections
+ * GET /api/rrh/pre-burn-in/lookup
+ * Query unit details by serial number from Programming passed inspections
  */
 export const lookupSerialDetails = async (req: Request, res: Response) => {
     const { serial, work_order_id, session_id } = req.query;
@@ -672,27 +670,25 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
     const woId = typeof work_order_id === 'string' ? work_order_id.trim() : '';
 
     try {
-        let pbiQuery = `
+        let progQuery = `
             SELECT 
-                pbi.id as pre_burn_in_id,
-                pbi.programming_inspection_id,
-                pbi.ipqc_inspection_id,
-                pbi.ivi_inspection_id,
+                prog.id as programming_id,
+                prog.ipqc_inspection_id,
+                prog.ivi_inspection_id,
                 COALESCE(
-                    pbi.sl_no,
                     prog.sl_no,
                     ipqc.sl_no,
                     ivi.sl_no,
                     (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE ins.id = ivi.inward_scan_id LIMIT 1),
-                    (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(pbi.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(pbi.serial_number)) LIMIT 1),
-                    (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))) LIMIT 1)
+                    (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(prog.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(prog.serial_number)) LIMIT 1),
+                    (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))) LIMIT 1)
                 ) as sl_no,
-                pbi.work_order_id,
-                pbi.serial_number,
-                COALESCE(pbi.band_serial_no, pbi.serial_number) as band_serial_no,
-                pbi.physical_serial_number,
-                pbi.physical_tpn,
-                pbi.band,
+                prog.work_order_id,
+                prog.serial_number,
+                COALESCE(prog.band_serial_no, prog.serial_number) as band_serial_no,
+                prog.physical_serial_number,
+                prog.physical_tpn,
+                prog.band,
                 ivi.wo_date,
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
@@ -700,58 +696,57 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
                 ivi.duplexer_main,
                 ivi.duplexer_part_no,
                 ivi.rrh_unit,
-                pbi.status as pre_burn_in_status,
-                pbi.scanned_by as pre_burn_in_inspected_by,
-                pbi.remarks as pre_burn_in_remarks,
-                pbi.e_label,
-                pbi.pam_tpn,
-                pbi.pam1,
-                pbi.pam2,
-                pbi.pam3,
-                pbi.pam4,
-                pbi.rfpc_tpn,
-                pbi.rfpc_sl_no
-            FROM rrh_pre_burn_in_inspections pbi
-            LEFT JOIN rrh_pre_burn_in_sessions pbis ON pbis.id = pbi.session_id
-            LEFT JOIN rrh_programming_inspections prog ON prog.id = pbi.programming_inspection_id
-            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+                prog.status as programming_status,
+                prog.scanned_by as programming_inspected_by,
+                prog.remarks as programming_remarks,
+                prog.e_label,
+                prog.pam_tpn,
+                prog.pam1,
+                prog.pam2,
+                prog.pam3,
+                prog.pam4,
+                prog.rfpc_tpn,
+                prog.rfpc_sl_no
+            FROM rrh_programming_inspections prog
+            LEFT JOIN rrh_programming_sessions progs ON progs.id = prog.session_id
+            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = prog.ipqc_inspection_id
+            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(prog.ivi_inspection_id, ipqc.ivi_inspection_id)
             WHERE (
-                UPPER(TRIM(pbi.serial_number)) = $1
-                OR UPPER(TRIM(COALESCE(pbi.band_serial_no, ''))) = $1
-                OR UPPER(TRIM(COALESCE(pbi.physical_serial_number, ''))) = $1
+                UPPER(TRIM(prog.serial_number)) = $1
+                OR UPPER(TRIM(COALESCE(prog.band_serial_no, ''))) = $1
+                OR UPPER(TRIM(COALESCE(prog.physical_serial_number, ''))) = $1
             )
-              AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-              AND pbi.is_deleted = false
-              AND (pbis.is_deleted IS NULL OR pbis.is_deleted = false)
+              AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+              AND prog.is_deleted = false
+              AND (progs.is_deleted IS NULL OR progs.is_deleted = false)
         `;
 
         const queryParams: any[] = [cleanSerial];
         if (woId) {
-            pbiQuery += ` AND (UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($2)) OR UPPER(TRIM(COALESCE(prog.work_order_id, ''))) = UPPER(TRIM($2)) OR UPPER(TRIM(COALESCE(ivi.work_order_id, ''))) = UPPER(TRIM($2)))`;
+            progQuery += ` AND (UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($2)) OR UPPER(TRIM(COALESCE(ivi.work_order_id, ''))) = UPPER(TRIM($2)))`;
             queryParams.push(woId);
         }
 
-        pbiQuery += ` ORDER BY pbi.scanned_at DESC, pbi.id DESC LIMIT 1`;
-        const result = await pool.query(pbiQuery, queryParams);
+        progQuery += ` ORDER BY prog.scanned_at DESC, prog.id DESC LIMIT 1`;
+        const result = await pool.query(progQuery, queryParams);
 
         if (result.rows.length === 0) {
             return res.status(200).json({
                 found: false,
-                message: `Unit "${cleanSerial}" not found in passed RRH Pre Burn In inspections.`
+                message: `Unit "${cleanSerial}" not found in passed RRH Programming inspections.`
             });
         }
 
         const item = result.rows[0];
 
-        // Check if already inspected in Hipot
+        // Check if already inspected in Pre Burn In
         let alreadyInspected = false;
         let previousInspection = null;
 
         if (session_id) {
             const checkRes = await pool.query(
                 `SELECT id, status, remarks, scanned_at, scanned_by, checkpoints, pam_tpn, pam1, pam2, pam3, pam4, rfpc_tpn, rfpc_sl_no, e_label, inspection_date, sl_no
-                 FROM rrh_hipot_inspections
+                 FROM rrh_pre_burn_in_inspections
                  WHERE session_id = $1
                    AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
                    AND is_deleted = false
@@ -778,8 +773,8 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
 };
 
 /**
- * POST /api/rrh/hipot/sessions/:id/inspections
- * Submit a Hipot inspection record
+ * POST /api/rrh/pre-burn-in/sessions/:id/inspections
+ * Submit a Pre Burn In inspection record
  */
 export const submitInspection = async (req: Request, res: Response) => {
     const { id: sessionId } = req.params;
@@ -802,7 +797,6 @@ export const submitInspection = async (req: Request, res: Response) => {
         rfpc_tpn,
         rfpc_sl_no,
         remarks,
-        pre_burn_in_inspection_id,
         programming_inspection_id,
         ipqc_inspection_id,
         ivi_inspection_id,
@@ -819,7 +813,7 @@ export const submitInspection = async (req: Request, res: Response) => {
     }
 
     if (!work_order_id && sessionId) {
-        const sRes = await pool.query(`SELECT work_order_id FROM rrh_hipot_sessions WHERE id = $1`, [sessionId]);
+        const sRes = await pool.query(`SELECT work_order_id FROM rrh_pre_burn_in_sessions WHERE id = $1`, [sessionId]);
         if (sRes.rows.length > 0) {
             work_order_id = sRes.rows[0].work_order_id;
         }
@@ -851,7 +845,7 @@ export const submitInspection = async (req: Request, res: Response) => {
         // Check if there was a previous failed inspection for this serial in this session
         const prevInspectionRes = await client.query(
             `SELECT id, status, remarks, is_reinspected, defect_fixed 
-             FROM rrh_hipot_inspections 
+             FROM rrh_pre_burn_in_inspections 
              WHERE session_id = $1 
                AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
                AND is_deleted = false
@@ -871,48 +865,46 @@ export const submitInspection = async (req: Request, res: Response) => {
                 }
                 // Soft delete previous failure so the new inspection takes precedence
                 await client.query(
-                    `UPDATE rrh_hipot_inspections SET is_deleted = true WHERE id = $1`,
+                    `UPDATE rrh_pre_burn_in_inspections SET is_deleted = true WHERE id = $1`,
                     [prev.id]
                 );
             }
         }
 
         let resolvedSlNo = sl_no;
-        if (!pre_burn_in_inspection_id) {
-            const pbiLookup = await client.query(
-                `SELECT id, programming_inspection_id, ipqc_inspection_id, ivi_inspection_id, sl_no, e_label, pam_tpn, pam1, pam2, pam3, pam4, rfpc_tpn, rfpc_sl_no, physical_serial_number, physical_tpn, band
-                 FROM rrh_pre_burn_in_inspections
+        if (!programming_inspection_id) {
+            const progLookup = await client.query(
+                `SELECT id, ipqc_inspection_id, ivi_inspection_id, sl_no, e_label, pam_tpn, pam1, pam2, pam3, pam4, rfpc_tpn, rfpc_sl_no, physical_serial_number, physical_tpn, band
+                 FROM rrh_programming_inspections
                  WHERE (UPPER(TRIM(serial_number)) = $1 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $1 OR UPPER(TRIM(COALESCE(physical_serial_number, ''))) = $1)
                    AND (UPPER(TRIM(status)) IN ('COMPLETED', 'PASS') OR status ILIKE '%pass%' OR status ILIKE '%complete%')
                    AND is_deleted = false
                  ORDER BY scanned_at DESC, id DESC LIMIT 1`,
                 [cleanSerial]
             );
-            if (pbiLookup.rows.length > 0) {
-                const pbi = pbiLookup.rows[0];
-                pre_burn_in_inspection_id = pbi.id;
-                programming_inspection_id = programming_inspection_id || pbi.programming_inspection_id;
-                ipqc_inspection_id = ipqc_inspection_id || pbi.ipqc_inspection_id;
-                ivi_inspection_id = ivi_inspection_id || pbi.ivi_inspection_id;
-                if (!resolvedSlNo) resolvedSlNo = pbi.sl_no;
-                if (!physical_serial_number) physical_serial_number = pbi.physical_serial_number;
-                if (!physical_tpn) physical_tpn = pbi.physical_tpn;
-                if (!band) band = pbi.band;
-                if (!e_label) e_label = pbi.e_label;
-                if (!pam_tpn) pam_tpn = pbi.pam_tpn;
-                if (!pam1) pam1 = pbi.pam1;
-                if (!pam2) pam2 = pbi.pam2;
-                if (!pam3) pam3 = pbi.pam3;
-                if (!pam4) pam4 = pbi.pam4;
-                if (!rfpc_tpn) rfpc_tpn = pbi.rfpc_tpn;
-                if (!rfpc_sl_no) rfpc_sl_no = pbi.rfpc_sl_no;
+            if (progLookup.rows.length > 0) {
+                const prog = progLookup.rows[0];
+                programming_inspection_id = prog.id;
+                ipqc_inspection_id = ipqc_inspection_id || prog.ipqc_inspection_id;
+                ivi_inspection_id = ivi_inspection_id || prog.ivi_inspection_id;
+                if (!resolvedSlNo) resolvedSlNo = prog.sl_no;
+                if (!physical_serial_number) physical_serial_number = prog.physical_serial_number;
+                if (!physical_tpn) physical_tpn = prog.physical_tpn;
+                if (!band) band = prog.band;
+                if (!e_label) e_label = prog.e_label;
+                if (!pam_tpn) pam_tpn = prog.pam_tpn;
+                if (!pam1) pam1 = prog.pam1;
+                if (!pam2) pam2 = prog.pam2;
+                if (!pam3) pam3 = prog.pam3;
+                if (!pam4) pam4 = prog.pam4;
+                if (!rfpc_tpn) rfpc_tpn = prog.rfpc_tpn;
+                if (!rfpc_sl_no) rfpc_sl_no = prog.rfpc_sl_no;
             }
         }
 
         if (!resolvedSlNo) {
             const slRes = await client.query(
                 `SELECT COALESCE(
-                    pbi.sl_no,
                     prog.sl_no,
                     ipqc.sl_no,
                     ivi.sl_no,
@@ -920,14 +912,13 @@ export const submitInspection = async (req: Request, res: Response) => {
                     (SELECT ins.sl_no FROM rrh_inward_scans ins WHERE UPPER(TRIM(ins.serial_number)) = UPPER(TRIM($1)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM($1)) LIMIT 1),
                     (SELECT ri.sl_no FROM rrh_inventory ri WHERE UPPER(TRIM(ri.band_serial_no)) = UPPER(TRIM($1)) LIMIT 1)
                  ) as sl_no
-                 FROM rrh_pre_burn_in_inspections pbi
-                 LEFT JOIN rrh_programming_inspections prog ON prog.id = pbi.programming_inspection_id
-                 LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-                 LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
-                 WHERE (pbi.id = $2 OR UPPER(TRIM(pbi.serial_number)) = $1 OR UPPER(TRIM(COALESCE(pbi.band_serial_no, ''))) = $1)
-                   AND pbi.is_deleted = false
-                 ORDER BY (CASE WHEN pbi.id = $2 THEN 1 ELSE 0 END) DESC, pbi.scanned_at DESC, pbi.id DESC LIMIT 1`,
-                [cleanSerial, pre_burn_in_inspection_id || 0]
+                 FROM rrh_programming_inspections prog
+                 LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = prog.ipqc_inspection_id
+                 LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+                 WHERE (prog.id = $2 OR UPPER(TRIM(prog.serial_number)) = $1 OR UPPER(TRIM(COALESCE(prog.band_serial_no, ''))) = $1)
+                   AND prog.is_deleted = false
+                 ORDER BY (CASE WHEN prog.id = $2 THEN 1 ELSE 0 END) DESC, prog.scanned_at DESC, prog.id DESC LIMIT 1`,
+                [cleanSerial, programming_inspection_id || 0]
             );
             resolvedSlNo = slRes.rows[0]?.sl_no || null;
         }
@@ -935,7 +926,7 @@ export const submitInspection = async (req: Request, res: Response) => {
         const cleanInspectionDate = inspection_date ? String(inspection_date).split('T')[0] : new Date().toISOString().split('T')[0];
 
         const insertQuery = `
-            INSERT INTO rrh_hipot_inspections (
+            INSERT INTO rrh_pre_burn_in_inspections (
                 session_id,
                 work_order_id,
                 serial_number,
@@ -955,7 +946,6 @@ export const submitInspection = async (req: Request, res: Response) => {
                 status,
                 remarks,
                 scanned_by,
-                pre_burn_in_inspection_id,
                 programming_inspection_id,
                 ipqc_inspection_id,
                 ivi_inspection_id,
@@ -967,7 +957,7 @@ export const submitInspection = async (req: Request, res: Response) => {
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 
                 $8::date, 
-                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
             ) RETURNING *
         `;
 
@@ -989,9 +979,8 @@ export const submitInspection = async (req: Request, res: Response) => {
             rfpc_tpn || null,
             rfpc_sl_no || null,
             finalStatus,
-            remarks || (finalStatus === 'FAIL' ? 'Hipot Verification Failed' : null),
+            remarks || (finalStatus === 'FAIL' ? 'Pre Burn In Verification Failed' : null),
             operator.name || operator.username || 'System Admin',
-            pre_burn_in_inspection_id || null,
             programming_inspection_id || null,
             ipqc_inspection_id || null,
             ivi_inspection_id || null,
@@ -1003,19 +992,19 @@ export const submitInspection = async (req: Request, res: Response) => {
         ]);
 
         await client.query('COMMIT');
-        logger.info(`Hipot inspection submitted for unit ${cleanSerial} with status ${finalStatus}`);
+        logger.info(`Pre Burn In inspection submitted for unit ${cleanSerial} with status ${finalStatus}`);
         return res.status(201).json({ success: true, data: insertRes.rows[0] });
     } catch (err: any) {
         await client.query('ROLLBACK');
         logger.error(`Error in submitInspection: ${err.message}`);
-        return res.status(500).json({ message: 'Failed to submit Hipot inspection.', error: err.message });
+        return res.status(500).json({ message: 'Failed to submit Pre Burn In inspection.', error: err.message });
     } finally {
         client.release();
     }
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/inspections
+ * GET /api/rrh/pre-burn-in/sessions/:id/inspections
  * Scanned product logs table
  */
 export const getScannedInspections = async (req: Request, res: Response) => {
@@ -1030,16 +1019,8 @@ export const getScannedInspections = async (req: Request, res: Response) => {
         const queryParams: any[] = [sessionId];
         let searchClause = '';
 
-        if (statusParam && statusParam !== 'ALL') {
-            if (statusParam === 'PASS') {
-                queryParams.push('COMPLETED');
-                queryParams.push('PASS');
-                searchClause += ` AND p.status IN ($${queryParams.length - 1}, $${queryParams.length})`;
-            } else {
-                queryParams.push(statusParam);
-                searchClause += ` AND p.status = $${queryParams.length}`;
-            }
-        }
+        // Recent inspections strictly means PASSED inspections (never FAIL/FAILED)
+        searchClause += ` AND (p.status IN ('COMPLETED', 'PASS') OR p.status ILIKE '%pass%' OR p.status ILIKE '%complete%') AND UPPER(TRIM(p.status)) NOT IN ('FAIL', 'FAILED')`;
 
         if (search) {
             queryParams.push(`%${search}%`);
@@ -1064,7 +1045,7 @@ export const getScannedInspections = async (req: Request, res: Response) => {
 
         const countQuery = `
             SELECT COUNT(*)::int as total
-            FROM rrh_hipot_inspections p
+            FROM rrh_pre_burn_in_inspections p
             WHERE p.session_id = $1 AND p.is_deleted = false
             ${searchClause}
         `;
@@ -1077,11 +1058,10 @@ export const getScannedInspections = async (req: Request, res: Response) => {
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
                 ivi.bat_lot_no as lot
-            FROM rrh_hipot_inspections p
-            LEFT JOIN rrh_pre_burn_in_inspections pbi ON pbi.id = p.pre_burn_in_inspection_id
-            LEFT JOIN rrh_programming_inspections prog ON prog.id = COALESCE(p.programming_inspection_id, pbi.programming_inspection_id)
-            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+            FROM rrh_pre_burn_in_inspections p
+            LEFT JOIN rrh_programming_inspections prog ON prog.id = p.programming_inspection_id
+            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, prog.ipqc_inspection_id)
+            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
             WHERE p.session_id = $1 AND p.is_deleted = false
             ${searchClause}
             ORDER BY p.scanned_at DESC, p.id DESC
@@ -1105,7 +1085,7 @@ export const getScannedInspections = async (req: Request, res: Response) => {
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/failed-inspections
+ * GET /api/rrh/pre-burn-in/sessions/:id/failed-inspections
  * Failed inspections for the session
  */
 export const getFailedInspections = async (req: Request, res: Response) => {
@@ -1118,11 +1098,10 @@ export const getFailedInspections = async (req: Request, res: Response) => {
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
                 ivi.bat_lot_no as lot
-            FROM rrh_hipot_inspections p
-            LEFT JOIN rrh_pre_burn_in_inspections pbi ON pbi.id = p.pre_burn_in_inspection_id
-            LEFT JOIN rrh_programming_inspections prog ON prog.id = COALESCE(p.programming_inspection_id, pbi.programming_inspection_id)
-            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+            FROM rrh_pre_burn_in_inspections p
+            LEFT JOIN rrh_programming_inspections prog ON prog.id = p.programming_inspection_id
+            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, prog.ipqc_inspection_id)
+            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
             WHERE p.session_id = $1 
               AND p.status = 'FAIL' 
               AND (p.debug_status IS NULL OR p.debug_status = 'PENDING' OR p.debug_status NOT IN ('DEBUG_PASS', 'REPAIRED', 'RECTIFIED', 'PASS'))
@@ -1140,10 +1119,10 @@ export const getFailedInspections = async (req: Request, res: Response) => {
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/export
- * Export Hipot Inspection records to Excel with multi-section report layout
+ * GET /api/rrh/pre-burn-in/sessions/:id/export
+ * Export Pre Burn In Inspection records to Excel with multi-section report layout
  */
-export const exportHipotExcel = async (req: Request, res: Response) => {
+export const exportPreBurnInExcel = async (req: Request, res: Response) => {
     const { id } = req.params;
     const statusParam = (req.query.status as string || req.query.type as string || '').trim().toUpperCase();
     const operator = getSessionUser(req);
@@ -1162,28 +1141,28 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
                            OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
                         LIMIT 1
                     ) as lot_number
-             FROM rrh_hipot_sessions s
+             FROM rrh_pre_burn_in_sessions s
              LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
              WHERE s.id = $1 AND s.is_deleted = false`,
             [id]
         );
 
         if (sessionRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         const session = sessionRes.rows[0];
 
-        // Concurrently fetch Pre Burn In passed count and Hipot inspection counts
-        const [pbiPassedRes, hipotStatsRes] = await Promise.all([
+        // Concurrently fetch Programming passed count and Pre Burn In inspection counts
+        const [progPassedRes, pbiStatsRes] = await Promise.all([
             pool.query(
                 `SELECT COUNT(*)::int as total
-                 FROM rrh_pre_burn_in_inspections pbi
-                 LEFT JOIN rrh_pre_burn_in_sessions pbis ON pbis.id = pbi.session_id
-                 WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1))
-                   AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-                   AND pbi.is_deleted = false
-                   AND (pbis.is_deleted IS NULL OR pbis.is_deleted = false)`,
+                 FROM rrh_programming_inspections prog
+                 LEFT JOIN rrh_programming_sessions progs ON progs.id = prog.session_id
+                 WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1))
+                   AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+                   AND prog.is_deleted = false
+                   AND (progs.is_deleted IS NULL OR progs.is_deleted = false)`,
                 [session.work_order_id]
             ),
             pool.query(
@@ -1192,19 +1171,19 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
                     COUNT(*) FILTER (WHERE status = 'FAIL')::int AS failed,
                     COUNT(*) FILTER (WHERE debug_status IS NOT NULL)::int AS debug_count,
                     COUNT(*) FILTER (WHERE status IN ('COMPLETED', 'PASS') AND is_reinspected = true)::int AS edited_pass
-                 FROM rrh_hipot_inspections
+                 FROM rrh_pre_burn_in_inspections
                  WHERE session_id = $1 AND is_deleted = false`,
                 [id]
             )
         ]);
 
-        const preBurnInPassedCount = pbiPassedRes.rows[0]?.total || 0;
-        const statsRow = hipotStatsRes.rows[0] || {};
+        const programmingPassedCount = progPassedRes.rows[0]?.total || 0;
+        const statsRow = pbiStatsRes.rows[0] || {};
         const completedCount = statsRow.completed || 0;
         const failedCount = statsRow.failed || 0;
         const lotQuantity = Number(session.lot_quantity) || 0;
         const totalScanned = completedCount + failedCount;
-        const pending = Math.max(0, (lotQuantity || preBurnInPassedCount) - completedCount);
+        const pending = Math.max(0, (lotQuantity || programmingPassedCount) - completedCount);
 
         let filterClause = '';
         const isFail = statusParam === 'FAIL' || statusParam === 'FAILED';
@@ -1221,11 +1200,10 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
                 ivi.bat_lot_no as lot
-             FROM rrh_hipot_inspections p
-             LEFT JOIN rrh_pre_burn_in_inspections pbi ON pbi.id = p.pre_burn_in_inspection_id
-             LEFT JOIN rrh_programming_inspections prog ON prog.id = COALESCE(p.programming_inspection_id, pbi.programming_inspection_id)
-             LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-             LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+             FROM rrh_pre_burn_in_inspections p
+             LEFT JOIN rrh_programming_inspections prog ON prog.id = p.programming_inspection_id
+             LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, prog.ipqc_inspection_id)
+             LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
              WHERE p.session_id = $1 AND p.is_deleted = false ${filterClause}
              ORDER BY p.scanned_at DESC, p.id DESC`,
             [id]
@@ -1320,8 +1298,8 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
         ws.getRow(r).height = 38;
         const titleCell = ws.getCell(`A${r}`);
         titleCell.value = isFail
-            ? '🏭  RRH HIPOT FAILED INSPECTIONS REPORT'
-            : (isRecent ? '🏭  RRH HIPOT RECENT INSPECTIONS REPORT' : '🏭  RRH HIPOT SESSION REPORT');
+            ? '🏭  RRH PRE-BURN-IN FAILED INSPECTIONS REPORT'
+            : (isRecent ? '🏭  RRH PRE-BURN-IN RECENT INSPECTIONS REPORT' : '🏭  RRH PRE-BURN-IN SESSION REPORT');
         titleCell.font = { name: 'Calibri', size: 16, bold: true, color: { argb: 'FFFFFFFF' } };
         titleCell.fill = isFail ? RED_BANNER : (isRecent ? GREEN : NAVY);
         titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
@@ -1330,7 +1308,7 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
 
         ws.getRow(r).height = 18;
         const subCell = ws.getCell(`A${r}`);
-        subCell.value = `Stage: RRH Hipot  |  Generated: ${fmtDate(new Date())}  |  Generated By: ${operator.name || operator.username || 'admin@sfcs.com'}`;
+        subCell.value = `Stage: RRH Pre-Burn-In  |  Generated: ${fmtDate(new Date())}  |  Generated By: ${operator.name || operator.username || 'admin@sfcs.com'}`;
         subCell.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FFCBD5E1' } };
         subCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
         subCell.alignment = { vertical: 'middle', horizontal: 'center' };
@@ -1350,35 +1328,35 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
 
         r++; // Spacer
 
-        // SECTION 2: PRE-BURN-IN & SOURCE SPECIFICATIONS
-        addSectionHeader('  2.  PRE-BURN-IN & SOURCE SPECIFICATIONS', TEAL, r); r++;
-        addKVRow(r, 'Source Stage', 'RRH Pre-Burn-In'); r++;
-        addKVRow(r, 'Passed in Pre-Burn-In', preBurnInPassedCount); r++;
-        addKVRow(r, 'Target Stage', 'RRH Hipot'); r++;
+        // SECTION 2: PROGRAMMING & SOURCE SPECIFICATIONS
+        addSectionHeader('  2.  PROGRAMMING & SOURCE SPECIFICATIONS', TEAL, r); r++;
+        addKVRow(r, 'Source Stage', 'RRH Programming'); r++;
+        addKVRow(r, 'Passed in Programming', programmingPassedCount); r++;
+        addKVRow(r, 'Target Stage', 'RRH Pre-Burn-In'); r++;
         addKVRow(r, 'Sample Physical TPN', rows[0]?.physical_tpn || '-'); r++;
         addKVRow(r, 'Sample Band', rows[0]?.band || '-'); r++;
 
         r++; // Spacer
 
-        // SECTION 3: HIPOT SESSION DETAILS
-        addSectionHeader('  3.  HIPOT SESSION DETAILS', INDIGO, r); r++;
-        addKVRow(r, 'Hipot Session ID', session.id); r++;
-        addKVRow(r, 'Hipot Started By', session.created_by_name || session.created_by || 'System Admin'); r++;
-        addKVRow(r, 'Hipot Started Date & Time', fmtDate(session.created_at)); r++;
-        addKVRow(r, 'Hipot Status', session.status); r++;
+        // SECTION 3: PRE-BURN-IN SESSION DETAILS
+        addSectionHeader('  3.  PRE-BURN-IN SESSION DETAILS', INDIGO, r); r++;
+        addKVRow(r, 'Pre-Burn-In Session ID', session.id); r++;
+        addKVRow(r, 'Pre-Burn-In Started By', session.created_by_name || session.created_by || 'System Admin'); r++;
+        addKVRow(r, 'Pre-Burn-In Started Date & Time', fmtDate(session.created_at)); r++;
+        addKVRow(r, 'Pre-Burn-In Status', session.status); r++;
 
         r++; // Spacer
 
         // SECTION 4: PRODUCTION SUMMARY
-        const baseQty = lotQuantity || preBurnInPassedCount || totalScanned || 0;
+        const baseQty = lotQuantity || programmingPassedCount || totalScanned || 0;
         const yieldPercent = baseQty > 0
             ? ((completedCount / baseQty) * 100).toFixed(2) + '%'
             : '0.00%';
 
         addSectionHeader('  4.  PRODUCTION SUMMARY', PLUM, r); r++;
         addKVRow(r, 'Work Order Quantity', lotQuantity || '-'); r++;
-        addKVRow(r, 'Passed in Pre-Burn-In', preBurnInPassedCount); r++;
-        addKVRow(r, 'Total Scanned (Hipot)', totalScanned); r++;
+        addKVRow(r, 'Passed in Programming', programmingPassedCount); r++;
+        addKVRow(r, 'Total Scanned (Pre-Burn-In)', totalScanned); r++;
         addKVRow(r, 'Passed Quantity', completedCount); r++;
         addKVRow(r, 'Yield (%)', yieldPercent); r++;
         addKVRow(r, 'Failed Quantity', failedCount); r++;
@@ -1470,10 +1448,10 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
         ws.mergeCells(`A${r}:J${r}`);
 
         const filename = isFail
-            ? `RRH_Hipot_Failed_Report_${session.work_order_id}.xlsx`
+            ? `RRH_Pre_Burn_In_Failed_Report_${session.work_order_id}.xlsx`
             : (isRecent
-                ? `RRH_Hipot_Recent_Report_${session.work_order_id}.xlsx`
-                : `RRH_Hipot_Session_Report_${session.work_order_id}.xlsx`);
+                ? `RRH_Pre_Burn_In_Recent_Report_${session.work_order_id}.xlsx`
+                : `RRH_Pre_Burn_In_Session_Report_${session.work_order_id}.xlsx`);
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -1481,60 +1459,59 @@ export const exportHipotExcel = async (req: Request, res: Response) => {
         await workbook.xlsx.write(res);
         res.end();
     } catch (err: any) {
-        logger.error(`Error in exportHipotExcel: ${err.message}`);
+        logger.error(`Error in exportPreBurnInExcel: ${err.message}`);
         return res.status(500).json({ message: 'Failed to export report.', error: err.message });
     }
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/export-unscanned
- * Export Unscanned units ready for Hipot
+ * GET /api/rrh/pre-burn-in/sessions/:id/export-unscanned
+ * Export Unscanned units ready for Pre-Burn-In
  */
 export const exportUnscannedExcel = async (req: Request, res: Response) => {
     const { id } = req.params;
 
     try {
         const sessionRes = await pool.query(
-            `SELECT work_order_id FROM rrh_hipot_sessions WHERE id = $1 AND is_deleted = false`,
+            `SELECT work_order_id FROM rrh_pre_burn_in_sessions WHERE id = $1 AND is_deleted = false`,
             [id]
         );
 
         if (sessionRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         const woId = sessionRes.rows[0].work_order_id;
 
         const unscannedRes = await pool.query(`
-            WITH latest_pbi AS (
-                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))))
-                    pbi.id as pbi_id,
-                    pbi.sl_no,
-                    pbi.work_order_id,
-                    pbi.serial_number,
-                    COALESCE(pbi.band_serial_no, pbi.serial_number) as band_serial_no,
-                    pbi.physical_tpn,
-                    pbi.band,
-                    pbi.status as source_status,
-                    pbi.remarks,
-                    pbi.scanned_at as pbi_scanned_at,
+            WITH latest_prog AS (
+                SELECT DISTINCT ON (UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))))
+                    prog.id as prog_id,
+                    prog.sl_no,
+                    prog.work_order_id,
+                    prog.serial_number,
+                    COALESCE(prog.band_serial_no, prog.serial_number) as band_serial_no,
+                    prog.physical_tpn,
+                    prog.band,
+                    prog.status as source_status,
+                    prog.remarks,
+                    prog.scanned_at as prog_scanned_at,
                     ivi.duplexer_main,
                     ivi.duplexer_part_no,
                     ivi.rrh_unit,
                     ivi.tejas_dc_no,
                     ivi.tejas_obd_no,
                     ivi.bat_lot_no as lot
-                FROM rrh_pre_burn_in_inspections pbi
-                LEFT JOIN rrh_programming_inspections prog ON prog.id = pbi.programming_inspection_id
-                LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-                LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
-                WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1))
-                  AND (UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS') OR pbi.status ILIKE '%pass%' OR pbi.status ILIKE '%complete%')
-                  AND pbi.is_deleted = false
-                ORDER BY UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))), pbi.scanned_at DESC, pbi.id DESC
+                FROM rrh_programming_inspections prog
+                LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = prog.ipqc_inspection_id
+                LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+                WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1))
+                  AND (UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS') OR prog.status ILIKE '%pass%' OR prog.status ILIKE '%complete%')
+                  AND prog.is_deleted = false
+                ORDER BY UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))), prog.scanned_at DESC, prog.id DESC
             )
             SELECT 
-                p.pbi_id,
+                p.prog_id,
                 p.sl_no,
                 p.work_order_id,
                 p.serial_number,
@@ -1549,25 +1526,25 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
                 p.tejas_obd_no,
                 p.lot,
                 p.remarks
-            FROM latest_pbi p
+            FROM latest_prog p
             WHERE NOT EXISTS (
-                SELECT 1 FROM rrh_hipot_inspections hipot
-                JOIN rrh_hipot_sessions s ON s.id = hipot.session_id AND s.is_deleted = false
-                WHERE (hipot.session_id = $2 OR UPPER(TRIM(hipot.work_order_id)) = UPPER(TRIM($1)))
-                  AND hipot.is_deleted = false
+                SELECT 1 FROM rrh_pre_burn_in_inspections pbi
+                JOIN rrh_pre_burn_in_sessions s ON s.id = pbi.session_id AND s.is_deleted = false
+                WHERE (pbi.session_id = $2 OR UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1)))
+                  AND pbi.is_deleted = false
                   AND (
-                      hipot.pre_burn_in_inspection_id = p.pbi_id
-                      OR (hipot.serial_number IS NOT NULL AND (
-                          UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(p.serial_number, '')))
-                          OR UPPER(TRIM(hipot.serial_number)) = UPPER(TRIM(COALESCE(p.band_serial_no, '')))
+                      pbi.programming_inspection_id = p.prog_id
+                      OR (pbi.serial_number IS NOT NULL AND (
+                          UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(p.serial_number, '')))
+                          OR UPPER(TRIM(pbi.serial_number)) = UPPER(TRIM(COALESCE(p.band_serial_no, '')))
                       ))
-                      OR (hipot.band_serial_no IS NOT NULL AND (
-                          UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(p.band_serial_no, '')))
-                          OR UPPER(TRIM(hipot.band_serial_no)) = UPPER(TRIM(COALESCE(p.serial_number, '')))
+                      OR (pbi.band_serial_no IS NOT NULL AND (
+                          UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(p.band_serial_no, '')))
+                          OR UPPER(TRIM(pbi.band_serial_no)) = UPPER(TRIM(COALESCE(p.serial_number, '')))
                       ))
                   )
             )
-            ORDER BY p.pbi_scanned_at DESC, p.pbi_id DESC
+            ORDER BY p.prog_scanned_at DESC, p.prog_id DESC
         `, [woId, id]);
 
         const rows = unscannedRes.rows;
@@ -1577,7 +1554,7 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
 
         const headers = [
             'S.No.', 'Physical TPN', 'Band Serial Number', 'Duplexer Main',
-            'Duplexer Part No', 'RRH Unit', 'Pre-Burn-In Status', 'Tejas DC No',
+            'Duplexer Part No', 'RRH Unit', 'Programming Status', 'Tejas DC No',
             'Tejas OBD No', 'Lot', 'Remarks'
         ];
 
@@ -1613,7 +1590,7 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
         });
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename="RRH_Hipot_Unscanned_Units_WO_${woId}.xlsx"`);
+        res.setHeader('Content-Disposition', `attachment; filename="RRH_Pre_Burn_In_Unscanned_Units_WO_${woId}.xlsx"`);
 
         await workbook.xlsx.write(res);
         res.end();
@@ -1624,8 +1601,8 @@ export const exportUnscannedExcel = async (req: Request, res: Response) => {
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/debug-inspections
- * Debug & Rework inspection records (failed Hipot units for this session or work order)
+ * GET /api/rrh/pre-burn-in/sessions/:id/debug-inspections
+ * Debug & Rework inspection records (failed Pre Burn In units for this session or work order)
  */
 export const getDebugInspections = async (req: Request, res: Response) => {
     const { id: sessionId } = req.params;
@@ -1665,11 +1642,10 @@ export const getDebugInspections = async (req: Request, res: Response) => {
                 ivi.tejas_dc_no,
                 ivi.tejas_obd_no,
                 ivi.bat_lot_no as lot
-            FROM rrh_hipot_inspections p
-            LEFT JOIN rrh_pre_burn_in_inspections pbi ON pbi.id = p.pre_burn_in_inspection_id
-            LEFT JOIN rrh_programming_inspections prog ON prog.id = COALESCE(p.programming_inspection_id, pbi.programming_inspection_id)
-            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+            FROM rrh_pre_burn_in_inspections p
+            LEFT JOIN rrh_programming_inspections prog ON prog.id = p.programming_inspection_id
+            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, prog.ipqc_inspection_id)
+            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
             WHERE p.session_id = $1 
               AND p.is_deleted = false
               AND p.debug_status IS NOT NULL
@@ -1686,9 +1662,9 @@ export const getDebugInspections = async (req: Request, res: Response) => {
 };
 
 /**
- * PATCH /api/rrh/hipot/inspections/:id/debug-action
- * Update debug status and debug notes for a failed Hipot unit.
- * When rectified or passed in debug, it marks the unit as COMPLETED / Passed in Hipot.
+ * PATCH /api/rrh/pre-burn-in/inspections/:id/debug-action
+ * Update debug status and debug notes for a failed Pre Burn In unit.
+ * When rectified or passed in debug, it marks the unit as COMPLETED / Passed in Pre Burn In.
  */
 export const updateDebugAction = async (req: Request, res: Response) => {
     const { id } = req.params;
@@ -1706,7 +1682,7 @@ export const updateDebugAction = async (req: Request, res: Response) => {
         let updateRes;
         if (isPassing) {
             updateRes = await pool.query(
-                `UPDATE rrh_hipot_inspections
+                `UPDATE rrh_pre_burn_in_inspections
                  SET debug_status = $1,
                      status = 'COMPLETED',
                      is_reinspected = true,
@@ -1721,7 +1697,7 @@ export const updateDebugAction = async (req: Request, res: Response) => {
             );
         } else {
             updateRes = await pool.query(
-                `UPDATE rrh_hipot_inspections
+                `UPDATE rrh_pre_burn_in_inspections
                  SET debug_status = $1,
                      status = 'FAIL',
                      debug_remarks = COALESCE($2, debug_remarks),
@@ -1740,7 +1716,7 @@ export const updateDebugAction = async (req: Request, res: Response) => {
 
         return res.status(200).json({
             success: true,
-            message: isPassing ? 'Unit rectified and passed in Hipot!' : 'Debug status updated successfully.',
+            message: isPassing ? 'Unit rectified and passed in Pre Burn In!' : 'Debug status updated successfully.',
             data: updateRes.rows[0]
         });
     } catch (err: any) {
@@ -1750,7 +1726,7 @@ export const updateDebugAction = async (req: Request, res: Response) => {
 };
 
 /**
- * GET /api/rrh/hipot/sessions/:id/export-debug
+ * GET /api/rrh/pre-burn-in/sessions/:id/export-debug
  * Export debug records to Excel
  */
 export const exportDebugExcel = async (req: Request, res: Response) => {
@@ -1758,12 +1734,12 @@ export const exportDebugExcel = async (req: Request, res: Response) => {
 
     try {
         const sessionRes = await pool.query(
-            `SELECT * FROM rrh_hipot_sessions WHERE id = $1 AND is_deleted = false`,
+            `SELECT * FROM rrh_pre_burn_in_sessions WHERE id = $1 AND is_deleted = false`,
             [id]
         );
 
         if (sessionRes.rows.length === 0) {
-            return res.status(404).json({ message: 'Hipot session not found.' });
+            return res.status(404).json({ message: 'Pre Burn In session not found.' });
         }
 
         const session = sessionRes.rows[0];
@@ -1774,11 +1750,10 @@ export const exportDebugExcel = async (req: Request, res: Response) => {
                 COALESCE(p.debug_status, 'PENDING') as debug_status,
                 ivi.tejas_dc_no,
                 ivi.bat_lot_no as lot
-            FROM rrh_hipot_inspections p
-            LEFT JOIN rrh_pre_burn_in_inspections pbi ON pbi.id = p.pre_burn_in_inspection_id
-            LEFT JOIN rrh_programming_inspections prog ON prog.id = COALESCE(p.programming_inspection_id, pbi.programming_inspection_id)
-            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, pbi.ipqc_inspection_id, prog.ipqc_inspection_id)
-            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, pbi.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
+            FROM rrh_pre_burn_in_inspections p
+            LEFT JOIN rrh_programming_inspections prog ON prog.id = p.programming_inspection_id
+            LEFT JOIN rrh_ipqc_inspections ipqc ON ipqc.id = COALESCE(p.ipqc_inspection_id, prog.ipqc_inspection_id)
+            LEFT JOIN rrh_ivi_inspections ivi ON ivi.id = COALESCE(p.ivi_inspection_id, prog.ivi_inspection_id, ipqc.ivi_inspection_id)
             WHERE p.session_id = $1 
               AND p.is_deleted = false
               AND (
@@ -1834,7 +1809,7 @@ export const exportDebugExcel = async (req: Request, res: Response) => {
         });
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename="RRH_Hipot_Debug_Report_WO_${session.work_order_id}.xlsx"`);
+        res.setHeader('Content-Disposition', `attachment; filename="RRH_Pre_Burn_In_Debug_Report_WO_${session.work_order_id}.xlsx"`);
 
         await workbook.xlsx.write(res);
         res.end();

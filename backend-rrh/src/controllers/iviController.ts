@@ -5,6 +5,7 @@ import ExcelJS from 'exceljs';
 import path from 'path';
 import fs from 'fs';
 import { getUploadsDir } from '../utils/uploads';
+import { sendRrhSessionExcel } from '../utils/rrhExcelGenerator';
 
 const logger = createLogger('IviController');
 
@@ -963,7 +964,8 @@ export const submitInspection = async (req: Request, res: Response) => {
                 );
             }
 
-            const cleanRoute = (req.body.route || req.body.selected_route || 'ECN').toString().trim().toUpperCase() === 'NON_ECN' ? 'NON_ECN' : 'ECN';
+            const rawRoute = (req.body.route || req.body.selected_route || 'ECN').toString().trim().toUpperCase().replace('-', '_');
+            const cleanRoute = rawRoute === 'NON_ECN' ? 'NON_ECN' : 'ECN';
 
             // Insert inspection with is_reinspected flag, defect_fixed text, and route
             const insertRes = await client.query(
@@ -1135,6 +1137,7 @@ export const getScrapInspections = async (req: Request, res: Response) => {
  */
 export const exportIviExcel = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const operator = getSessionUser(req);
     const statusFilter = (req.query.status as string)?.trim().toUpperCase();
     const idsStr = (req.query.ids as string)?.trim();
     const isFailedOnly = statusFilter === 'FAIL';
@@ -1143,10 +1146,38 @@ export const exportIviExcel = async (req: Request, res: Response) => {
 
     try {
         const sessionRes = await pool.query(
-            `SELECT work_order_id FROM rrh_ivi_sessions WHERE id = $1`,
+            `SELECT s.*, 
+                    w.work_order_id, 
+                    w.lot_quantity, 
+                    COALESCE(w.work_order_date, w.date) as work_order_date,
+                    NULL as lot_number,
+                    w.status as wo_status
+             FROM rrh_ivi_sessions s
+             LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
+             WHERE s.id = $1 AND s.is_deleted = false`,
             [id]
         );
-        const woId = sessionRes.rows[0]?.work_order_id || `Session_${id}`;
+        const session = sessionRes.rows[0];
+        const woId = session?.work_order_id || `Session_${id}`;
+
+        // Summary counts
+        const countRes = await pool.query(
+            `SELECT 
+                COUNT(*)::int as total_scanned,
+                COUNT(*) FILTER (WHERE UPPER(TRIM(status)) = 'PASS')::int as passed_count,
+                COUNT(*) FILTER (WHERE UPPER(TRIM(status)) = 'FAIL')::int as failed_count
+             FROM rrh_ivi_inspections
+             WHERE session_id = $1 AND is_deleted = false`,
+            [id]
+        );
+        const totalScanned = countRes.rows[0]?.total_scanned || 0;
+        const passedCount = countRes.rows[0]?.passed_count || 0;
+        const failedCount = countRes.rows[0]?.failed_count || 0;
+        const lotQty = Number(session?.lot_quantity) || 0;
+        const pending = Math.max(0, lotQty - passedCount);
+        const yieldPercent = lotQty > 0
+            ? ((passedCount / lotQty) * 100).toFixed(2) + '%'
+            : (totalScanned > 0 ? ((passedCount / totalScanned) * 100).toFixed(2) + '%' : '0.00%');
 
         const params: any[] = [id];
 
@@ -1193,7 +1224,6 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         let rows = inspectionsRes.rows;
 
         if (isFailedOnly) {
-            // Deduplicate to only keep the latest failure per serial (matching UI Failed Inspections table)
             const seenSerials = new Set<string>();
             rows = rows.filter((r: any) => {
                 const sn = (r.band_serial_no || r.serial_number || '').trim().toUpperCase();
@@ -1203,117 +1233,8 @@ export const exportIviExcel = async (req: Request, res: Response) => {
             });
         }
 
-        const workbook = new ExcelJS.Workbook();
-        const sheetTitle = isFailedOnly ? 'Failed Inspections' : (isScrapOnly ? 'Scrap Inspections' : 'Recent Inspections');
-        const sheet = workbook.addWorksheet(sheetTitle);
-
-        // Determine maximum number of images in any row to dynamically adjust column width
-        let maxImgsInAnyRow = 1;
-        rows.forEach((r) => {
-            const rawImgs = r.image_urls;
-            let count = 0;
-            if (Array.isArray(rawImgs)) count = rawImgs.length;
-            else if (typeof rawImgs === 'string') {
-                try {
-                    const parsed = JSON.parse(rawImgs);
-                    if (Array.isArray(parsed)) count = parsed.length;
-                } catch { }
-            }
-            if (count > maxImgsInAnyRow) maxImgsInAnyRow = count;
-        });
-
-        const singleImgW = maxImgsInAnyRow === 1 ? 120 : (maxImgsInAnyRow === 2 ? 108 : 96);
-        const imgGap = 8;
-        const leftPad = 6;
-        const totalNeededPx = (leftPad * 2) + (maxImgsInAnyRow * singleImgW) + ((maxImgsInAnyRow - 1) * imgGap);
-        const defectColWidth = Math.max(28, Math.ceil(totalNeededPx / 7.2) + 2);
-
-        let sheetColumns: any[] = [];
-        if (isScrapOnly) {
-            sheetColumns = [
-                { header: 'S.No', key: 'sno', width: 8 },
-                { header: 'Band S.No', key: 'serial_number', width: 22 },
-                { header: 'TPN', key: 'physical_tpn', width: 20 },
-                { header: 'Remark', key: 'remarks', width: 35 }
-            ];
-        } else {
-            sheetColumns = [
-                { header: 'S.No', key: 'sno', width: 8 },
-                { header: 'Band Serial No', key: 'serial_number', width: 22 },
-                { header: 'Work Order No', key: 'work_order_id', width: 18 },
-                { header: 'Tejas DC No', key: 'tejas_dc_no', width: 18 },
-                { header: 'Tejas OBD No', key: 'tejas_obd_no', width: 18 },
-                { header: 'Physical TPN', key: 'physical_tpn', width: 20 },
-                { header: 'Band', key: 'band', width: 12 },
-                { header: 'Duplexer Make', key: 'duplexer_main', width: 20 },
-                { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 22 },
-                { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect', key: 'rrh_unit', width: 30 },
-            ];
-
-            if (!isFailedOnly) {
-                sheetColumns.push({ header: 'Defect Fixed', key: 'defect_fixed', width: 34 });
-            }
-
-            sheetColumns.push(
-                { header: 'Status', key: 'status', width: 12 },
-                { header: 'Images', key: 'photos', width: defectColWidth },
-                { header: 'Remarks', key: 'remarks', width: 28 },
-                { header: 'Scanned By', key: 'scanned_by', width: 20 },
-                { header: 'Date & Time', key: 'scanned_at', width: 22 }
-            );
-        }
-
-        sheet.columns = sheetColumns;
-
-        // Style header row (Dark Navy #0E3A5D to match defect report reference)
-        const headerRow = sheet.getRow(1);
-        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
-        headerRow.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FF0E3A5D' }
-        };
-        headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-        headerRow.height = 28;
-
-        const borderStyle: any = {
-            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
-            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
-            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
-            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
-        };
-
-        headerRow.eachCell((cell) => {
-            cell.border = borderStyle;
-        });
-
-        // Helper to locate image on disk
-        const resolveImageDiskPath = (imgUrl: string): string | null => {
-            if (!imgUrl) return null;
-            const filename = path.basename(imgUrl);
-            const cleanRel = imgUrl.replace(/^\/?uploads\//, '');
-            const candidates = [
-                path.join(getUploadsDir(), cleanRel),
-                path.join(getUploadsDir(), 'rrh', 'ivi', cleanRel.replace(/^rrh\/ivi\//, '')),
-                path.join(getUploadsDir(), 'rrh', 'ivi', filename),
-                path.join('/app/uploads', cleanRel),
-                path.join('/app/uploads/rrh/ivi', cleanRel.replace(/^rrh\/ivi\//, '')),
-                path.join('/app/uploads/rrh/ivi', filename),
-                path.join(process.cwd(), 'uploads', 'rrh', 'ivi', filename),
-                path.resolve(imgUrl)
-            ];
-            for (const p of candidates) {
-                try {
-                    if (fs.existsSync(p) && fs.statSync(p).isFile()) {
-                        return p;
-                    }
-                } catch { }
-            }
-            return null;
-        };
-
         const getDefectFixedText = (r: any): string => {
-            if (!r.is_reinspected) return '-';
+            if (!r.is_reinspected) return '—';
             if (r.defect_fixed && r.defect_fixed.trim()) {
                 const cleaned = cleanDefectDescription(r.defect_fixed.trim());
                 if (cleaned && cleaned !== '—' && cleaned !== '-') return cleaned;
@@ -1332,196 +1253,81 @@ export const exportIviExcel = async (req: Request, res: Response) => {
             if (r.rrh_unit && r.rrh_unit !== 'no defect') {
                 return cleanDefectDescription(r.rrh_unit);
             }
-            return '-';
+            return '—';
         };
 
-        // Helper to estimate the number of visual lines a text will take given column width
-        const estimateTextLines = (text: any, colWidth: number): number => {
-            if (!text || text === '—' || text === '-') return 1;
-            const str = String(text).trim();
-            if (!str) return 1;
-            const effectiveWidth = Math.max(10, colWidth - 2);
-            const paragraphs = str.split('\n');
-            let totalLines = 0;
-            for (const p of paragraphs) {
-                const cleanP = p.trim();
-                if (!cleanP) {
-                    totalLines += 1;
-                } else {
-                    totalLines += Math.max(1, Math.ceil(cleanP.length / effectiveWidth));
-                }
-            }
-            return Math.max(1, totalLines);
-        };
-
-        rows.forEach((r, idx) => {
-            if (isScrapOnly) {
-                const rowData: any = {
-                    sno: r.sl_no || (idx + 1),
-                    serial_number: r.band_serial_no || r.serial_number,
-                    physical_tpn: r.physical_tpn || '—',
-                    remarks: r.remarks || 'Scrapped unit'
-                };
-                const row = sheet.addRow(rowData);
-                row.height = 24;
-                row.alignment = { vertical: 'middle', wrapText: true };
-                return;
+        const tableRows = rows.map((r, idx) => {
+            const dateStr = r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) : '—';
+            let defectText = isFailedOnly
+                ? cleanDefectDescription(r.rrh_unit || r.remarks || '—')
+                : (r.rrh_unit && r.rrh_unit !== 'no defect' ? cleanDefectDescription(r.rrh_unit) : (r.rrh_unit || '—'));
+            if (!isFailedOnly && getDefectFixedText(r) !== '—') {
+                defectText = getDefectFixedText(r);
             }
 
-            const rawImgs = r.image_urls;
-            let imgs: string[] = [];
-            if (Array.isArray(rawImgs)) {
-                imgs = rawImgs;
-            } else if (typeof rawImgs === 'string') {
-                try {
-                    const parsed = JSON.parse(rawImgs);
-                    if (Array.isArray(parsed)) imgs = parsed;
-                } catch {
-                    imgs = [];
-                }
-            }
-
-            const rowData: any = {
-                sno: r.sl_no || (idx + 1),
-                serial_number: r.band_serial_no || r.serial_number,
-                work_order_id: r.work_order_id,
-                tejas_dc_no: r.tejas_dc_no || '—',
-                tejas_obd_no: r.tejas_obd_no || '—',
+            return {
+                sl: r.sl_no || (idx + 1),
+                band_serial_no: r.band_serial_no || r.serial_number || '—',
                 physical_tpn: r.physical_tpn || '—',
                 band: r.band || '—',
                 duplexer_main: r.duplexer_main || '—',
                 duplexer_part_no: r.duplexer_part_no || '—',
-                rrh_unit: isFailedOnly
-                    ? cleanDefectDescription(r.rrh_unit || r.remarks || '—')
-                    : (r.rrh_unit && r.rrh_unit !== 'no defect' ? cleanDefectDescription(r.rrh_unit) : (r.rrh_unit || '—')),
-                status: r.status,
-                photos: '',
-                remarks: r.remarks || '—',
+                rrh_unit: defectText,
+                status: r.status || '—',
                 scanned_by: r.scanned_by || '—',
-                scanned_at: r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-IN') : '—'
+                scanned_at: dateStr,
+                remarks: r.remarks || '—'
             };
-
-            if (!isFailedOnly) {
-                rowData.defect_fixed = getDefectFixedText(r);
-            }
-
-            const row = sheet.addRow(rowData);
-
-            // Status color highlight
-            const statusCell = row.getCell('status');
-            if (r.status === 'PASS') {
-                if (r.is_reinspected) {
-                    statusCell.font = { bold: true, color: { argb: 'FFC2410C' } }; // Orange for re-inspected PASS
-                } else {
-                    statusCell.font = { bold: true, color: { argb: 'FF15803D' } }; // Green for standard PASS
-                }
-            } else {
-                statusCell.font = { bold: true, color: { argb: 'FFDC2626' } }; // Red for FAIL
-            }
-
-            // Calculate required row height dynamically based on wrapped text across all text columns
-            const maxLines = Math.max(
-                estimateTextLines(rowData.defect_fixed, isFailedOnly ? 30 : 34),
-                estimateTextLines(rowData.rrh_unit, 30),
-                estimateTextLines(rowData.remarks, 28),
-                estimateTextLines(rowData.duplexer_part_no, 22),
-                estimateTextLines(rowData.serial_number, 22),
-                1
-            );
-            // 1 line ~ 26pt; each additional line requires ~19pt + 10pt padding so no text is clipped
-            const calculatedTextHeight = Math.max(26, maxLines * 19 + 10);
-
-            // Defect Images: embed all uploaded images side-by-side into cell
-            const photoCell = row.getCell('photos');
-            let imageEmbedded = false;
-
-            if (imgs.length > 0) {
-                const validImgPaths: string[] = [];
-                for (const imgUrl of imgs) {
-                    const diskPath = resolveImageDiskPath(imgUrl);
-                    if (diskPath) {
-                        validImgPaths.push(diskPath);
-                    }
-                }
-
-                if (validImgPaths.length > 0) {
-                    const numImgs = validImgPaths.length;
-                    const imgW = numImgs === 1 ? 120 : (numImgs === 2 ? 108 : 96);
-                    const imgH = 60;
-
-                    const photoColIndex = sheet.columns.findIndex(c => c.key === 'photos');
-
-                    validImgPaths.forEach((imgDiskPath, imgIdx) => {
-                        try {
-                            const extRaw = path.extname(imgDiskPath).toLowerCase().replace('.', '');
-                            const extension = (extRaw === 'png' ? 'png' : extRaw === 'gif' ? 'gif' : 'jpeg') as any;
-
-                            const imageId = workbook.addImage({
-                                filename: imgDiskPath,
-                                extension
-                            });
-
-                            const rowIdx0 = idx + 1; // 0-based row index
-                            const colOffsetPx = leftPad + (imgIdx * (imgW + imgGap));
-                            const colOffsetEmu = Math.round(colOffsetPx * 9525);
-                            const rowOffsetEmu = Math.round(5 * 9525);
-
-                            sheet.addImage(imageId, {
-                                tl: {
-                                    col: photoColIndex,
-                                    row: rowIdx0,
-                                    nativeCol: photoColIndex,
-                                    nativeColOff: colOffsetEmu,
-                                    nativeRow: rowIdx0,
-                                    nativeRowOff: rowOffsetEmu
-                                } as any,
-                                ext: { width: imgW, height: imgH },
-                                editAs: 'oneCell'
-                            });
-
-                            imageEmbedded = true;
-                        } catch (e: any) {
-                            logger.warn(`Failed to embed Excel image ${imgIdx + 1} for row ${idx + 1}: ${e.message}`);
-                        }
-                    });
-
-                    if (imageEmbedded) {
-                        row.height = Math.max(70, calculatedTextHeight);
-                        photoCell.value = '';
-                    }
-                }
-            }
-
-            // Center-align specific columns
-            row.getCell('sno').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-            row.getCell('status').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-            row.getCell('scanned_at').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-            row.getCell('band').alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-
-            if (!imageEmbedded) {
-                photoCell.value = imgs.length === 0 ? '—' : 'Photo Attached';
-                photoCell.font = { color: { argb: 'FF94A3B8' } };
-                photoCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-                row.height = calculatedTextHeight;
-            }
-
-            // Apply borders, middle vertical alignment & text wrap across all cells
-            row.eachCell({ includeEmpty: true }, (cell) => {
-                cell.border = borderStyle;
-                cell.alignment = {
-                    vertical: 'middle',
-                    horizontal: cell.alignment?.horizontal || 'left',
-                    wrapText: true
-                };
-            });
         });
 
-        const filename = isFailedOnly ? `RRH_IVI_Failed_Inspections_${woId}.xlsx` : `RRH_IVI_Inspections_${woId}.xlsx`;
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+        const title = isFailedOnly 
+            ? 'RRH IVI FAILED INSPECTIONS REPORT' 
+            : (isPassOnly ? 'RRH IVI RECENT INSPECTIONS REPORT' : 'RRH IVI SESSION REPORT');
+        const section4Title = isFailedOnly ? 'FAILED INSPECTIONS HISTORY' : (isPassOnly ? 'RECENT INSPECTIONS HISTORY (PASSED)' : 'SCAN HISTORY');
+        const filePrefix = isFailedOnly ? 'RRH_IVI_Failed_Inspections' : (isPassOnly ? 'RRH_IVI_Recent_Inspections' : 'RRH_IVI_Session');
 
-        await workbook.xlsx.write(res);
-        res.end();
+        await sendRrhSessionExcel(res, `${filePrefix}_${woId}.xlsx`, {
+            title,
+            stageName: 'RRH IVI Inspection',
+            route: 'Common',
+            operatorName: operator.name || operator.username,
+            workOrder: {
+                id: session?.work_order_id || woId,
+                date: session?.work_order_date,
+                quantity: session?.lot_quantity,
+                lotNumber: session?.lot_number,
+                status: session?.wo_status
+            },
+            session: {
+                id: session?.id || id,
+                status: session?.status,
+                createdBy: session?.created_by_name || session?.created_by,
+                createdAt: session?.created_at
+            },
+            productionSummary: {
+                total: lotQty,
+                passed: passedCount,
+                failed: failedCount,
+                pending: pending,
+                yieldPercent: yieldPercent
+            },
+            section4Title,
+            columns: [
+                { header: 'SL No', key: 'sl', width: 8, align: 'center' },
+                { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' },
+                { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
+                { header: 'Band', key: 'band', width: 12, align: 'center' },
+                { header: 'Duplexer Make', key: 'duplexer_main', width: 18, align: 'left' },
+                { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 20, align: 'left' },
+                { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect / Fixed', key: 'rrh_unit', width: 28, align: 'left' },
+                { header: 'Status', key: 'status', width: 14, align: 'center' },
+                { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
+                { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' },
+                { header: 'Remarks', key: 'remarks', width: 26, align: 'left' }
+            ],
+            rows: tableRows,
+            sheetName: isFailedOnly ? 'Failed Inspections' : (isPassOnly ? 'Recent Inspections' : 'Session Report')
+        });
     } catch (err: any) {
         logger.error(`Error in exportIviExcel: ${err.message}`);
         return res.status(500).json({ message: 'Failed to export inspections.', error: err.message });

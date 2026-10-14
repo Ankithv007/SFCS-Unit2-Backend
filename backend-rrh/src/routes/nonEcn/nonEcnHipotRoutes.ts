@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware } from '../../middleware/auth';
 import {
     getEligibleHipotWorkOrders,
     getWorkOrderPreBurnInDetails,
@@ -18,25 +18,21 @@ import {
     exportHipotExcel,
     exportUnscannedExcel,
     exportDebugExcel
-} from '../controllers/hipotController';
+} from '../../controllers/nonEcn/nonEcnHipotController';
 
 const router = Router();
 
-// Eligible work orders for Hipot
 router.get('/eligible-work-orders', authMiddleware, getEligibleHipotWorkOrders as (req: Request, res: Response) => void);
+router.get('/work-orders/:woId/pbi-details', authMiddleware, getWorkOrderPreBurnInDetails as (req: Request, res: Response) => void);
 router.get('/work-orders/:woId/pre-burn-in-details', authMiddleware, getWorkOrderPreBurnInDetails as (req: Request, res: Response) => void);
-
-// Serial lookup for Hipot inspection (authenticated)
 router.get('/lookup', authMiddleware, lookupSerialDetails as (req: Request, res: Response) => void);
 
-// Session management
 router.post('/sessions', authMiddleware, createHipotSession as (req: Request, res: Response) => void);
 router.get('/sessions', authMiddleware, getHipotSessions as (req: Request, res: Response) => void);
 router.get('/sessions/:id', authMiddleware, getHipotSessionById as (req: Request, res: Response) => void);
 router.patch('/sessions/:id/status', authMiddleware, updateHipotSessionStatus as (req: Request, res: Response) => void);
 router.delete('/sessions/:id', authMiddleware, deleteHipotSession as (req: Request, res: Response) => void);
 
-// Inspection submission & logs & export
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingPreBurnInMasterData as (req: Request, res: Response) => void);
 router.post('/sessions/:id/inspections', authMiddleware, submitInspection as (req: Request, res: Response) => void);
 router.get('/sessions/:id/inspections', authMiddleware, getScannedInspections as (req: Request, res: Response) => void);

@@ -48,6 +48,25 @@ export const runMigrations = async (externalClient?: any): Promise<void> => {
         await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_ID]);
         logger.info('Migration advisory lock acquired.');
 
+        // Detect and safely cleanup any INVALID indexes left behind by aborted concurrent builds
+        const invalidIndexesRes = await client.query(`
+            SELECT c.relname AS index_name, t.relname AS table_name
+            FROM pg_index i
+            JOIN pg_class c ON c.oid = i.indexrelid
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE NOT i.indisvalid AND n.nspname = 'public'
+        `);
+
+        if (invalidIndexesRes.rows.length > 0) {
+            logger.warn(`Found ${invalidIndexesRes.rows.length} INVALID index(es) from previous aborted operations. Cleaning up...`);
+            for (const row of invalidIndexesRes.rows) {
+                logger.warn(`Dropping invalid index: "${row.index_name}" on table "${row.table_name}"...`);
+                await client.query(`DROP INDEX IF EXISTS "${row.index_name}"`);
+                logger.info(`Successfully cleaned up invalid index: "${row.index_name}"`);
+            }
+        }
+
         // Ensure schema_migrations table exists with checksum tracking
         await client.query(`
             CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -10,11 +10,13 @@ import { runMigrations } from './db/runMigrations';
 import masterDataRoutes from './routes/masterDataRoutes';
 import inwardRoutes from './routes/inwardRoutes';
 import iviRoutes from './routes/iviRoutes';
-import ipqcRoutes from './routes/ipqcRoutes';
-import programmingRoutes from './routes/programmingRoutes';
-import preBurnInRoutes from './routes/preBurnInRoutes';
-import hipotRoutes from './routes/hipotRoutes';
-import postBurnInRoutes from './routes/postBurnInRoutes';
+import ecnRoutes from './routes/ecnRoutes';
+import nonEcnRoutes from './routes/nonEcnRoutes';
+import ecnIpqcRoutes from './routes/ecn/ecnIpqcRoutes';
+import ecnProgrammingRoutes from './routes/ecn/ecnProgrammingRoutes';
+import ecnPreBurnInRoutes from './routes/ecn/ecnPreBurnInRoutes';
+import ecnHipotRoutes from './routes/ecn/ecnHipotRoutes';
+import ecnPostBurnInRoutes from './routes/ecn/ecnPostBurnInRoutes';
 import { startMaintenanceJob, runMaintenanceCycle } from './jobs/maintenanceJob';
 import { scannerRateLimiter } from './middleware/rateLimiter';
 
@@ -90,11 +92,17 @@ app.use('/api/rrh', scannerRateLimiter(60, 10000));
 app.use('/api/rrh', masterDataRoutes);
 app.use('/api/rrh/inward', inwardRoutes);
 app.use('/api/rrh/ivi', iviRoutes);
-app.use('/api/rrh/ipqc', ipqcRoutes);
-app.use('/api/rrh/programming', programmingRoutes);
-app.use('/api/rrh/pre-burn-in', preBurnInRoutes);
-app.use('/api/rrh/hipot', hipotRoutes);
-app.use('/api/rrh/post-burn-in', postBurnInRoutes);
+
+// Consolidated ECN and Non-ECN Workflow Routes
+app.use('/api/rrh/ecn', ecnRoutes);
+app.use('/api/rrh/non-ecn', nonEcnRoutes);
+
+// Direct Legacy Route Aliases (ECN default)
+app.use('/api/rrh/ipqc', ecnIpqcRoutes);
+app.use('/api/rrh/programming', ecnProgrammingRoutes);
+app.use('/api/rrh/pre-burn-in', ecnPreBurnInRoutes);
+app.use('/api/rrh/hipot', ecnHipotRoutes);
+app.use('/api/rrh/post-burn-in', ecnPostBurnInRoutes);
 
 // Central Error Handler Middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

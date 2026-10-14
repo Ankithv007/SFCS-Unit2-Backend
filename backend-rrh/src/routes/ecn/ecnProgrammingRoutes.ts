@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware } from '../../middleware/auth';
 import {
     getEligibleProgrammingWorkOrders,
     getWorkOrderIpqcDetails,
@@ -18,25 +18,20 @@ import {
     exportProgrammingExcel,
     exportUnscannedExcel,
     exportDebugExcel
-} from '../controllers/programmingController';
+} from '../../controllers/ecn/ecnProgrammingController';
 
 const router = Router();
 
-// Eligible work orders for Programming
 router.get('/eligible-work-orders', authMiddleware, getEligibleProgrammingWorkOrders as (req: Request, res: Response) => void);
 router.get('/work-orders/:woId/ipqc-details', authMiddleware, getWorkOrderIpqcDetails as (req: Request, res: Response) => void);
-
-// Serial lookup for Programming inspection (authenticated)
 router.get('/lookup', authMiddleware, lookupSerialDetails as (req: Request, res: Response) => void);
 
-// Session management
 router.post('/sessions', authMiddleware, createProgrammingSession as (req: Request, res: Response) => void);
 router.get('/sessions', authMiddleware, getProgrammingSessions as (req: Request, res: Response) => void);
 router.get('/sessions/:id', authMiddleware, getProgrammingSessionById as (req: Request, res: Response) => void);
 router.patch('/sessions/:id/status', authMiddleware, updateProgrammingSessionStatus as (req: Request, res: Response) => void);
 router.delete('/sessions/:id', authMiddleware, deleteProgrammingSession as (req: Request, res: Response) => void);
 
-// Inspection submission & logs & export
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingIpqcMasterData as (req: Request, res: Response) => void);
 router.post('/sessions/:id/inspections', authMiddleware, submitInspection as (req: Request, res: Response) => void);
 router.get('/sessions/:id/inspections', authMiddleware, getScannedInspections as (req: Request, res: Response) => void);

@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
-import { pool } from '../utils/db';
-import { createLogger } from '../utils/logger';
+import { pool } from '../../utils/db';
+import { createLogger } from '../../utils/logger';
 import jwt from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
+import { sendRrhSessionExcel } from '../../utils/rrhExcelGenerator';
 
 const logger = createLogger('RRH-IPQC');
 
@@ -113,8 +114,9 @@ export const getEligibleIpqcWorkOrders = async (_req: Request, res: Response) =>
                 FROM rrh_ipqc_sessions s
                 WHERE UPPER(TRIM(s.work_order_id)) = UPPER(TRIM(w.work_order_id))
                   AND s.is_deleted = false
+                  AND REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'
                   AND UPPER(TRIM(s.status)) IN ('IN PROGRESS', 'PENDING', 'PAUSED', 'COMPLETED')
-            )
+              )
             ORDER BY w.created_at DESC, w.id DESC
         `);
 
@@ -191,28 +193,25 @@ export const createIpqcSession = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
-        // Check if an active session already exists for this Work Order
-        const activeCheck = await client.query(
+        // Check if an active or completed session already exists for this Work Order under ECN
+        const sessionCheck = await client.query(
             `SELECT * FROM rrh_ipqc_sessions 
              WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
-               AND status IN ('Pending', 'In Progress', 'Paused') 
+               AND REPLACE(COALESCE(route, 'ECN'), '-', '_') = 'ECN'
+               AND UPPER(TRIM(status)) IN ('PENDING', 'IN PROGRESS', 'PAUSED', 'COMPLETED') 
                AND is_deleted = false
              ORDER BY created_at DESC 
              LIMIT 1`,
             [cleanWo]
         );
 
-        if (activeCheck.rows.length > 0) {
-            const existing = activeCheck.rows[0];
-            if (existing.status !== 'In Progress') {
-                await client.query(
-                    `UPDATE rrh_ipqc_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                    [existing.id]
-                );
-                existing.status = 'In Progress';
+        if (sessionCheck.rows.length > 0) {
+            const existing = sessionCheck.rows[0];
+            await client.query('ROLLBACK');
+            if (String(existing.status).toUpperCase() === 'COMPLETED') {
+                return res.status(409).json({ message: `Work order "${cleanWo}" has already been completed in IPQC.` });
             }
-            await client.query('COMMIT');
-            return res.status(200).json(existing);
+            return res.status(409).json({ message: `An active session already exists for work order "${cleanWo}".`, session: existing });
         }
 
         // Create new IPQC session
@@ -221,8 +220,9 @@ export const createIpqcSession = async (req: Request, res: Response) => {
                 work_order_id, 
                 status, 
                 created_by, 
-                created_by_name
-             ) VALUES ($1, 'In Progress', $2, $3)
+                created_by_name,
+                route
+             ) VALUES ($1, 'In Progress', $2, $3, 'ECN')
              RETURNING *`,
             [cleanWo, operator.username, operator.name]
         );
@@ -252,7 +252,10 @@ export const getIpqcSessions = async (req: Request, res: Response) => {
         const status = (req.query.status as string || '').trim();
 
         const params: any[] = [];
-        let whereConditions: string[] = ['s.is_deleted = false'];
+        let whereConditions: string[] = [
+            's.is_deleted = false',
+            "REPLACE(COALESCE(s.route, 'ECN'), '-', '_') = 'ECN'"
+        ];
 
         if (status) {
             const statuses = (status as string).split(',').map((s: string) => s.trim()).filter(Boolean);
@@ -1069,16 +1072,27 @@ export const getFailedInspections = async (req: Request, res: Response) => {
 
 /**
  * GET /api/rrh/ipqc/sessions/:id/export
- * Export Scanned Products Logs to Excel
+ * Export Scanned Products Logs to Excel matching SMT Post AOI standard
  */
 export const exportIpqcExcel = async (req: Request, res: Response) => {
     const { id: sessionId } = req.params;
+    const operator = getSessionUser(req);
 
     try {
         const sessionRes = await pool.query(
-            `SELECT s.*, w.lot_quantity
+            `SELECT s.*, 
+                    COALESCE(w.lot_quantity, s.lot_quantity, 0) as lot_quantity, 
+                    COALESCE(w.work_order_date, w.date) as work_order_date,
+                    (
+                        SELECT ri.lot 
+                        FROM rrh_inventory ri 
+                        WHERE ri.import_id = w.active_import_id 
+                           OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                        LIMIT 1
+                    ) as lot_number,
+                    w.status as wo_status
              FROM rrh_ipqc_sessions s
-             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
              WHERE s.id = $1 AND s.is_deleted = false`,
             [sessionId]
         );
@@ -1089,9 +1103,35 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
 
         const session = sessionRes.rows[0];
 
-        const type = (req.query.type as string || '').toUpperCase();
-        const isFail = type === 'FAIL';
-        const statusClause = isFail ? `i.status = 'FAIL'` : `i.status IN ('COMPLETED', 'PASS')`;
+        const type = (req.query.type as string || req.query.status as string || '').toUpperCase();
+        const isFail = type === 'FAIL' || type === 'FAILED';
+        const isRecent = type === 'PASS' || type === 'RECENT' || type === 'COMPLETED';
+        let statusClause = '1=1';
+        if (isFail) {
+            statusClause = `(UPPER(TRIM(i.status)) IN ('FAIL', 'FAILED') OR i.status ILIKE '%fail%')`;
+        } else if (isRecent) {
+            statusClause = `(UPPER(TRIM(i.status)) IN ('COMPLETED', 'PASS') OR i.status ILIKE '%pass%' OR i.status ILIKE '%complete%') AND UPPER(TRIM(i.status)) NOT IN ('FAIL', 'FAILED')`;
+        }
+
+        // Summary counts
+        const countRes = await pool.query(
+            `SELECT 
+                COUNT(*)::int as total_scanned,
+                COUNT(*) FILTER (WHERE (UPPER(TRIM(status)) IN ('PASS', 'COMPLETED') OR status ILIKE '%pass%' OR status ILIKE '%complete%') AND UPPER(TRIM(status)) NOT IN ('FAIL', 'FAILED'))::int as passed_count,
+                COUNT(*) FILTER (WHERE UPPER(TRIM(status)) IN ('FAIL', 'FAILED') OR status ILIKE '%fail%')::int as failed_count
+             FROM rrh_ipqc_inspections
+             WHERE session_id = $1 AND is_deleted = false
+               AND COALESCE(route, 'ECN') = 'ECN'`,
+            [sessionId]
+        );
+        const totalScanned = countRes.rows[0]?.total_scanned || 0;
+        const passedCount = countRes.rows[0]?.passed_count || 0;
+        const failedCount = countRes.rows[0]?.failed_count || 0;
+        const lotQty = Number(session.lot_quantity) || 0;
+        const pending = Math.max(0, lotQty - passedCount);
+        const yieldPercent = lotQty > 0
+            ? ((passedCount / lotQty) * 100).toFixed(2) + '%'
+            : (totalScanned > 0 ? ((passedCount / totalScanned) * 100).toFixed(2) + '%' : '0.00%');
 
         const inspectionsRes = await pool.query(
             `SELECT i.*,
@@ -1116,11 +1156,6 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
             [sessionId]
         );
 
-        const workbook = new ExcelJS.Workbook();
-        workbook.creator = 'Velankani SFCS';
-        const sheetName = isFail ? 'Failed Inspections' : 'Scanned Products Logs';
-        const worksheet = workbook.addWorksheet(sheetName);
-
         const getDefectFixedText = (r: any): string => {
             if (!r.is_reinspected) return '—';
             if (r.defect_fixed && r.defect_fixed.trim()) {
@@ -1141,67 +1176,12 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
             return '—';
         };
 
-        // Column definition
-        worksheet.columns = isFail ? [
-            { header: 'S.NO.', key: 'sno', width: 8 },
-            { header: 'INSPECTED BY', key: 'inspected_by', width: 16 },
-            { header: 'DATE & TIME', key: 'date_time', width: 22 },
-            { header: 'BAND SERIAL NUMBER', key: 'band_serial', width: 22 },
-            { header: 'PHYSICAL SERIAL NUMBER', key: 'physical_serial', width: 24 },
-            { header: 'PHYSICAL TPN', key: 'physical_tpn', width: 20 },
-            { header: 'BAND', key: 'band', width: 10 },
-            { header: 'INSPECTION DATE', key: 'inspection_date', width: 16 },
-            { header: 'E-LABEL', key: 'e_label', width: 16 },
-            { header: 'PAM TPN', key: 'pam_tpn', width: 16 },
-            { header: 'PAM 1', key: 'pam1', width: 18 },
-            { header: 'PAM 2', key: 'pam2', width: 18 },
-            { header: 'PAM 3', key: 'pam3', width: 18 },
-            { header: 'PAM 4', key: 'pam4', width: 18 },
-            { header: 'RFPC TPN', key: 'rfpc_tpn', width: 18 },
-            { header: 'RFPC SL NO.', key: 'rfpc_sl_no', width: 20 },
-            { header: 'FAILED STAGE REMARKS', key: 'failed_stage_remarks', width: 32 },
-            { header: 'STATUS', key: 'status', width: 14 },
-            { header: 'REMARKS', key: 'remarks', width: 25 },
-        ] : [
-            { header: 'S.NO.', key: 'sno', width: 8 },
-            { header: 'INSPECTED BY', key: 'inspected_by', width: 16 },
-            { header: 'DATE & TIME', key: 'date_time', width: 22 },
-            { header: 'BAND SERIAL NUMBER', key: 'band_serial', width: 22 },
-            { header: 'PHYSICAL SERIAL NUMBER', key: 'physical_serial', width: 24 },
-            { header: 'PHYSICAL TPN', key: 'physical_tpn', width: 20 },
-            { header: 'BAND', key: 'band', width: 10 },
-            { header: 'INSPECTION DATE', key: 'inspection_date', width: 16 },
-            { header: 'E-LABEL', key: 'e_label', width: 16 },
-            { header: 'PAM TPN', key: 'pam_tpn', width: 16 },
-            { header: 'PAM 1', key: 'pam1', width: 18 },
-            { header: 'PAM 2', key: 'pam2', width: 18 },
-            { header: 'PAM 3', key: 'pam3', width: 18 },
-            { header: 'PAM 4', key: 'pam4', width: 18 },
-            { header: 'RFPC TPN', key: 'rfpc_tpn', width: 18 },
-            { header: 'RFPC SL NO.', key: 'rfpc_sl_no', width: 20 },
-            { header: 'DEFECT FIXED', key: 'defect_fixed', width: 34 },
-            { header: 'STATUS', key: 'status', width: 14 },
-            { header: 'REMARKS', key: 'remarks', width: 25 },
-        ];
-
-        // Style headers
-        worksheet.getRow(1).eachCell((cell) => {
-            cell.font = { bold: true, color: { argb: 'FFFFFF' }, size: 10 };
-            cell.fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: isFail ? '991B1B' : '1E3A8A' }
-            };
-            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-        });
-        worksheet.getRow(1).height = 28;
-
-        inspectionsRes.rows.forEach((r, idx) => {
-            const dateStr = r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-IN') : '—';
+        const tableRows = inspectionsRes.rows.map((r, idx) => {
+            const dateStr = r.scanned_at ? new Date(r.scanned_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) : '—';
             const inspDateStr = r.inspection_date ? (typeof r.inspection_date === 'string' ? r.inspection_date.split('T')[0] : (r.inspection_date instanceof Date ? `${r.inspection_date.getFullYear()}-${String(r.inspection_date.getMonth() + 1).padStart(2, '0')}-${String(r.inspection_date.getDate()).padStart(2, '0')}` : String(r.inspection_date).split('T')[0])) : '—';
 
             let failedRemarks = cleanDefectDescription(r.remarks);
-            if (isFail && r.checkpoints) {
+            if (r.checkpoints) {
                 try {
                     const cps = typeof r.checkpoints === 'string' ? JSON.parse(r.checkpoints) : r.checkpoints;
                     const fails = Array.isArray(cps) ? cps.filter((c: any) => c.status === 'FAIL') : [];
@@ -1209,96 +1189,78 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
                         const failTexts = fails
                             .map((c: any) => cleanDefectDescription(c.remark || c.description || ''))
                             .filter((s: string) => s && s !== '—');
-                        if (failTexts.length > 0) {
-                            failedRemarks = failTexts.join('; ');
-                        }
+                        if (failTexts.length > 0) failedRemarks = failTexts.join('; ');
                     }
                 } catch { }
             }
             if (!failedRemarks || failedRemarks === '-') failedRemarks = '—';
 
-            const rowData = isFail ? {
-                sno: r.sl_no || (idx + 1),
-                inspected_by: r.scanned_by || '—',
-                date_time: dateStr,
-                band_serial: r.band_serial_no || r.serial_number,
-                physical_serial: r.physical_serial_number || r.band_serial_no || r.serial_number,
+            const isRowFail = (r.status || '').toUpperCase() === 'FAIL' || (r.status || '').toUpperCase() === 'FAILED';
+            const rowRemarks = isRowFail
+                ? failedRemarks
+                : (getDefectFixedText(r) !== '—' ? getDefectFixedText(r) : (cleanDefectDescription(r.remarks) || '—'));
+
+            return {
+                sl: r.sl_no || (idx + 1),
+                band_serial_no: r.band_serial_no || r.serial_number || '—',
+                physical_serial_number: r.physical_serial_number || r.band_serial_no || r.serial_number || '—',
                 physical_tpn: r.physical_tpn || '—',
                 band: r.band || getBandFromTpn(r.physical_tpn),
                 inspection_date: inspDateStr,
-                e_label: r.e_label || '—',
-                pam_tpn: r.pam_tpn || '—',
-                pam1: r.pam1 || '—',
-                pam2: r.pam2 || '—',
-                pam3: r.pam3 || '—',
-                pam4: r.pam4 || '—',
-                rfpc_tpn: r.rfpc_tpn || '—',
-                rfpc_sl_no: r.rfpc_sl_no || '—',
-                failed_stage_remarks: failedRemarks,
-                status: r.status,
-                remarks: r.remarks || '—'
-            } : {
-                sno: r.sl_no || (idx + 1),
-                inspected_by: r.scanned_by || '—',
-                date_time: dateStr,
-                band_serial: r.band_serial_no || r.serial_number,
-                physical_serial: r.physical_serial_number || r.band_serial_no || r.serial_number,
-                physical_tpn: r.physical_tpn || '—',
-                band: r.band || getBandFromTpn(r.physical_tpn),
-                inspection_date: inspDateStr,
-                e_label: r.e_label || '—',
-                pam_tpn: r.pam_tpn || '—',
-                pam1: r.pam1 || '—',
-                pam2: r.pam2 || '—',
-                pam3: r.pam3 || '—',
-                pam4: r.pam4 || '—',
-                rfpc_tpn: r.rfpc_tpn || '—',
-                rfpc_sl_no: r.rfpc_sl_no || '—',
-                defect_fixed: getDefectFixedText(r),
-                status: r.status,
-                remarks: r.remarks || '—'
+                status: r.status || '—',
+                scanned_by: r.scanned_by || '—',
+                scanned_at: dateStr,
+                remarks: rowRemarks
             };
-
-            const row = worksheet.addRow(rowData);
-
-            const statusCell = row.getCell('status');
-            if (r.status === 'PASS' || r.status === 'COMPLETED') {
-                if (r.is_reinspected) {
-                    statusCell.font = { bold: true, color: { argb: 'FFC2410C' } };
-                } else {
-                    statusCell.font = { bold: true, color: { argb: 'FF15803D' } };
-                }
-            } else {
-                statusCell.font = { bold: true, color: { argb: 'FFDC2626' } };
-            }
-
-            row.eachCell({ includeEmpty: true }, (cell) => {
-                cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-                cell.border = {
-                    top: { style: 'thin', color: { argb: 'E2E8F0' } },
-                    bottom: { style: 'thin', color: { argb: 'E2E8F0' } },
-                    left: { style: 'thin', color: { argb: 'E2E8F0' } },
-                    right: { style: 'thin', color: { argb: 'E2E8F0' } }
-                };
-            });
-
-            // Dynamically calculate row height based on wrapped text so multi-line defects and remarks are not truncated
-            const defectText = isFail ? rowData.failed_stage_remarks : rowData.defect_fixed;
-            const maxLines = Math.max(
-                estimateTextLines(defectText, isFail ? 32 : 34),
-                estimateTextLines(rowData.remarks, 25),
-                estimateTextLines(rowData.physical_serial, 24),
-                1
-            );
-            row.height = Math.max(24, maxLines * 18 + 6);
         });
 
-        const filePrefix = isFail ? 'RRH_IPQC_Failed_Inspections' : 'RRH_IPQC_Recent_Inspections';
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=${filePrefix}_${session.work_order_id}.xlsx`);
+        const title = isFail 
+            ? 'RRH IPQC FAILED INSPECTIONS REPORT' 
+            : (isRecent ? 'RRH IPQC RECENT INSPECTIONS REPORT' : 'RRH IPQC SESSION REPORT');
+        const section4Title = isFail ? 'FAILED INSPECTIONS HISTORY' : (isRecent ? 'RECENT INSPECTIONS HISTORY (PASSED)' : 'SCAN HISTORY');
+        const filePrefix = isFail ? 'RRH_IPQC_Failed_Inspections' : (isRecent ? 'RRH_IPQC_Recent_Inspections' : 'RRH_IPQC_Session');
 
-        await workbook.xlsx.write(res);
-        res.end();
+        await sendRrhSessionExcel(res, `${filePrefix}_${session.work_order_id}.xlsx`, {
+            title,
+            stageName: 'RRH IPQC',
+            route: 'ECN',
+            operatorName: operator.name || operator.username,
+            workOrder: {
+                id: session.work_order_id,
+                date: session.work_order_date,
+                quantity: session.lot_quantity,
+                lotNumber: session.lot_number,
+                status: session.wo_status
+            },
+            session: {
+                id: session.id,
+                status: session.status,
+                createdBy: session.created_by,
+                createdAt: session.created_at
+            },
+            productionSummary: {
+                total: lotQty,
+                passed: passedCount,
+                failed: failedCount,
+                pending: pending,
+                yieldPercent: yieldPercent
+            },
+            section4Title,
+            columns: [
+                { header: 'SL No', key: 'sl', width: 8, align: 'center' },
+                { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' },
+                { header: 'Physical Serial No', key: 'physical_serial_number', width: 22, align: 'left' },
+                { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
+                { header: 'Band', key: 'band', width: 12, align: 'center' },
+                { header: 'Inspection Date', key: 'inspection_date', width: 16, align: 'center' },
+                { header: 'Status', key: 'status', width: 14, align: 'center' },
+                { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
+                { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' },
+                { header: isFail ? 'Failed Remarks' : (isRecent ? 'Remarks / Defect Fixed' : 'Remarks / Defect Details'), key: 'remarks', width: 30, align: 'left' }
+            ],
+            rows: tableRows,
+            sheetName: isFail ? 'Failed Inspections' : (isRecent ? 'Recent Inspections' : 'Session Report')
+        });
     } catch (err: any) {
         logger.error(`Error in exportIpqcExcel: ${err.message}`);
         return res.status(500).json({ message: 'Failed to export IPQC Excel.', error: err.message });

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { pool } from '../utils/db';
 import { createLogger } from '../utils/logger';
 import ExcelJS from 'exceljs';
+import { sendRrhSessionExcel } from '../utils/rrhExcelGenerator';
 
 const logger = createLogger('InwardScanController');
 
@@ -846,11 +847,18 @@ export const deleteSession = async (req: Request, res: Response) => {
  */
 export const exportSessionScansExcel = async (req: Request, res: Response) => {
     const { id } = req.params;
+    const operator = getSessionUser(req);
+
     try {
         const sessionRes = await pool.query(
-            `SELECT s.*, w.work_order_id, w.lot_quantity
+            `SELECT s.*, 
+                    w.work_order_id, 
+                    w.lot_quantity,
+                    COALESCE(w.work_order_date, w.date) as work_order_date,
+                    NULL as lot_number,
+                    w.status as wo_status
              FROM rrh_inward_sessions s
-             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
              WHERE s.id = $1 AND s.is_deleted = false`,
             [id]
         );
@@ -860,6 +868,35 @@ export const exportSessionScansExcel = async (req: Request, res: Response) => {
         }
 
         const session = sessionRes.rows[0];
+
+        const type = (req.query.type as string || req.query.status as string || '').toUpperCase();
+        const isFail = type === 'FAIL' || type === 'INVALID';
+        const isRecent = type === 'PASS' || type === 'RECENT';
+        let filterClause = '';
+        if (isFail) {
+            filterClause = ` AND (UPPER(TRIM(s.status)) IN ('FAIL', 'INVALID') OR s.status ILIKE '%fail%' OR s.status ILIKE '%invalid%')`;
+        } else if (isRecent) {
+            filterClause = ` AND (UPPER(TRIM(s.status)) IN ('PASS', 'EDITED PASS') OR s.status ILIKE '%pass%')`;
+        }
+
+        // Summary counts
+        const countRes = await pool.query(
+            `SELECT 
+                COUNT(*)::int as total_scanned,
+                COUNT(*) FILTER (WHERE UPPER(TRIM(status)) IN ('PASS', 'EDITED PASS') OR status ILIKE '%pass%')::int as passed_count,
+                COUNT(*) FILTER (WHERE UPPER(TRIM(status)) IN ('FAIL', 'INVALID') OR status ILIKE '%fail%' OR status ILIKE '%invalid%')::int as failed_count
+             FROM rrh_inward_scans
+             WHERE rrh_inward_session_id = $1 AND is_deleted = false`,
+            [id]
+        );
+        const totalScanned = countRes.rows[0]?.total_scanned || 0;
+        const passedCount = countRes.rows[0]?.passed_count || 0;
+        const failedCount = countRes.rows[0]?.failed_count || 0;
+        const lotQty = Number(session.lot_quantity) || 0;
+        const pending = Math.max(0, lotQty - passedCount);
+        const yieldPercent = lotQty > 0
+            ? ((passedCount / lotQty) * 100).toFixed(2) + '%'
+            : (totalScanned > 0 ? ((passedCount / totalScanned) * 100).toFixed(2) + '%' : '0.00%');
 
         const scansRes = await pool.query(
             `SELECT 
@@ -883,73 +920,71 @@ export const exportSessionScansExcel = async (req: Request, res: Response) => {
              FROM rrh_inward_scans s
              LEFT JOIN rrh_inventory i ON s.matched_inventory_id = i.id
              WHERE s.rrh_inward_session_id = $1 AND s.is_deleted = false
+             ${filterClause}
              ORDER BY s.scanned_at ASC, s.id ASC`,
             [id]
         );
 
         const scans = scansRes.rows;
 
-        const workbook = new ExcelJS.Workbook();
-        workbook.creator = 'SFCS System';
-        workbook.created = new Date();
+        const tableRows = scans.map((s, idx) => ({
+            sl: s.sl_no || (idx + 1),
+            barcode: s.barcode || '—',
+            physical_serial_number: s.physical_serial_number || s.barcode || '—',
+            physical_tpn: s.physical_tpn || '—',
+            band_serial_no: s.band_serial_no || '—',
+            status: s.result || s.status || '—',
+            scanned_by: s.scanned_by || '—',
+            scanned_at: s.scanned_at ? new Date(s.scanned_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) : '—',
+            remarks: s.repair_remark || s.remark || s.master_remark || '—'
+        }));
 
-        const sheet = workbook.addWorksheet('Scanned Products Logs');
+        const title = isFail 
+            ? 'RRH INWARD FAILED SCANS REPORT' 
+            : (isRecent ? 'RRH INWARD RECENT SCANS REPORT' : 'RRH INWARD SESSION REPORT');
+        const section4Title = isFail ? 'FAILED SCANS HISTORY' : (isRecent ? 'RECENT SCANS HISTORY (PASSED)' : 'SCAN HISTORY');
+        const filePrefix = isFail ? 'RRH_INWARD_Failed_Scans' : (isRecent ? 'RRH_INWARD_Recent_Scans' : 'RRH_INWARD_Session');
 
-        sheet.columns = [
-            { header: 'S.No.', key: 's_no', width: 10 },
-            { header: 'Scanned By', key: 'scanned_by', width: 20 },
-            { header: 'Date & Time', key: 'scanned_at', width: 22 },
-            { header: 'Physical TPN', key: 'physical_tpn', width: 20 },
-            { header: 'Band Serial Number', key: 'band_serial_no', width: 22 },
-            { header: 'Physical Serial Number', key: 'physical_serial_number', width: 24 },
-            { header: 'Status', key: 'status', width: 15 },
-            { header: 'Remark', key: 'remark', width: 25 },
-            { header: 'Assignment Remark', key: 'repair_remark', width: 25 },
-            { header: 'Edited By', key: 'repaired_by', width: 20 }
-        ];
-
-        const headerRow = sheet.getRow(1);
-        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-        headerRow.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FF1F4E79' }
-        };
-        headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
-        headerRow.height = 24;
-
-        scans.forEach((scan, index) => {
-            const row = sheet.addRow({
-                s_no: scan.sl_no || index + 1,
-                scanned_by: scan.scanned_by || '—',
-                scanned_at: scan.scanned_at ? new Date(scan.scanned_at).toLocaleString() : '—',
-                physical_tpn: scan.physical_tpn || '—',
-                band_serial_no: scan.band_serial_no || '—',
-                physical_serial_number: scan.physical_serial_number || scan.barcode || '—',
-                status: scan.result || scan.status || '—',
-                remark: scan.remark || scan.master_remark || '—',
-                repair_remark: scan.repair_remark || '—',
-                repaired_by: scan.repaired_by || '—'
-            });
-
-            row.alignment = { vertical: 'middle' };
-            row.getCell('s_no').alignment = { vertical: 'middle', horizontal: 'center' };
-            row.getCell('status').alignment = { vertical: 'middle', horizontal: 'center' };
-
-            const statusCell = row.getCell('status');
-            const stUpper = String(scan.result || scan.status || '').toUpperCase();
-            if (stUpper === 'PASS' || stUpper === 'EDITED PASS') {
-                statusCell.font = { color: { argb: 'FF16A34A' }, bold: true };
-            } else if (stUpper === 'INVALID' || stUpper === 'FAIL') {
-                statusCell.font = { color: { argb: 'FFDC2626' }, bold: true };
-            }
+        await sendRrhSessionExcel(res, `${filePrefix}_${session.work_order_id}.xlsx`, {
+            title,
+            stageName: 'RRH Inward Verification',
+            route: 'Common',
+            operatorName: operator.name || operator.username,
+            workOrder: {
+                id: session.work_order_id,
+                date: session.work_order_date,
+                quantity: session.lot_quantity,
+                lotNumber: session.lot_number,
+                status: session.wo_status
+            },
+            session: {
+                id: session.id,
+                status: session.status,
+                createdBy: session.created_by_name || session.created_by,
+                createdAt: session.created_at
+            },
+            productionSummary: {
+                total: lotQty,
+                passed: passedCount,
+                failed: failedCount,
+                pending: pending,
+                yieldPercent: yieldPercent
+            },
+            section4Title,
+            columns: [
+                { header: 'SL No', key: 'sl', width: 8, align: 'center' },
+                { header: 'Barcode / Scanned Serial', key: 'barcode', width: 22, align: 'left' },
+                { header: 'Physical Serial Number', key: 'physical_serial_number', width: 22, align: 'left' },
+                { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
+                { header: 'Band Serial Number', key: 'band_serial_no', width: 22, align: 'left' },
+                { header: 'Status', key: 'status', width: 14, align: 'center' },
+                { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
+                { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' },
+                { header: 'Remarks / Assignment', key: 'remarks', width: 30, align: 'left' }
+            ],
+            rows: tableRows,
+            sheetName: isFail ? 'Failed Scans' : (isRecent ? 'Recent Scans' : 'Session Report')
         });
-
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=RRH_INWARD_Scan_Logs_${session.work_order_id}.xlsx`);
-
-        await workbook.xlsx.write(res);
-        res.end();
     } catch (err: any) {
         logger.error('Error exporting session scans to Excel: ' + err);
         return res.status(500).json({ message: 'Failed to export scanned products logs to Excel.' });
