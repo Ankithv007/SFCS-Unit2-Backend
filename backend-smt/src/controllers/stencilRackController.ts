@@ -713,6 +713,11 @@ export const clearLocation = async (req: Request, res: Response) => {
                 checked_out_by_dept = null,
                 checked_out_by_role = null,
                 checked_out_at = null,
+                is_blocked = false,
+                blocked_reason = null,
+                blocked_by_code = null,
+                blocked_by_name = null,
+                blocked_at = null,
                 updated_by = $1,
                 updated_by_name = $2,
                 updated_at = CURRENT_TIMESTAMP
@@ -774,6 +779,233 @@ export const clearLocation = async (req: Request, res: Response) => {
         await client.query('ROLLBACK');
         logger.error('Error clearing location:', err);
         return res.status(500).json({ message: 'Internal server error while clearing location.' });
+    } finally {
+        client.release();
+    }
+};
+
+/**
+ * PATCH /api/smt/stencil-rack/locations/:locationId/block
+ * Toggle or explicitly set Stencil Blocked status
+ * Business rules:
+ * - Blocking is permitted ONLY when physical status is 'STORED'.
+ * - Blocking is NOT APPLICABLE when physical status is 'CHECKED_OUT' (Rejected with HTTP 400).
+ * - Empty slots cannot be blocked.
+ * - Requires 'smt_stencil_rack' 'can_edit' permission (Operators rejected with 403).
+ */
+export const toggleStencilBlock = async (req: Request, res: Response) => {
+    const locationId = req.params.locationId;
+    const { block, reason } = req.body;
+    const sessionUser = getSessionUser(req);
+
+    if (sessionUser.role === 'Operator' || sessionUser.role === 'OPERATOR') {
+        await recordUnauthorizedAttempt(req, 'smt_stencil_rack', 'can_edit', 'Unauthorized Stencil Block Attempt');
+        return res.status(403).json({ message: 'Access Denied. You are not authorized to perform this operation.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Lock and re-read the location row
+        const locationQuery = await client.query(`
+            SELECT l.*, r.status as rack_status, r.name as rack_name
+            FROM stencil_rack_locations l
+            JOIN stencil_racks r ON l.rack_id = r.id
+            WHERE l.id = $1 FOR UPDATE
+        `, [locationId]);
+
+        if (locationQuery.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Rack location not found.' });
+        }
+        const location = locationQuery.rows[0];
+
+        // 2. Reject EMPTY slots
+        if (location.status === 'EMPTY') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ message: 'Cannot block or unblock an empty location slot.' });
+        }
+
+        // Determine target blocked state
+        const targetBlockState = (block !== undefined) ? Boolean(block) : !location.is_blocked;
+
+        if (targetBlockState) {
+            // Target is to BLOCK the stencil
+            // 3. MANDATORY BUSINESS RULE: Blocking is NOT APPLICABLE to CHECKED_OUT stencils
+            if (location.status === 'CHECKED_OUT') {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ 
+                    message: 'Blocking is not applicable: this stencil is already checked out. Return it to the rack before blocking.' 
+                });
+            }
+
+            // 4. Must be STORED
+            if (location.status !== 'STORED') {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ 
+                    message: 'A stencil can be blocked only while it is physically stored in the rack (STORED).' 
+                });
+            }
+
+            if (location.is_blocked) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'This stencil is already blocked.' });
+            }
+
+            const blockedReason = (reason && reason.trim()) ? reason.trim() : 'Operational block applied by supervisor.';
+
+            const updateRes = await client.query(`
+                UPDATE stencil_rack_locations
+                SET is_blocked = true,
+                    blocked_reason = $1,
+                    blocked_by_code = $2,
+                    blocked_by_name = $3,
+                    blocked_at = CURRENT_TIMESTAMP,
+                    updated_by = $4,
+                    updated_by_name = $5,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $6
+                RETURNING *
+            `, [
+                blockedReason,
+                sessionUser.employee_code,
+                sessionUser.name,
+                sessionUser.id,
+                sessionUser.name,
+                locationId
+            ]);
+            const updatedLoc = updateRes.rows[0];
+
+            // Record movement history
+            await client.query(`
+                INSERT INTO stencil_rack_movement_history (
+                    stencil_rack_number, job_number, stencil_name, revision, thickness_mills, manufacturing_date, side,
+                    action, previous_status, current_status, employee_code, employee_name, department, role,
+                    rack_id, row_number, column_number, location_code, remarks,
+                    work_order_id, work_order_number, work_order_side
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'BLOCKED', $8, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            `, [
+                location.stencil_rack_number,
+                location.job_number,
+                location.stencil_name,
+                location.revision,
+                location.thickness_mills,
+                location.manufacturing_date,
+                location.side,
+                location.status,
+                sessionUser.employee_code,
+                sessionUser.name,
+                sessionUser.department,
+                sessionUser.role,
+                location.rack_id,
+                location.row_number,
+                location.column_number,
+                location.location_code,
+                blockedReason,
+                location.checked_out_work_order_id || null,
+                location.checked_out_work_order_number || null,
+                location.checked_out_work_order_side || null
+            ]);
+
+            // Central Audit Log
+            await recordAuditLog(
+                client,
+                'UPDATE',
+                'RACK_LOCATION',
+                locationId,
+                sessionUser.name,
+                `Stencil BLOCKED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number} by ${sessionUser.name} (${sessionUser.employee_code}). Reason: ${blockedReason}`,
+                { is_blocked: false, status: location.status },
+                { is_blocked: true, blocked_reason: blockedReason, status: location.status }
+            );
+
+            await client.query('COMMIT');
+            return res.json({ 
+                success: true, 
+                message: `Stencil '${location.stencil_rack_number || location.job_number}' has been successfully blocked.`, 
+                location: updatedLoc 
+            });
+        } else {
+            // Target is to UNBLOCK the stencil
+            if (!location.is_blocked) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: 'This stencil is already unblocked.' });
+            }
+
+            const updateRes = await client.query(`
+                UPDATE stencil_rack_locations
+                SET is_blocked = false,
+                    blocked_reason = null,
+                    blocked_by_code = null,
+                    blocked_by_name = null,
+                    blocked_at = null,
+                    updated_by = $1,
+                    updated_by_name = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $3
+                RETURNING *
+            `, [
+                sessionUser.id,
+                sessionUser.name,
+                locationId
+            ]);
+            const updatedLoc = updateRes.rows[0];
+
+            // Record movement history
+            await client.query(`
+                INSERT INTO stencil_rack_movement_history (
+                    stencil_rack_number, job_number, stencil_name, revision, thickness_mills, manufacturing_date, side,
+                    action, previous_status, current_status, employee_code, employee_name, department, role,
+                    rack_id, row_number, column_number, location_code, remarks,
+                    work_order_id, work_order_number, work_order_side
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'UNBLOCKED', $8, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            `, [
+                location.stencil_rack_number,
+                location.job_number,
+                location.stencil_name,
+                location.revision,
+                location.thickness_mills,
+                location.manufacturing_date,
+                location.side,
+                location.status,
+                sessionUser.employee_code,
+                sessionUser.name,
+                sessionUser.department,
+                sessionUser.role,
+                location.rack_id,
+                location.row_number,
+                location.column_number,
+                location.location_code,
+                (reason && reason.trim()) ? reason.trim() : 'Stencil unblocked by supervisor.',
+                location.checked_out_work_order_id || null,
+                location.checked_out_work_order_number || null,
+                location.checked_out_work_order_side || null
+            ]);
+
+            // Central Audit Log
+            await recordAuditLog(
+                client,
+                'UPDATE',
+                'RACK_LOCATION',
+                locationId,
+                sessionUser.name,
+                `Stencil UNBLOCKED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number} by ${sessionUser.name} (${sessionUser.employee_code})`,
+                { is_blocked: true, blocked_reason: location.blocked_reason, status: location.status },
+                { is_blocked: false, status: location.status }
+            );
+
+            await client.query('COMMIT');
+            return res.json({ 
+                success: true, 
+                message: `Stencil '${location.stencil_rack_number || location.job_number}' has been unblocked.`, 
+                location: updatedLoc 
+            });
+        }
+    } catch (err: any) {
+        await client.query('ROLLBACK');
+        logger.error('Error in toggleStencilBlock:', err);
+        return res.status(500).json({ message: 'Internal server error while updating stencil block status.' });
     } finally {
         client.release();
     }
@@ -861,6 +1093,11 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
                 row_number: stencil.row_number,
                 column_number: stencil.column_number,
                 location_status: stencil.status,
+                is_blocked: stencil.is_blocked || false,
+                blocked_reason: stencil.blocked_reason || null,
+                blocked_by_code: stencil.blocked_by_code || null,
+                blocked_by_name: stencil.blocked_by_name || null,
+                blocked_at: stencil.blocked_at || null,
                 remarks: stencil.remarks,
                 holder: stencil.status === 'CHECKED_OUT' ? {
                     employee_code: stencil.checked_out_by_code,
@@ -924,6 +1161,14 @@ export const scanReceive = async (req: Request, res: Response) => {
         if (location.rack_status !== 'ACTIVE') {
             await client.query('ROLLBACK');
             return res.status(400).json({ message: `Action blocked. Rack '${location.rack_name}' is currently INACTIVE.` });
+        }
+
+        // 2b. Verify stencil is not BLOCKED
+        if (location.is_blocked) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ 
+                message: 'Checkout not allowed: this stencil is BLOCKED. Unblock it before checkout.' 
+            });
         }
 
         // 3. Verify stencil is stored and available to receive
@@ -1434,6 +1679,11 @@ export const relocateStencil = async (req: Request, res: Response) => {
                 manufacturing_date = null,
                 side = null,
                 remarks = null,
+                is_blocked = false,
+                blocked_reason = null,
+                blocked_by_code = null,
+                blocked_by_name = null,
+                blocked_at = null,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
         `, [fromLoc.id]);
@@ -1450,8 +1700,13 @@ export const relocateStencil = async (req: Request, res: Response) => {
                 manufacturing_date = $6,
                 side = $7,
                 remarks = $8,
+                is_blocked = $9,
+                blocked_reason = $10,
+                blocked_by_code = $11,
+                blocked_by_name = $12,
+                blocked_at = $13,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $9
+            WHERE id = $14
         `, [
             fromLoc.stencil_rack_number,
             fromLoc.job_number,
@@ -1460,6 +1715,12 @@ export const relocateStencil = async (req: Request, res: Response) => {
             fromLoc.thickness_mills,
             fromLoc.manufacturing_date,
             fromLoc.side,
+            fromLoc.remarks,
+            fromLoc.is_blocked || false,
+            fromLoc.blocked_reason || null,
+            fromLoc.blocked_by_code || null,
+            fromLoc.blocked_by_name || null,
+            fromLoc.blocked_at || null,
             toLoc.id
         ]);
 
@@ -1591,6 +1852,10 @@ export const exportRackReport = async (req: Request, res: Response) => {
                 l.checked_out_by_code,
                 l.checked_out_by_name,
                 l.checked_out_at,
+                l.is_blocked,
+                l.blocked_reason,
+                l.blocked_by_name,
+                l.blocked_at,
                 l.remarks
             FROM stencil_rack_locations l
             JOIN stencil_racks r ON l.rack_id = r.id

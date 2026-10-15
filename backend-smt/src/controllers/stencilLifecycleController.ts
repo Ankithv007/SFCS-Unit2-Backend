@@ -53,6 +53,10 @@ export const getActiveStencils = async (req: Request, res: Response) => {
                 s.side,
                 s.remarks,
                 s.status AS physical_status,
+                s.is_blocked,
+                s.blocked_reason,
+                s.blocked_by_name,
+                s.blocked_at,
                 COALESCE(states.cycle_number, 1)::INTEGER AS cycle_number,
                 COALESCE(states.current_cycle_capacity, states.target_life_cycle, 60000)::INTEGER AS current_cycle_capacity,
                 COALESCE(states.target_life_cycle, 60000)::INTEGER AS target_life_cycle,
@@ -75,6 +79,7 @@ export const getActiveStencils = async (req: Request, res: Response) => {
             ON s.id = states.stencil_record_id
             WHERE
                 s.status = 'CHECKED_OUT'
+                AND COALESCE(s.is_blocked, false) = false
                 AND COALESCE(states.lifecycle_status, 'ACTIVE') <> 'SCRAPPED'
             ORDER BY
                 s.stencil_name ASC
@@ -182,6 +187,14 @@ export const createLifecycleRecord = async (req: Request, res: Response) => {
             return res.status(404).json({ message: 'Selected Stencil location record not found.' });
         }
         const stencil = stencilRes.rows[0];
+
+        // 1b. Reject blocked stencils: Stencil is BLOCKED — NOT APPLICABLE FOR ASSIGNMENT
+        if (stencil.is_blocked) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ 
+                message: 'Assignment blocked. Stencil is BLOCKED — NOT APPLICABLE FOR ASSIGNMENT.' 
+            });
+        }
 
         // 2. Validate physical status: Stencil MUST be CHECKED_OUT from rack before assignment
         if (stencil.status !== 'CHECKED_OUT') {

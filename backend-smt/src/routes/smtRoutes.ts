@@ -128,6 +128,7 @@ import {
     scanReceive,
     scanReturn,
     relocateStencil,
+    toggleStencilBlock,
     getMovementHistory,
     exportRackReport,
     exportSingleRackExcel
@@ -584,6 +585,7 @@ router.get('/stencil-rack/:id/locations', authenticateToken, getRackLocations);
 router.post('/stencil-rack/locations/:locationId/assign', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], assignStencil);
 router.post('/stencil-rack/locations/:locationId/clear', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], clearLocation);
 router.post('/stencil-rack/locations/:locationId/relocate', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], relocateStencil);
+router.patch('/stencil-rack/locations/:locationId/block', [authenticateToken, requirePermission('smt_stencil_rack', 'can_edit')], toggleStencilBlock);
 router.get('/stencil-rack/reports/export', authenticateToken, exportRackReport);
 router.get('/stencil-rack/:id/export/excel', authenticateToken, exportSingleRackExcel);
 
