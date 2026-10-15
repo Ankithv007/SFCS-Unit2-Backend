@@ -11,10 +11,8 @@ COPY . .
 RUN npm run build
 RUN mkdir -p dist/db/migrations && cp -r src/db/migrations/* dist/db/migrations/
 
-# Ensure uploads directory exists and is owned by non-root user
-RUN mkdir -p /app/uploads && chown -R node:node /app
-
-USER node
+# Ensure uploads directory exists
+RUN mkdir -p /app/uploads
 
 EXPOSE 5007
 
