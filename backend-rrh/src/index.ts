@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import { ensureUploadDirectoriesExist } from './utils/uploads';
+import { ensureUploadDirectoriesExist, getUploadsDir } from './utils/uploads';
 import { createLogger } from './utils/logger';
 import { pool, getPoolDiagnostics, startClusterCacheSync, stopClusterCacheSync } from './utils/db';
 import { runMigrations } from './db/runMigrations';
@@ -30,6 +30,9 @@ const logger = createLogger('Server');
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static uploads serving (Inspection photos, etc.)
+app.use('/uploads', express.static(getUploadsDir()));
 
 // Liveness & Readiness Checks
 app.get('/api/rrh/health', (req, res) => {

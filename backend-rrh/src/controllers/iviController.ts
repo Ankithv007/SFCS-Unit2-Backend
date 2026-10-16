@@ -1466,9 +1466,17 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
         } else if (typeof rawImgs === 'string') {
             try {
                 const parsed = JSON.parse(rawImgs);
-                if (Array.isArray(parsed)) images = parsed;
+                if (Array.isArray(parsed)) {
+                    images = parsed;
+                } else if (typeof parsed === 'string' && parsed.trim().length > 0) {
+                    images = [parsed.trim()];
+                }
             } catch {
-                images = [];
+                if (rawImgs.trim().startsWith('/uploads') || rawImgs.trim().startsWith('http')) {
+                    images = [rawImgs.trim()];
+                } else {
+                    images = [];
+                }
             }
         }
 
@@ -1840,17 +1848,18 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
  * Directly download an uploaded inspection photo with Content-Disposition: attachment
  */
 export const downloadInspectionPhoto = async (req: Request, res: Response) => {
-    const rawSubpath = (req.params[0] || req.params.filename || '').toString().trim();
+    const rawSubpath = (req.params[0] || req.params.filename || (req.params as any)['0'] || '').toString().trim();
     if (!rawSubpath) {
         return res.status(400).send('Filename or path is required.');
     }
     const baseDir = path.resolve(getUploadsDir(), 'rrh', 'ivi');
-    const safeFileName = path.basename(rawSubpath);
-    const resolvedPath = path.resolve(baseDir, safeFileName);
+    const cleanSubpath = rawSubpath.replace(/^[/\\]+/, '');
+    const resolvedPath = path.resolve(baseDir, cleanSubpath);
     if (!resolvedPath.startsWith(baseDir) || !fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
         return res.status(404).send('Image file not found.');
     }
-    return res.download(resolvedPath, safeFileName);
+    const downloadName = path.basename(resolvedPath);
+    return res.download(resolvedPath, downloadName);
 };
 
 /**
