@@ -96,7 +96,14 @@ export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
                 COALESCE(w.work_order_date, w.date) as work_order_date,
                 w.lot_quantity,
                 w.status,
-                w.created_at
+                w.created_at,
+                (
+                    SELECT ri.lot 
+                    FROM rrh_inventory ri 
+                    WHERE ri.import_id = w.active_import_id 
+                       OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                    LIMIT 1
+                ) as lot_number
             FROM rrh_work_orders w
             WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
               AND NOT EXISTS (
@@ -168,8 +175,13 @@ export const createIviSession = async (req: Request, res: Response) => {
         );
 
         await client.query('COMMIT');
+        const woMeta = await client.query(
+            `SELECT (SELECT ri.lot FROM rrh_inventory ri WHERE ri.import_id = w.active_import_id LIMIT 1) as lot_number, w.lot_quantity FROM rrh_work_orders w WHERE UPPER(TRIM(w.work_order_id)) = UPPER(TRIM($1))`,
+            [work_order_id]
+        );
+        const newSession = { ...insertRes.rows[0], lot_number: woMeta.rows[0]?.lot_number || null, lot_quantity: woMeta.rows[0]?.lot_quantity || null };
         logger.info(`Started new IVI session ID ${insertRes.rows[0].id} for Work Order ${work_order_id}`);
-        return res.status(201).json(insertRes.rows[0]);
+        return res.status(201).json(newSession);
     } catch (err: any) {
         await client.query('ROLLBACK');
         logger.error(`Error in createIviSession: ${err.message}`);
@@ -220,9 +232,24 @@ export const getIviSessions = async (req: Request, res: Response) => {
         // Data query
         params.push(limitNum, offset);
         const dataRes = await pool.query(
-            `SELECT s.*, w.lot_quantity, w.work_order_date, w.date
+            `SELECT s.*, w.lot_quantity, w.work_order_date, w.date,
+                    COALESCE(
+                        (
+                            SELECT ri.lot 
+                            FROM rrh_inventory ri 
+                            WHERE ri.import_id = w.active_import_id 
+                               OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT insp.bat_lot_no 
+                            FROM rrh_ivi_inspections insp 
+                            WHERE insp.session_id = s.id AND insp.bat_lot_no IS NOT NULL AND insp.bat_lot_no != '' 
+                            LIMIT 1
+                        )
+                    ) as lot_number
              FROM rrh_ivi_sessions s
-             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
              ${whereSql}
              ORDER BY s.created_at DESC
              LIMIT $${pIndex} OFFSET $${pIndex + 1}`,
@@ -250,13 +277,27 @@ export const getIviSessionById = async (req: Request, res: Response) => {
 
     try {
         const sessionRes = await pool.query(
-            `SELECT s.*, w.lot_quantity, w.work_order_date, w.date
+            `SELECT s.*, w.lot_quantity, w.work_order_date, w.date,
+                    COALESCE(
+                        (
+                            SELECT ri.lot 
+                            FROM rrh_inventory ri 
+                            WHERE ri.import_id = w.active_import_id 
+                               OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT insp.bat_lot_no 
+                            FROM rrh_ivi_inspections insp 
+                            WHERE insp.session_id = s.id AND insp.bat_lot_no IS NOT NULL AND insp.bat_lot_no != '' 
+                            LIMIT 1
+                        )
+                    ) as lot_number
              FROM rrh_ivi_sessions s
-             LEFT JOIN rrh_work_orders w ON w.work_order_id = s.work_order_id
+             LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
              WHERE s.id = $1 AND s.is_deleted = false`,
             [id]
         );
-
         if (sessionRes.rows.length === 0) {
             return res.status(404).json({ message: 'IVI session not found.' });
         }
@@ -674,7 +715,7 @@ export const lookupSerialDetails = async (req: Request, res: Response) => {
 
             // Check if already inspected in IVI
             const alreadyInspectedRes = await pool.query(
-                `SELECT id, status, scanned_at, scanned_by, duplexer_main, duplexer_part_no 
+                `SELECT id, status, scanned_at, scanned_by, duplexer_main, duplexer_part_no, duplexer_sl_no 
                  FROM rrh_ivi_inspections 
                  WHERE (UPPER(TRIM(serial_number)) = $1 OR UPPER(TRIM(band_serial_no)) = $1)
                    AND is_deleted = false
@@ -766,6 +807,7 @@ export const submitInspection = async (req: Request, res: Response) => {
         serial_number,
         duplexer_main,
         duplexer_part_no,
+        duplexer_sl_no,
         rrh_unit,
         status,
         remarks,
@@ -793,6 +835,8 @@ export const submitInspection = async (req: Request, res: Response) => {
     const cleanRrhUnitDefect = rawRrhUnitDefect !== null && rawRrhUnitDefect !== undefined ? rawRrhUnitDefect.toString().trim() : null;
 
     let cleanDuplexerPart = duplexer_part_no ? duplexer_part_no.toString().trim() : '—';
+    const rawDuplexerSlNo = req.body.duplexer_sl_no || req.body.duplexer_serial_no;
+    let cleanDuplexerSlNo = rawDuplexerSlNo ? rawDuplexerSlNo.toString().trim() : '—';
 
     if (cleanStatus !== 'SCRAP') {
         if (!rawDuplexerMake || !rawDuplexerMake.toString().trim()) {
@@ -810,6 +854,10 @@ export const submitInspection = async (req: Request, res: Response) => {
             return res.status(400).json({
                 message: 'Duplexer Part No. must contain a mix of numbers and alphabets.'
             });
+        }
+
+        if (!rawDuplexerSlNo || !rawDuplexerSlNo.toString().trim()) {
+            return res.status(400).json({ message: 'Duplexer SL.No is required.' });
         }
     }
 
@@ -982,6 +1030,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                     wo_date,
                     duplexer_main,
                     duplexer_part_no,
+                    duplexer_sl_no,
                     rrh_unit,
                     image_urls,
                     status,
@@ -993,7 +1042,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                     is_reinspected,
                     defect_fixed,
                     route
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
                 RETURNING *`,
                 [
                     id,
@@ -1008,6 +1057,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                     wo_date || null,
                     cleanDuplexerMake,
                     cleanDuplexerPart,
+                    cleanDuplexerSlNo,
                     cleanRrhUnitDefect,
                     JSON.stringify(imageUrls),
                     cleanStatus,
@@ -1038,9 +1088,10 @@ export const submitInspection = async (req: Request, res: Response) => {
                         band,
                         duplexer_main,
                         duplexer_part_no,
+                        duplexer_sl_no,
                         remarks,
                         scanned_by
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
                     [
                         id,
                         work_order_id || '',
@@ -1054,6 +1105,7 @@ export const submitInspection = async (req: Request, res: Response) => {
                         band || null,
                         cleanDuplexerMake,
                         cleanDuplexerPart,
+                        cleanDuplexerSlNo,
                         remarks ? remarks.toString().trim() : null,
                         operator.name
                     ]
@@ -1092,7 +1144,8 @@ export const getRecentInspections = async (req: Request, res: Response) => {
         const result = await pool.query(
             `SELECT 
                 rii.*,
-                COALESCE(rii.sl_no, ins.sl_no, ri.sl_no) as sl_no
+                COALESCE(rii.sl_no, ins.sl_no, ri.sl_no) as sl_no,
+                COALESCE(rii.bat_lot_no, ri.lot) as bat_lot_no
              FROM rrh_ivi_inspections rii
              LEFT JOIN rrh_inward_scans ins ON ins.id = rii.inward_scan_id 
                  OR (rii.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(rii.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(rii.serial_number))))
@@ -1150,7 +1203,13 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                     w.work_order_id, 
                     w.lot_quantity, 
                     COALESCE(w.work_order_date, w.date) as work_order_date,
-                    NULL as lot_number,
+                    (
+                        SELECT ri.lot 
+                        FROM rrh_inventory ri 
+                        WHERE ri.import_id = w.active_import_id 
+                           OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                        LIMIT 1
+                    ) as lot_number,
                     w.status as wo_status
              FROM rrh_ivi_sessions s
              LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
@@ -1183,7 +1242,8 @@ export const exportIviExcel = async (req: Request, res: Response) => {
 
         let query = `SELECT 
                 rii.*,
-                COALESCE(rii.sl_no, ins.sl_no, ri.sl_no) as sl_no
+                COALESCE(rii.sl_no, ins.sl_no, ri.sl_no) as sl_no,
+                COALESCE(rii.bat_lot_no, ri.lot) as bat_lot_no
              FROM rrh_ivi_inspections rii
              LEFT JOIN rrh_inward_scans ins ON ins.id = rii.inward_scan_id 
                  OR (rii.inward_scan_id IS NULL AND (UPPER(TRIM(ins.serial_number)) = UPPER(TRIM(rii.serial_number)) OR UPPER(TRIM(ins.band_serial_no)) = UPPER(TRIM(rii.serial_number))))
@@ -1270,21 +1330,24 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 band_serial_no: r.band_serial_no || r.serial_number || '—',
                 physical_tpn: r.physical_tpn || '—',
                 band: r.band || '—',
+                bat_lot_no: r.bat_lot_no || session?.lot_number || '—',
                 duplexer_main: r.duplexer_main || '—',
                 duplexer_part_no: r.duplexer_part_no || '—',
+                duplexer_sl_no: r.duplexer_sl_no || '—',
                 rrh_unit: defectText,
                 status: r.status || '—',
                 scanned_by: r.scanned_by || '—',
                 scanned_at: dateStr,
-                remarks: r.remarks || '—'
+                remarks: r.remarks || '—',
+                is_reinspected: Boolean(r.is_reinspected)
             };
         });
 
         const title = isFailedOnly 
             ? 'RRH IVI FAILED INSPECTIONS REPORT' 
-            : (isPassOnly ? 'RRH IVI RECENT INSPECTIONS REPORT' : 'RRH IVI SESSION REPORT');
-        const section4Title = isFailedOnly ? 'FAILED INSPECTIONS HISTORY' : (isPassOnly ? 'RECENT INSPECTIONS HISTORY (PASSED)' : 'SCAN HISTORY');
-        const filePrefix = isFailedOnly ? 'RRH_IVI_Failed_Inspections' : (isPassOnly ? 'RRH_IVI_Recent_Inspections' : 'RRH_IVI_Session');
+            : (isPassOnly ? 'RRH IVI RECENT INSPECTIONS REPORT' : (isScrapOnly ? 'RRH IVI SCRAP INSPECTIONS REPORT' : 'RRH IVI SESSION REPORT'));
+        const section4Title = isFailedOnly ? 'FAILED INSPECTIONS HISTORY' : (isPassOnly ? 'RECENT INSPECTIONS HISTORY (PASSED)' : (isScrapOnly ? 'SCRAP INSPECTIONS HISTORY' : 'SCAN HISTORY'));
+        const filePrefix = isFailedOnly ? 'RRH_IVI_Failed_Inspections' : (isPassOnly ? 'RRH_IVI_Recent_Inspections' : (isScrapOnly ? 'RRH_IVI_Scrap_Inspections' : 'RRH_IVI_Session'));
 
         await sendRrhSessionExcel(res, `${filePrefix}_${woId}.xlsx`, {
             title,
@@ -1317,8 +1380,10 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' },
                 { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
                 { header: 'Band', key: 'band', width: 12, align: 'center' },
+                { header: 'BAT Lot No', key: 'bat_lot_no', width: 16, align: 'center' },
                 { header: 'Duplexer Make', key: 'duplexer_main', width: 18, align: 'left' },
                 { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 20, align: 'left' },
+                { header: 'Duplexer SL.No', key: 'duplexer_sl_no', width: 20, align: 'left' },
                 { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect / Fixed', key: 'rrh_unit', width: 28, align: 'left' },
                 { header: 'Status', key: 'status', width: 14, align: 'center' },
                 { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
@@ -1326,7 +1391,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 { header: 'Remarks', key: 'remarks', width: 26, align: 'left' }
             ],
             rows: tableRows,
-            sheetName: isFailedOnly ? 'Failed Inspections' : (isPassOnly ? 'Recent Inspections' : 'Session Report')
+            sheetName: isFailedOnly ? 'Failed Inspections' : (isPassOnly ? 'Recent Inspections' : (isScrapOnly ? 'Scrapped Inspections' : 'Session Report'))
         });
     } catch (err: any) {
         logger.error(`Error in exportIviExcel: ${err.message}`);
@@ -1634,6 +1699,10 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
             <div class="info-item">
                 <span class="info-label">Duplexer Part No</span>
                 <span class="info-val" style="font-family: monospace;">${inspection.duplexer_part_no || '—'}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Duplexer SL.No</span>
+                <span class="info-val" style="font-family: monospace;">${inspection.duplexer_sl_no || '—'}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Status</span>

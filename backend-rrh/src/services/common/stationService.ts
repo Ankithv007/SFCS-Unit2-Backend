@@ -774,7 +774,13 @@ export class StationService {
                 `SELECT s.*, 
                         w.lot_quantity, 
                         COALESCE(w.work_order_date, w.date) as work_order_date,
-                        NULL as lot_number,
+                        (
+                            SELECT ri.lot 
+                            FROM rrh_inventory ri 
+                            WHERE ri.import_id = w.active_import_id 
+                               OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                            LIMIT 1
+                        ) as lot_number,
                         w.status as wo_status
                  FROM ${ctx.sessionTable} s
                  LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))

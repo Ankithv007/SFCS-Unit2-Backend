@@ -349,7 +349,15 @@ export const createWorkOrder = async (req: Request, res: Response) => {
             );
         } else {
             const insertWo = await client.query(
-                `INSERT INTO rrh_work_orders (work_order_id, work_order_date, date, lot_quantity, status, created_by)
+                `INSERT INTO rrh_work_orders (work_order_id, work_order_date, date, lot_quantity, 
+                (
+                    SELECT ri.lot 
+                    FROM rrh_inventory ri 
+                    WHERE ri.import_id = rrh_work_orders.active_import_id 
+                       OR (rrh_work_orders.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = rrh_work_orders.id))
+                    LIMIT 1
+                ) as lot_number,
+                status, created_by)
                  VALUES ($1, $2, $2, $3, $4, $5) RETURNING id`,
                 [cleanWoId, woDate, lotQty, 'CREATED', createdBy]
             );
@@ -667,6 +675,13 @@ export const getWorkOrders = async (req: Request, res: Response) => {
                 work_order_id, 
                 COALESCE(work_order_date, date) as work_order_date,
                 lot_quantity, 
+                (
+                    SELECT ri.lot 
+                    FROM rrh_inventory ri 
+                    WHERE ri.import_id = rrh_work_orders.active_import_id 
+                       OR (rrh_work_orders.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = rrh_work_orders.id))
+                    LIMIT 1
+                ) as lot_number,
                 status,
                 excel_filename, 
                 excel_file_size, 
@@ -812,10 +827,15 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
             }
         }
 
+        const lotRes = await client.query(
+            'SELECT lot FROM rrh_inventory WHERE import_id = $1 OR import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = $2) LIMIT 1',
+            [wo.active_import_id, wo.id]
+        );
         return res.status(200).json({
             success: true,
             data: {
                 ...wo,
+                lot_number: lotRes.rows[0]?.lot || null,
                 work_order_date: wo.work_order_date || wo.date,
                 excel_structure: structuralData
             }
@@ -961,10 +981,15 @@ export const getMasterViewData = async (req: Request, res: Response) => {
         const wo = woRes.rows[0];
 
         if (!wo.active_import_id) {
-            return res.status(200).json({
-                success: true,
-                data: {
-                    ...wo,
+            const lotRes = await client.query(
+            'SELECT lot FROM rrh_inventory WHERE import_id = $1 OR import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = $2) LIMIT 1',
+            [wo.active_import_id, wo.id]
+        );
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...wo,
+                lot_number: lotRes.rows[0]?.lot || null,
                     work_order_date: wo.work_order_date || wo.date,
                     excel_structure: null,
                     pagination: {
@@ -1090,10 +1115,15 @@ export const getMasterViewData = async (req: Request, res: Response) => {
 
         const totalPages = Math.ceil(filteredDataRows / limit) || 1;
 
+        const lotRes = await client.query(
+            'SELECT lot FROM rrh_inventory WHERE import_id = $1 OR import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = $2) LIMIT 1',
+            [wo.active_import_id, wo.id]
+        );
         return res.status(200).json({
             success: true,
             data: {
                 ...wo,
+                lot_number: lotRes.rows[0]?.lot || null,
                 work_order_date: wo.work_order_date || wo.date,
                 pagination: {
                     page,

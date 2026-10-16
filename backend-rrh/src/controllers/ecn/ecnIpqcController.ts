@@ -1081,7 +1081,7 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
     try {
         const sessionRes = await pool.query(
             `SELECT s.*, 
-                    COALESCE(w.lot_quantity, s.lot_quantity, 0) as lot_quantity, 
+                    COALESCE(w.lot_quantity, 0) as lot_quantity, 
                     COALESCE(w.work_order_date, w.date) as work_order_date,
                     (
                         SELECT ri.lot 

@@ -254,17 +254,103 @@ export function buildRrhSessionExcel(options: RrhExcelReportOptions): ExcelJS.Wo
                     const statusStr = String(val || '').trim().toUpperCase();
                     const isPass = statusStr === 'PASS' || statusStr === 'COMPLETED';
                     const isFail = statusStr === 'FAIL' || statusStr === 'FAILED';
-                    cell.font = {
-                        name: 'Calibri',
-                        size: 10,
-                        bold: true,
-                        color: { argb: isPass ? 'FF166534' : isFail ? 'FF991B1B' : 'FF92400E' }
-                    };
-                    cell.fill = {
-                        type: 'pattern',
-                        pattern: 'solid',
-                        fgColor: { argb: isPass ? 'FFDCFCE7' : isFail ? 'FFFEE2E2' : 'FFFEF3C7' }
-                    };
+                    const isReinspected = Boolean(rowObj.is_reinspected || rowObj.isReinspected);
+
+                    if (isPass) {
+                        if (isReinspected) {
+                            // Re-inspected PASS: Orange badge matching UI .badgeReinspectedPass
+                            cell.font = {
+                                name: 'Calibri',
+                                size: 10,
+                                bold: true,
+                                color: { argb: 'FFC2410C' }
+                            };
+                            cell.fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFFFEDD5' }
+                            };
+                            cell.border = {
+                                top: { style: 'thin', color: { argb: 'FFFDBA74' } },
+                                left: { style: 'thin', color: { argb: 'FFFDBA74' } },
+                                bottom: { style: 'thin', color: { argb: 'FFFDBA74' } },
+                                right: { style: 'thin', color: { argb: 'FFFDBA74' } }
+                            };
+                        } else {
+                            // Normal PASS: Green badge matching UI .badgePass
+                            cell.font = {
+                                name: 'Calibri',
+                                size: 10,
+                                bold: true,
+                                color: { argb: 'FF15803D' }
+                            };
+                            cell.fill = {
+                                type: 'pattern',
+                                pattern: 'solid',
+                                fgColor: { argb: 'FFDCFCE7' }
+                            };
+                            cell.border = {
+                                top: { style: 'thin', color: { argb: 'FF86EFAC' } },
+                                left: { style: 'thin', color: { argb: 'FF86EFAC' } },
+                                bottom: { style: 'thin', color: { argb: 'FF86EFAC' } },
+                                right: { style: 'thin', color: { argb: 'FF86EFAC' } }
+                            };
+                        }
+                    } else if (isFail) {
+                        cell.font = {
+                            name: 'Calibri',
+                            size: 10,
+                            bold: true,
+                            color: { argb: 'FFB91C1C' }
+                        };
+                        cell.fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFFEE2E2' }
+                        };
+                        cell.border = {
+                            top: { style: 'thin', color: { argb: 'FFFCA5A5' } },
+                            left: { style: 'thin', color: { argb: 'FFFCA5A5' } },
+                            bottom: { style: 'thin', color: { argb: 'FFFCA5A5' } },
+                            right: { style: 'thin', color: { argb: 'FFFCA5A5' } }
+                        };
+                    } else if (statusStr === 'SCRAP') {
+                        cell.font = {
+                            name: 'Calibri',
+                            size: 10,
+                            bold: true,
+                            color: { argb: 'FF475569' }
+                        };
+                        cell.fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFF1F5F9' }
+                        };
+                        cell.border = {
+                            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+                        };
+                    } else {
+                        cell.font = {
+                            name: 'Calibri',
+                            size: 10,
+                            bold: true,
+                            color: { argb: 'FF92400E' }
+                        };
+                        cell.fill = {
+                            type: 'pattern',
+                            pattern: 'solid',
+                            fgColor: { argb: 'FFFEF3C7' }
+                        };
+                        cell.border = {
+                            top: { style: 'thin', color: { argb: 'FFFCD34D' } },
+                            left: { style: 'thin', color: { argb: 'FFFCD34D' } },
+                            bottom: { style: 'thin', color: { argb: 'FFFCD34D' } },
+                            right: { style: 'thin', color: { argb: 'FFFCD34D' } }
+                        };
+                    }
                     cell.alignment = { vertical: 'middle', horizontal: 'center' };
                 }
             });

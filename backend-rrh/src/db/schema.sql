@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS rrh_ivi_inspections (
     wo_date VARCHAR(100),
     duplexer_main VARCHAR(100) NOT NULL,
     duplexer_part_no VARCHAR(100) NOT NULL,
+    duplexer_sl_no VARCHAR(100),
     rrh_unit VARCHAR(100),
     image_urls JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(image_urls) = 'array'),
     status VARCHAR(50) NOT NULL DEFAULT 'PASS' CHECK (status IN ('PASS', 'FAIL', 'SCRAP')),
@@ -323,6 +324,9 @@ BEGIN
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS is_reinspected BOOLEAN DEFAULT false;
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS route VARCHAR(50) DEFAULT 'ECN';
+    ALTER TABLE rrh_ivi_inspections ADD COLUMN IF NOT EXISTS duplexer_sl_no VARCHAR(255);
+    ALTER TABLE rrh_ivi_inspections_archive ADD COLUMN IF NOT EXISTS duplexer_sl_no VARCHAR(255);
+    ALTER TABLE rrh_ivi_scrap_inspections ADD COLUMN IF NOT EXISTS duplexer_sl_no VARCHAR(255);
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_rrh_ivi_inspections_session_status_scanned ON rrh_ivi_inspections(session_id, status, scanned_at DESC, id DESC) WHERE is_deleted = false;
