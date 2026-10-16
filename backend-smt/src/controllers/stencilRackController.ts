@@ -928,6 +928,17 @@ export const toggleStencilBlock = async (req: Request, res: Response) => {
             });
         } else {
             // Target is to UNBLOCK the stencil
+            // Mandatory operational unblock reason (validated before any write)
+            const unblockReason = typeof reason === 'string' ? reason.trim() : '';
+            if (!unblockReason) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ success: false, message: 'An unblock reason is required.' });
+            }
+            if (unblockReason.length < 3) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ success: false, message: 'Unblock reason must be at least 3 characters.' });
+            }
+
             if (!location.is_blocked) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ message: 'This stencil is already unblocked.' });
@@ -957,7 +968,7 @@ export const toggleStencilBlock = async (req: Request, res: Response) => {
                 INSERT INTO stencil_rack_movement_history (
                     stencil_rack_number, job_number, stencil_name, revision, thickness_mills, manufacturing_date, side,
                     action, previous_status, current_status, employee_code, employee_name, department, role,
-                    rack_id, row_number, column_number, location_code, remarks,
+                    rack_id, row_number, column_number, location_code, reason,
                     work_order_id, work_order_number, work_order_side
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'UNBLOCKED', $8, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             `, [
@@ -977,7 +988,7 @@ export const toggleStencilBlock = async (req: Request, res: Response) => {
                 location.row_number,
                 location.column_number,
                 location.location_code,
-                (reason && reason.trim()) ? reason.trim() : 'Stencil unblocked by supervisor.',
+                unblockReason,
                 location.checked_out_work_order_id || null,
                 location.checked_out_work_order_number || null,
                 location.checked_out_work_order_side || null
@@ -990,9 +1001,9 @@ export const toggleStencilBlock = async (req: Request, res: Response) => {
                 'RACK_LOCATION',
                 locationId,
                 sessionUser.name,
-                `Stencil UNBLOCKED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number} by ${sessionUser.name} (${sessionUser.employee_code})`,
+                `Stencil UNBLOCKED - Rack Number: ${location.stencil_rack_number}, Job Number: ${location.job_number} by ${sessionUser.name} (${sessionUser.employee_code}). Reason: ${unblockReason}`,
                 { is_blocked: true, blocked_reason: location.blocked_reason, status: location.status },
-                { is_blocked: false, status: location.status }
+                { is_blocked: false, unblock_reason: unblockReason, status: location.status }
             );
 
             await client.query('COMMIT');
@@ -1075,6 +1086,18 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
             elapsedTime = `${diffHours}h ${diffMins}m`;
         }
 
+        // Latest unblock details for THIS stencil, derived from movement history (newest first).
+        // Only the operator-captured `reason` column is used; legacy UNBLOCKED rows stored a
+        // generic fallback in `remarks`, which is intentionally not presented as an operator reason.
+        const latestBlockEvent = historyQuery.rows.find((h: any) =>
+            (h.action === 'BLOCKED' || h.action === 'UNBLOCKED') &&
+            h.stencil_rack_number === stencil.stencil_rack_number &&
+            h.job_number === stencil.job_number
+        );
+        const lastUnblock = (!stencil.is_blocked && latestBlockEvent && latestBlockEvent.action === 'UNBLOCKED')
+            ? latestBlockEvent
+            : null;
+
         return res.json({
             success: true,
             stencil: {
@@ -1098,6 +1121,10 @@ export const getStencilInfoByJob = async (req: Request, res: Response) => {
                 blocked_by_code: stencil.blocked_by_code || null,
                 blocked_by_name: stencil.blocked_by_name || null,
                 blocked_at: stencil.blocked_at || null,
+                last_unblocked_reason: lastUnblock ? (lastUnblock.reason || null) : null,
+                last_unblocked_by_name: lastUnblock ? (lastUnblock.employee_name || null) : null,
+                last_unblocked_by_code: lastUnblock ? (lastUnblock.employee_code || null) : null,
+                last_unblocked_at: lastUnblock ? (lastUnblock.created_at || null) : null,
                 remarks: stencil.remarks,
                 holder: stencil.status === 'CHECKED_OUT' ? {
                     employee_code: stencil.checked_out_by_code,
