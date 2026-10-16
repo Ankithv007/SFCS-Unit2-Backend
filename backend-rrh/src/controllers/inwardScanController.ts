@@ -4,19 +4,9 @@ import { createLogger } from '../utils/logger';
 import ExcelJS from 'exceljs';
 import { sendRrhSessionExcel } from '../utils/rrhExcelGenerator';
 
-const logger = createLogger('InwardScanController');
+import { getSessionUser } from '../utils/authHelper';
 
-const getSessionUser = (req: Request) => {
-    const user = (req as any).user;
-    // Prefer human-readable name first, then employee_code, then email
-    const resolvedName = user?.name || user?.employee_code || user?.email || 'Unknown User';
-    return {
-        id: user?.id || user?.userId || null,
-        name: resolvedName,
-        username: resolvedName,
-        role: user?.role || 'OPERATOR'
-    };
-};
+const logger = createLogger('InwardScanController');
 
 /**
  * GET /api/rrh/inward/sessions/:id/stats
@@ -286,6 +276,15 @@ export const scanBarcode = async (req: Request, res: Response) => {
         }
     } catch (err: any) {
         await client.query('ROLLBACK');
+        if (err.code === '23505' || /unique|uq_rrh_/i.test(err.message)) {
+            logger.warn(`[RRH-INWARD] Duplicate concurrent scan safely rejected for serial ${cleanBarcode}: ${err.message}`);
+            return res.status(409).json({
+                isValid: false,
+                result: 'DUPLICATE',
+                message: `Duplicate active scan: unit "${cleanBarcode}" has already been scanned in Inward.`,
+                error: err.message
+            });
+        }
         logger.error('Error scanning barcode: ' + err);
         return res.status(500).json({ message: 'Internal server error while scanning barcode.' });
     } finally {

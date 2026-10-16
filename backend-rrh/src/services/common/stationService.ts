@@ -189,6 +189,61 @@ export class StationService {
                     [session.work_order_id]
                 );
                 predecessorPassed = predRes.rows[0]?.total || 0;
+            } else if (ctx.stationId === 'ECN_IPQC') {
+                const predRes = await pool.query(
+                    `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(ivi.band_serial_no, ivi.serial_number))))::int as total
+                     FROM rrh_ivi_inspections ivi
+                     WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM($1))
+                       AND UPPER(TRIM(ivi.status)) IN ('COMPLETED', 'PASS')
+                       AND REPLACE(COALESCE(ivi.route, 'ECN'), '-', '_') = 'ECN'
+                       AND ivi.is_deleted = false`,
+                    [session.work_order_id]
+                );
+                predecessorPassed = predRes.rows[0]?.total || 0;
+            } else if (ctx.stationId === 'ECN_PROGRAMMING') {
+                const predRes = await pool.query(
+                    `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(ipqc.band_serial_no, ipqc.serial_number))))::int as total
+                     FROM rrh_ipqc_inspections ipqc
+                     WHERE UPPER(TRIM(ipqc.work_order_id)) = UPPER(TRIM($1))
+                       AND UPPER(TRIM(ipqc.status)) IN ('COMPLETED', 'PASS')
+                       AND REPLACE(COALESCE(ipqc.route, 'ECN'), '-', '_') = 'ECN'
+                       AND ipqc.is_deleted = false`,
+                    [session.work_order_id]
+                );
+                predecessorPassed = predRes.rows[0]?.total || 0;
+            } else if (ctx.stationId === 'ECN_PRE_BURN_IN') {
+                const predRes = await pool.query(
+                    `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(prog.band_serial_no, prog.serial_number))))::int as total
+                     FROM rrh_programming_inspections prog
+                     WHERE UPPER(TRIM(prog.work_order_id)) = UPPER(TRIM($1))
+                       AND UPPER(TRIM(prog.status)) IN ('COMPLETED', 'PASS')
+                       AND REPLACE(COALESCE(prog.route, 'ECN'), '-', '_') = 'ECN'
+                       AND prog.is_deleted = false`,
+                    [session.work_order_id]
+                );
+                predecessorPassed = predRes.rows[0]?.total || 0;
+            } else if (ctx.stationId === 'ECN_HIPOT') {
+                const predRes = await pool.query(
+                    `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(pbi.band_serial_no, pbi.serial_number))))::int as total
+                     FROM rrh_pre_burn_in_inspections pbi
+                     WHERE UPPER(TRIM(pbi.work_order_id)) = UPPER(TRIM($1))
+                       AND UPPER(TRIM(pbi.status)) IN ('COMPLETED', 'PASS')
+                       AND REPLACE(COALESCE(pbi.route, 'ECN'), '-', '_') = 'ECN'
+                       AND pbi.is_deleted = false`,
+                    [session.work_order_id]
+                );
+                predecessorPassed = predRes.rows[0]?.total || 0;
+            } else if (ctx.stationId === 'ECN_POST_BURN_IN') {
+                const predRes = await pool.query(
+                    `SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(h.band_serial_no, h.serial_number))))::int as total
+                     FROM rrh_hipot_inspections h
+                     WHERE UPPER(TRIM(h.work_order_id)) = UPPER(TRIM($1))
+                       AND UPPER(TRIM(h.status)) IN ('COMPLETED', 'PASS')
+                       AND REPLACE(COALESCE(h.route, 'ECN'), '-', '_') = 'ECN'
+                       AND h.is_deleted = false`,
+                    [session.work_order_id]
+                );
+                predecessorPassed = predRes.rows[0]?.total || 0;
             }
 
             const stats = {
@@ -417,6 +472,7 @@ export class StationService {
         const { id: sessionId } = req.params;
         const operator = getSessionUser(req);
         const client = await getClient();
+        const rawSerial = String(req.body?.serial_number || '').trim().toUpperCase();
 
         try {
             await client.query('BEGIN');
@@ -460,7 +516,7 @@ export class StationService {
                 defect_fixed
             } = req.body;
 
-            const cleanSerial = String(serial_number || '').trim().toUpperCase();
+            const cleanSerial = rawSerial;
             const cleanWo = String(work_order_id || session.work_order_id).trim();
 
             if (!cleanSerial) {
@@ -476,10 +532,61 @@ export class StationService {
                 });
             }
 
-            const isDuplicate = await WorkflowEngine.checkDuplicateScan(client, ctx.inspectionTable, Number(sessionId), cleanSerial);
-            if (isDuplicate) {
+            // Check if this unit already passed this station for this work order across ANY session
+            const passCheck = await client.query(
+                `SELECT id FROM ${ctx.inspectionTable}
+                 WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+                   AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
+                   AND is_deleted = false
+                   AND status IN ('PASS', 'COMPLETED')
+                   ${ctx.postBurnInType ? `AND post_burn_in_type = '${ctx.postBurnInType}'` : ''}
+                 LIMIT 1`,
+                [cleanWo, cleanSerial]
+            );
+            if (passCheck.rows.length > 0) {
                 await client.query('ROLLBACK');
-                return res.status(409).json({ message: `Unit ${cleanSerial} has already been inspected in this session.` });
+                return res.status(409).json({
+                    message: `Unit ${cleanSerial} has already passed ${ctx.logName} for work order ${cleanWo}.`
+                });
+            }
+
+            // Check previous inspection in this session to support rework / re-inspection
+            const prevInspectionRes = await client.query(
+                `SELECT id, status, remarks, is_reinspected, defect_fixed 
+                 FROM ${ctx.inspectionTable}
+                 WHERE session_id = $1 
+                   AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
+                   AND is_deleted = false
+                 ORDER BY id DESC`,
+                [sessionId, cleanSerial]
+            );
+
+            let isReinspected = false;
+            let resolvedDefectFixed = defect_fixed || null;
+
+            if (prevInspectionRes.rows.length > 0) {
+                const prev = prevInspectionRes.rows[0];
+                if (prev.status === 'PASS' || prev.status === 'COMPLETED') {
+                    await client.query('ROLLBACK');
+                    return res.status(409).json({ message: `Unit ${cleanSerial} has already passed in this session.` });
+                }
+                // Previous was FAIL -> rework re-inspection
+                if (String(status).toUpperCase() === 'COMPLETED' || String(status).toUpperCase() === 'PASS') {
+                    isReinspected = true;
+                    if (!resolvedDefectFixed) {
+                        resolvedDefectFixed = prev.remarks || 'Defect resolved upon re-inspection.';
+                    }
+                    await client.query(
+                        `UPDATE ${ctx.inspectionTable} SET is_deleted = true WHERE id = ANY($1::int[])`,
+                        [prevInspectionRes.rows.map(r => r.id)]
+                    );
+                } else {
+                    // Rescanning another failure: replace earlier active failure record
+                    await client.query(
+                        `UPDATE ${ctx.inspectionTable} SET is_deleted = true WHERE id = ANY($1::int[])`,
+                        [prevInspectionRes.rows.map(r => r.id)]
+                    );
+                }
             }
 
             let resolvedIviInspectionId: any = ivi_inspection_id 
@@ -518,12 +625,12 @@ export class StationService {
                     physical_serial_number, physical_tpn, band, inspection_date,
                     e_label, pam_tpn, pam1, pam2, pam3, pam4, rfpc_tpn, rfpc_sl_no,
                     status, remarks, scanned_by, ivi_inspection_id, checkpoints,
-                    sl_no, defect_fixed, route
+                    sl_no, defect_fixed, is_reinspected, route
             `;
             let valSql = `
                 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, CURRENT_DATE),
                         $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20, $21, $22, $23, $24
+                        $17, $18, $19, $20, $21, $22, $23, $24, $25
             `;
             const params: any[] = [
                 sessionId,
@@ -548,23 +655,42 @@ export class StationService {
                 resolvedIviInspectionId,
                 JSON.stringify(Array.isArray(checkpoints) ? checkpoints : []),
                 sl_no || null,
-                defect_fixed || null,
+                resolvedDefectFixed,
+                isReinspected,
                 ctx.route
             ];
 
             if (ctx.postBurnInType) {
                 insertSql += `, post_burn_in_type`;
-                valSql += `, $25`;
+                valSql += `, $26`;
                 params.push(ctx.postBurnInType);
             }
             insertSql += `) ` + valSql + `) RETURNING *`;
 
             const insertRes = await client.query(insertSql, params);
+            const newRecord = insertRes.rows[0];
+
+            if (prevInspectionRes.rows.length > 0 && newRecord?.id) {
+                await client.query(
+                    `UPDATE ${ctx.inspectionTable}
+                     SET superseded_by_id = $1, superseded_at = CURRENT_TIMESTAMP
+                     WHERE id = ANY($2::int[])`,
+                    [newRecord.id, prevInspectionRes.rows.map(r => r.id)]
+                );
+            }
+
             await client.query('COMMIT');
 
-            return res.status(201).json(insertRes.rows[0]);
+            return res.status(201).json(newRecord);
         } catch (err: any) {
             await client.query('ROLLBACK');
+            if (err.code === '23505' || /unique|uq_rrh_/i.test(err.message)) {
+                logger.warn(`[${ctx.logName}] Duplicate concurrent scan safely rejected for serial ${rawSerial}: ${err.message}`);
+                return res.status(409).json({
+                    message: `Duplicate active scan: unit "${rawSerial}" has already been recorded in ${ctx.logName}.`,
+                    error: err.message
+                });
+            }
             logger.error(`[${ctx.logName}] Error submitting inspection: ${err.message}`);
             return res.status(500).json({ message: `Failed to record inspection for ${ctx.logName}.`, error: err.message });
         } finally {

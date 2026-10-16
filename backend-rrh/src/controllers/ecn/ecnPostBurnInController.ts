@@ -26,26 +26,8 @@ const getBandFromTpn = (tpn: string | null | undefined): string => {
     return SKU_TO_BAND_MAP[clean] || SKU_TO_BAND_MAP[tpn.trim()] || '—';
 };
 
-// ─── Helper to parse authenticated user ──────────────────────────────────────
-const getSessionUser = (req: Request): { username: string; name: string } => {
-    const authHeader = req.headers.authorization;
-    let username = 'system';
-    let name = 'System Admin';
-
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-            const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-            if (decoded) {
-                username = decoded.username || decoded.email || decoded.id || 'system';
-                name = decoded.name || decoded.full_name || decoded.username || 'System Admin';
-            }
-        } catch (e) {
-            // Keep default
-        }
-    }
-    return { username, name };
-};
+import { getSessionUser } from '../../utils/authHelper';
+import { WorkflowEngine } from '../../workflows/common/workflowEngine';
 
 
 /**
@@ -860,6 +842,33 @@ export const submitInspection = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
+        // Server-side MES Transition Verification
+        const eligibility = await WorkflowEngine.verifyTransition(client, 'ECN_POST_BURN_IN', cleanWo, cleanSerial);
+        if (!eligibility.eligible) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({
+                message: eligibility.reason || `Unit ${cleanSerial} cannot enter ECN Post-Burn-In due to unmet transition prerequisites.`
+            });
+        }
+
+        // Cross-session duplicate pass check
+        const passCheck = await client.query(
+            `SELECT id FROM rrh_post_burn_in_inspections
+             WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+               AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
+               AND is_deleted = false
+               AND status IN ('PASS', 'COMPLETED')
+               AND post_burn_in_type = 'FINAL'
+             LIMIT 1`,
+            [cleanWo, cleanSerial]
+        );
+        if (passCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Unit ${cleanSerial} has already passed ECN Post-Burn-In for work order ${cleanWo}.`
+            });
+        }
+
         // Check if there was a previous failed inspection for this serial in this session
         const prevInspectionRes = await client.query(
             `SELECT id, status, remarks, is_reinspected, defect_fixed 
@@ -876,6 +885,12 @@ export const submitInspection = async (req: Request, res: Response) => {
 
         if (prevInspectionRes.rows.length > 0) {
             const prev = prevInspectionRes.rows[0];
+            if (prev.status === 'PASS' || prev.status === 'COMPLETED') {
+                await client.query('ROLLBACK');
+                return res.status(409).json({
+                    message: `Unit ${cleanSerial} has already passed in this session.`
+                });
+            }
             if (prev.status === 'FAIL') {
                 isReinspected = true;
                 if (finalStatus === 'COMPLETED') {
@@ -979,11 +994,13 @@ export const submitInspection = async (req: Request, res: Response) => {
                 is_reinspected,
                 defect_fixed,
                 sl_no,
-                debug_status
+                debug_status,
+                post_burn_in_type,
+                route
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 
                 $8::date, 
-                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31
             ) RETURNING *
         `;
 
@@ -1016,8 +1033,19 @@ export const submitInspection = async (req: Request, res: Response) => {
             isReinspected,
             defectFixed,
             resolvedSlNo || null,
-            finalStatus === 'FAIL' ? 'PENDING' : null
+            finalStatus === 'FAIL' ? 'PENDING' : null,
+            'FINAL',
+            'ECN'
         ]);
+
+        if (isReinspected && prevInspectionRes.rows.length > 0) {
+            await client.query(
+                `UPDATE rrh_post_burn_in_inspections 
+                 SET superseded_by_id = $1, superseded_at = CURRENT_TIMESTAMP
+                 WHERE id = $2`,
+                [insertRes.rows[0].id, prevInspectionRes.rows[0].id]
+            );
+        }
 
         await client.query('COMMIT');
         logger.info(`Post Burn In inspection submitted for unit ${cleanSerial} with status ${finalStatus}`);

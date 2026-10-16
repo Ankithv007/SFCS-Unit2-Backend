@@ -27,26 +27,8 @@ const getBandFromTpn = (tpn: string | null | undefined): string => {
     return SKU_TO_BAND_MAP[clean] || SKU_TO_BAND_MAP[tpn.trim()] || '—';
 };
 
-// ─── Helper to parse authenticated user ──────────────────────────────────────
-const getSessionUser = (req: Request): { username: string; name: string } => {
-    const authHeader = req.headers.authorization;
-    let username = 'system';
-    let name = 'System Admin';
-
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-            const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-            if (decoded) {
-                username = decoded.username || decoded.email || decoded.id || 'system';
-                name = decoded.name || decoded.full_name || decoded.username || 'System Admin';
-            }
-        } catch (e) {
-            // Keep default
-        }
-    }
-    return { username, name };
-};
+import { getSessionUser } from '../../utils/authHelper';
+import { WorkflowEngine } from '../../workflows/common/workflowEngine';
 
 // ─── Helper to clean defect text (removes 'Point 1:', 'point2:', etc.) ─────────
 export const cleanDefectDescription = (text: string | null | undefined): string => {
@@ -816,6 +798,49 @@ export const submitInspection = async (req: Request, res: Response) => {
     try {
         await client.query('BEGIN');
 
+        // Server-side MES Transition Verification
+        const eligibility = await WorkflowEngine.verifyTransition(client, 'ECN_IPQC', work_order_id, serial_number);
+        if (!eligibility.eligible) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({
+                message: eligibility.reason || `Unit ${serial_number} cannot enter ECN IPQC due to unmet transition prerequisites.`
+            });
+        }
+
+        // Cross-session duplicate pass check
+        const passCheck = await client.query(
+            `SELECT id FROM rrh_ipqc_inspections
+             WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+               AND (UPPER(TRIM(serial_number)) = UPPER(TRIM($2)) OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = UPPER(TRIM($2)))
+               AND is_deleted = false
+               AND status IN ('PASS', 'COMPLETED')
+             LIMIT 1`,
+            [work_order_id, serial_number]
+        );
+        if (passCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Unit ${serial_number} has already passed ECN IPQC for work order ${work_order_id}.`
+            });
+        }
+
+        // In-session duplicate pass check
+        const sessionPassCheck = await client.query(
+            `SELECT id FROM rrh_ipqc_inspections
+             WHERE session_id = $1
+               AND (UPPER(TRIM(serial_number)) = UPPER(TRIM($2)) OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = UPPER(TRIM($2)))
+               AND is_deleted = false
+               AND status IN ('PASS', 'COMPLETED')
+             LIMIT 1`,
+            [sessionId, serial_number]
+        );
+        if (sessionPassCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                message: `Unit ${serial_number} has already passed in this session.`
+            });
+        }
+
         // Check if there was a previous FAIL record for this serial to track re-inspection
         const prevFailCheck = await client.query(
             `SELECT id, remarks, checkpoints FROM rrh_ipqc_inspections
@@ -893,11 +918,12 @@ export const submitInspection = async (req: Request, res: Response) => {
                 checkpoints,
                 is_reinspected,
                 defect_fixed,
-                sl_no
+                sl_no,
+                route
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 
                 COALESCE($8, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date), 
-                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
             ) RETURNING *
         `;
 
@@ -925,8 +951,18 @@ export const submitInspection = async (req: Request, res: Response) => {
             JSON.stringify(parsedCheckpoints),
             isReinspected,
             defectFixedText,
-            resolvedSlNo
+            resolvedSlNo,
+            'ECN'
         ]);
+
+        if (isReinspected && prevFailCheck.rows.length > 0) {
+            await client.query(
+                `UPDATE rrh_ipqc_inspections 
+                 SET superseded_by_id = $1, superseded_at = CURRENT_TIMESTAMP
+                 WHERE id = $2`,
+                [insertRes.rows[0].id, prevFailCheck.rows[0].id]
+            );
+        }
 
         await client.query('COMMIT');
         logger.info(`Recorded IPQC inspection ID ${insertRes.rows[0].id} (${inspectionStatus}) for serial ${serial_number}`);
@@ -937,6 +973,13 @@ export const submitInspection = async (req: Request, res: Response) => {
         });
     } catch (err: any) {
         await client.query('ROLLBACK');
+        if (err.code === '23505' || /unique|uq_rrh_/i.test(err.message)) {
+            logger.warn(`[RRH-IPQC] Duplicate concurrent scan safely rejected for serial ${serial_number}: ${err.message}`);
+            return res.status(409).json({
+                message: `Duplicate active scan: unit "${serial_number}" has already been recorded in IPQC.`,
+                error: err.message
+            });
+        }
         logger.error(`Error in submitInspection: ${err.message}`);
         return res.status(500).json({ message: 'Failed to record IPQC inspection.', error: err.message });
     } finally {

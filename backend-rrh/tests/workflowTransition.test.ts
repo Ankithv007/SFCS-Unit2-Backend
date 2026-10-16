@@ -179,4 +179,64 @@ describe('MES Manufacturing Workflow & Station Eligibility Tests', () => {
         assert.strictEqual(result.stationId, 'NON_ECN_POST_BURN_IN_INITIAL');
         assert.strictEqual(result.route, 'NON_ECN');
     });
+
+    test('11. Full ECN Pipeline: IVI -> IPQC -> Programming -> Pre-Burn-In -> Hipot -> Post-Burn-In', async () => {
+        // IPQC -> Programming
+        const ipqcMock: any = {
+            query: async () => ({ rows: [{ id: 110, serial_number: 'SN-ECN-01', status: 'PASS', route: 'ECN' }] })
+        };
+        const progResult = await validateStationEligibility(ipqcMock, 'ECN_PROGRAMMING', 'WO-300', 'SN-ECN-01');
+        assert.strictEqual(progResult.eligible, true);
+        assert.strictEqual(progResult.stationId, 'ECN_PROGRAMMING');
+        assert.strictEqual(progResult.route, 'ECN');
+
+        // Programming -> Pre-Burn-In
+        const progMock: any = {
+            query: async () => ({ rows: [{ id: 120, serial_number: 'SN-ECN-01', status: 'PASS', route: 'ECN' }] })
+        };
+        const preBurnResult = await validateStationEligibility(progMock, 'ECN_PRE_BURN_IN', 'WO-300', 'SN-ECN-01');
+        assert.strictEqual(preBurnResult.eligible, true);
+        assert.strictEqual(preBurnResult.stationId, 'ECN_PRE_BURN_IN');
+
+        // Pre-Burn-In -> Hipot
+        const preBurnMock: any = {
+            query: async () => ({ rows: [{ id: 130, serial_number: 'SN-ECN-01', status: 'PASS', route: 'ECN' }] })
+        };
+        const hipotResult = await validateStationEligibility(preBurnMock, 'ECN_HIPOT', 'WO-300', 'SN-ECN-01');
+        assert.strictEqual(hipotResult.eligible, true);
+        assert.strictEqual(hipotResult.stationId, 'ECN_HIPOT');
+
+        // Hipot -> Post-Burn-In
+        const hipotMock: any = {
+            query: async () => ({ rows: [{ id: 140, serial_number: 'SN-ECN-01', status: 'PASS', route: 'ECN' }] })
+        };
+        const postBurnResult = await validateStationEligibility(hipotMock, 'ECN_POST_BURN_IN', 'WO-300', 'SN-ECN-01');
+        assert.strictEqual(postBurnResult.eligible, true);
+        assert.strictEqual(postBurnResult.stationId, 'ECN_POST_BURN_IN');
+    });
+
+    test('12. WorkflowEngine.verifyTransition delegates and enforces station validity', async () => {
+        const { WorkflowEngine } = await import('../src/workflows/common/workflowEngine');
+        const mockClient: any = {
+            query: async () => ({ rows: [{ id: 150, serial_number: 'SN-ENG-01', status: 'PASS', route: 'ECN' }] })
+        };
+
+        const result = await WorkflowEngine.verifyTransition(mockClient, 'ECN_IPQC', 'WO-400', 'SN-ENG-01');
+        assert.strictEqual(result.eligible, true);
+        assert.strictEqual(result.stationId, 'ECN_IPQC');
+
+        // Check duplicate scan helper
+        const dupCheckMock: any = {
+            query: async (sql: string, params: any[]) => {
+                if (params[1] === 'SN-DUP') return { rows: [{ id: 1 }] };
+                return { rows: [] };
+            }
+        };
+
+        const isDup = await WorkflowEngine.checkDuplicateScan(dupCheckMock, 'rrh_ipqc_inspections', 1, 'SN-DUP');
+        assert.strictEqual(isDup, true);
+
+        const isNotDup = await WorkflowEngine.checkDuplicateScan(dupCheckMock, 'rrh_ipqc_inspections', 1, 'SN-NEW');
+        assert.strictEqual(isNotDup, false);
+    });
 });

@@ -29,42 +29,8 @@ export function getBandFromTpn(tpn: string | null | undefined): string {
     return SKU_TO_BAND_MAP[clean] || SKU_TO_BAND_MAP[tpn.trim()] || '—';
 }
 
-export const getSessionUser = (req: Request) => {
-    const user = (req as any).user;
-    const headerName = (req.headers['x-user-name'] as string)
-        || (req.headers['x-username'] as string)
-        || (req.headers['x-backend-user-id'] as string);
-
-    let resolvedName = '';
-    if (user) {
-        if (typeof user.name === 'string' && user.name.trim().length > 0) {
-            resolvedName = user.name.trim();
-        } else if (typeof user.employee_code === 'string' && user.employee_code.trim().length > 0) {
-            resolvedName = user.employee_code.trim();
-        } else if (typeof user.employeeCode === 'string' && user.employeeCode.trim().length > 0) {
-            resolvedName = user.employeeCode.trim();
-        } else if (typeof user.email === 'string' && user.email.trim().length > 0) {
-            resolvedName = user.email.trim();
-        } else if (typeof user.username === 'string' && user.username.trim().length > 0) {
-            resolvedName = user.username.trim();
-        }
-    }
-
-    if (!resolvedName && headerName && typeof headerName === 'string' && headerName.trim().length > 0) {
-        resolvedName = headerName.trim();
-    }
-
-    if (!resolvedName) {
-        resolvedName = 'Operator';
-    }
-
-    return {
-        id: user?.id || user?.userId || null,
-        name: resolvedName,
-        username: resolvedName,
-        role: user?.role || 'OPERATOR'
-    };
-};
+import { getSessionUser } from '../utils/authHelper';
+export { getSessionUser };
 
 // ─── Helper to clean defect text (removes 'Point 1:', 'Point 1 -', 'point2:', etc.) ─────────
 export const cleanDefectDescription = (text: string | null | undefined): string => {
@@ -127,12 +93,15 @@ export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
  * Start or resume an IVI session
  */
 export const createIviSession = async (req: Request, res: Response) => {
-    const { work_order_id } = req.body;
+    const { work_order_id, route } = req.body;
     const operator = getSessionUser(req);
 
     if (!work_order_id) {
         return res.status(400).json({ message: 'work_order_id is required.' });
     }
+
+    const rawRoute = (route || req.body.selected_route || 'ECN').toString().trim().toUpperCase().replace('-', '_');
+    const cleanRoute = rawRoute === 'NON_ECN' ? 'NON_ECN' : 'ECN';
 
     const client = await pool.connect();
     try {
@@ -153,8 +122,8 @@ export const createIviSession = async (req: Request, res: Response) => {
             const existing = activeCheck.rows[0];
             if (existing.status !== 'In Progress') {
                 await client.query(
-                    `UPDATE rrh_ivi_sessions SET status = 'In Progress', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                    [existing.id]
+                    `UPDATE rrh_ivi_sessions SET status = 'In Progress', route = COALESCE(route, $2), updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                    [existing.id, cleanRoute]
                 );
                 existing.status = 'In Progress';
             }
@@ -168,19 +137,20 @@ export const createIviSession = async (req: Request, res: Response) => {
                 work_order_id, 
                 status, 
                 created_by, 
-                created_by_name
-             ) VALUES ($1, 'In Progress', $2, $3)
+                created_by_name,
+                route
+             ) VALUES ($1, 'In Progress', $2, $3, $4)
              RETURNING *`,
-            [work_order_id, operator.username, operator.name]
+            [work_order_id, operator.username, operator.name, cleanRoute]
         );
 
-        await client.query('COMMIT');
         const woMeta = await client.query(
             `SELECT (SELECT ri.lot FROM rrh_inventory ri WHERE ri.import_id = w.active_import_id LIMIT 1) as lot_number, w.lot_quantity FROM rrh_work_orders w WHERE UPPER(TRIM(w.work_order_id)) = UPPER(TRIM($1))`,
             [work_order_id]
         );
         const newSession = { ...insertRes.rows[0], lot_number: woMeta.rows[0]?.lot_number || null, lot_quantity: woMeta.rows[0]?.lot_quantity || null };
-        logger.info(`Started new IVI session ID ${insertRes.rows[0].id} for Work Order ${work_order_id}`);
+        await client.query('COMMIT');
+        logger.info(`Started new IVI session ID ${insertRes.rows[0].id} for Work Order ${work_order_id} (Route: ${cleanRoute})`);
         return res.status(201).json(newSession);
     } catch (err: any) {
         await client.query('ROLLBACK');
@@ -913,30 +883,53 @@ export const submitInspection = async (req: Request, res: Response) => {
         try {
             await client.query('BEGIN');
 
-            // Find matching inward scan record
+            // Check if this unit already passed IVI for this work order (prevent duplicate pass / constraint crash)
+            const alreadyPassedCheck = await client.query(
+                `SELECT id FROM rrh_ivi_inspections
+                 WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($1))
+                   AND (UPPER(TRIM(serial_number)) = $2 OR UPPER(TRIM(COALESCE(band_serial_no, ''))) = $2)
+                   AND is_deleted = false
+                   AND status IN ('PASS', 'COMPLETED')
+                 LIMIT 1`,
+                [work_order_id || '', cleanSerial]
+            );
+            if (alreadyPassedCheck.rows.length > 0) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({
+                    message: `Unit "${cleanSerial}" has already passed IVI inspection for work order "${work_order_id}".`
+                });
+            }
+
+            // Find matching inward scan record (mandatory prerequisite)
             const inwardCheck = await client.query(
                 `SELECT ins.id, ins.status, COALESCE(ins.sl_no, ri.sl_no) as sl_no
                  FROM rrh_inward_scans ins
                  LEFT JOIN rrh_inventory ri ON ri.id = ins.matched_inventory_id
                  WHERE (UPPER(TRIM(ins.serial_number)) = $1 OR UPPER(TRIM(ins.band_serial_no)) = $1)
+                   AND UPPER(TRIM(ins.work_order_id)) = UPPER(TRIM($2))
                    AND ins.is_deleted = false
                  ORDER BY ins.id DESC LIMIT 1`,
-                [cleanSerial]
+                [cleanSerial, work_order_id || '']
             );
 
             let inwardScanId: number | null = null;
             let inwardSlNo: string | null = (req.body.sl_no || '').toString().trim() || null;
-            if (inwardCheck.rows.length > 0) {
-                if (inwardCheck.rows[0].status !== 'PASS' && inwardCheck.rows[0].status !== 'EDITED PASS') {
-                    await client.query('ROLLBACK');
-                    return res.status(400).json({
-                        message: `Cannot submit IVI inspection: Serial number "${cleanSerial}" failed Inward (Status: ${inwardCheck.rows[0].status}).`
-                    });
-                }
-                inwardScanId = inwardCheck.rows[0].id;
-                if (!inwardSlNo && inwardCheck.rows[0].sl_no) {
-                    inwardSlNo = inwardCheck.rows[0].sl_no;
-                }
+            if (inwardCheck.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(422).json({
+                    message: `Unit "${cleanSerial}" has not been received at Inward Scan for work order "${work_order_id}".`
+                });
+            }
+
+            if (inwardCheck.rows[0].status !== 'PASS' && inwardCheck.rows[0].status !== 'EDITED PASS') {
+                await client.query('ROLLBACK');
+                return res.status(422).json({
+                    message: `Cannot submit IVI inspection: Serial number "${cleanSerial}" failed Inward (Status: ${inwardCheck.rows[0].status}).`
+                });
+            }
+            inwardScanId = inwardCheck.rows[0].id;
+            if (!inwardSlNo && inwardCheck.rows[0].sl_no) {
+                inwardSlNo = inwardCheck.rows[0].sl_no;
             }
 
             let formattedCheckpoints = null;
@@ -1072,6 +1065,16 @@ export const submitInspection = async (req: Request, res: Response) => {
                 ]
             );
 
+            // If re-inspected, link superseded_by_id to the new inspection record for full ISO-9001 auditability
+            if (isReinspected && prevFailCheck.rows.length > 0) {
+                await client.query(
+                    `UPDATE rrh_ivi_inspections 
+                     SET superseded_by_id = $1, superseded_at = CURRENT_TIMESTAMP
+                     WHERE id = ANY($2::int[])`,
+                    [insertRes.rows[0].id, prevFailCheck.rows.map(r => r.id)]
+                );
+            }
+
             // If status is SCRAP, also record in dedicated rrh_ivi_scrap_inspections table
             if (cleanStatus === 'SCRAP') {
                 await client.query(
@@ -1128,6 +1131,13 @@ export const submitInspection = async (req: Request, res: Response) => {
             client.release();
         }
     } catch (err: any) {
+        if (err.code === '23505' || /unique|uq_rrh_/i.test(err.message)) {
+            logger.warn(`[RRH-IVI] Duplicate concurrent scan safely rejected for serial ${serial_number}: ${err.message}`);
+            return res.status(409).json({
+                message: `Duplicate active scan: unit "${serial_number}" has already been inspected in IVI.`,
+                error: err.message
+            });
+        }
         logger.error(`Error in submitInspection: ${err.message}`);
         return res.status(500).json({ message: 'Failed to submit inspection.', error: err.message });
     }
@@ -1808,18 +1818,16 @@ export const viewInspectionPhotos = async (req: Request, res: Response) => {
  */
 export const downloadInspectionPhoto = async (req: Request, res: Response) => {
     const rawSubpath = (req.params[0] || req.params.filename || '').toString().trim();
-    const safeSubpath = path.normalize(rawSubpath).replace(/^(\.\.[\/\\])+/, '');
-    const filePath = path.join(getUploadsDir(), 'rrh', 'ivi', safeSubpath);
-
-    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-        const fallbackPath = path.join(getUploadsDir(), 'rrh', 'ivi', path.basename(safeSubpath));
-        if (fs.existsSync(fallbackPath) && fs.statSync(fallbackPath).isFile()) {
-            return res.download(fallbackPath, path.basename(fallbackPath));
-        }
+    if (!rawSubpath) {
+        return res.status(400).send('Filename or path is required.');
+    }
+    const baseDir = path.resolve(getUploadsDir(), 'rrh', 'ivi');
+    const safeFileName = path.basename(rawSubpath);
+    const resolvedPath = path.resolve(baseDir, safeFileName);
+    if (!resolvedPath.startsWith(baseDir) || !fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
         return res.status(404).send('Image file not found.');
     }
-
-    return res.download(filePath, path.basename(safeSubpath));
+    return res.download(resolvedPath, safeFileName);
 };
 
 /**
