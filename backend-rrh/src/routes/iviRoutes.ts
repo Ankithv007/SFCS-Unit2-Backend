@@ -19,7 +19,8 @@ import {
     viewInspectionPhotos,
     downloadInspectionPhoto,
     getEligibleIviWorkOrders,
-    passToNextStage
+    passToNextStage,
+    addInspectionImages
 } from '../controllers/iviController';
 
 const router = Router();
@@ -74,6 +75,7 @@ router.delete('/sessions/:id', authMiddleware, deleteIviSession as (req: Request
 
 // Inspection submission & listing & export (authenticated)
 router.patch('/inspections/:id/pass-to-next-stage', authMiddleware, passToNextStage as (req: Request, res: Response) => void);
+router.post('/inspections/:id/images', authMiddleware, upload.array('images', 6), addInspectionImages as (req: Request, res: Response) => void);
 router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingInwardMasterData as (req: Request, res: Response) => void);
 router.post('/sessions/:id/inspections', authMiddleware, upload.array('images', 6), submitInspection as (req: Request, res: Response) => void);
 router.get('/sessions/:id/inspections', authMiddleware, getRecentInspections as (req: Request, res: Response) => void);

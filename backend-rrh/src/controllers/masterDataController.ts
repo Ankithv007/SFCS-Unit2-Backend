@@ -828,8 +828,12 @@ export const getWorkOrderById = async (req: Request, res: Response) => {
         }
 
         const lotRes = await client.query(
-            'SELECT lot FROM rrh_inventory WHERE import_id = $1 OR import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = $2) LIMIT 1',
-            [wo.active_import_id, wo.id]
+            `SELECT COALESCE(
+                (SELECT lot FROM rrh_inventory WHERE import_id = $1 OR import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = $2) LIMIT 1),
+                (SELECT bat_lot_no FROM rrh_ivi_inspections WHERE UPPER(TRIM(work_order_id)) = UPPER(TRIM($3)) AND bat_lot_no IS NOT NULL AND bat_lot_no != '' LIMIT 1),
+                '—'
+            ) as lot`,
+            [wo.active_import_id, wo.id, wo.work_order_id]
         );
         return res.status(200).json({
             success: true,

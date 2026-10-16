@@ -1124,19 +1124,23 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
     try {
         const sessionRes = await pool.query(
             `SELECT s.*, 
+                    COALESCE(w.work_order_id, s.work_order_id) as work_order_id, 
                     COALESCE(w.lot_quantity, 0) as lot_quantity, 
-                    COALESCE(w.work_order_date, w.date) as work_order_date,
-                    (
-                        SELECT ri.lot 
-                        FROM rrh_inventory ri 
-                        WHERE ri.import_id = w.active_import_id 
-                           OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
-                        LIMIT 1
+                    COALESCE(
+                        w.work_order_date, 
+                        w.date, 
+                        (SELECT ivi.wo_date FROM rrh_ivi_inspections ivi WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM(s.work_order_id)) AND ivi.wo_date IS NOT NULL LIMIT 1)::date,
+                        s.created_at::date
+                    ) as work_order_date,
+                    COALESCE(
+                        (SELECT ri.lot FROM rrh_inventory ri WHERE ri.import_id = w.active_import_id OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id)) LIMIT 1),
+                        (SELECT ivi.bat_lot_no FROM rrh_ivi_inspections ivi WHERE UPPER(TRIM(ivi.work_order_id)) = UPPER(TRIM(s.work_order_id)) AND ivi.bat_lot_no IS NOT NULL AND ivi.bat_lot_no != '' LIMIT 1),
+                        '—'
                     ) as lot_number,
-                    w.status as wo_status
+                    COALESCE(w.status, 'In Progress') as wo_status
              FROM rrh_ipqc_sessions s
              LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
-             WHERE s.id = $1 AND s.is_deleted = false`,
+             WHERE s.id = $1`,
             [sessionId]
         );
 
@@ -1149,12 +1153,10 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
         const type = (req.query.type as string || req.query.status as string || '').toUpperCase();
         const isFail = type === 'FAIL' || type === 'FAILED';
         const isRecent = type === 'PASS' || type === 'RECENT' || type === 'COMPLETED';
-        let statusClause = '1=1';
-        if (isFail) {
-            statusClause = `(UPPER(TRIM(i.status)) IN ('FAIL', 'FAILED') OR i.status ILIKE '%fail%')`;
-        } else if (isRecent) {
-            statusClause = `(UPPER(TRIM(i.status)) IN ('COMPLETED', 'PASS') OR i.status ILIKE '%pass%' OR i.status ILIKE '%complete%') AND UPPER(TRIM(i.status)) NOT IN ('FAIL', 'FAILED')`;
-        }
+        // When fail requested: only show failed. When recent inspection or download excel from work order selection: ONLY show passed!
+        const statusClause = isFail 
+            ? `(UPPER(TRIM(i.status)) IN ('FAIL', 'FAILED') OR i.status ILIKE '%fail%')`
+            : `(UPPER(TRIM(i.status)) IN ('COMPLETED', 'PASS') OR i.status ILIKE '%pass%' OR i.status ILIKE '%complete%') AND UPPER(TRIM(i.status)) NOT IN ('FAIL', 'FAILED')`;
 
         // Summary counts
         const countRes = await pool.query(
@@ -1238,11 +1240,6 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
             }
             if (!failedRemarks || failedRemarks === '-') failedRemarks = '—';
 
-            const isRowFail = (r.status || '').toUpperCase() === 'FAIL' || (r.status || '').toUpperCase() === 'FAILED';
-            const rowRemarks = isRowFail
-                ? failedRemarks
-                : (getDefectFixedText(r) !== '—' ? getDefectFixedText(r) : (cleanDefectDescription(r.remarks) || '—'));
-
             return {
                 sl: r.sl_no || (idx + 1),
                 band_serial_no: r.band_serial_no || r.serial_number || '—',
@@ -1250,10 +1247,19 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
                 physical_tpn: r.physical_tpn || '—',
                 band: r.band || getBandFromTpn(r.physical_tpn),
                 inspection_date: inspDateStr,
+                e_label: r.e_label || '—',
+                pam_tpn: r.pam_tpn || '—',
+                pam1: r.pam1 || '—',
+                pam2: r.pam2 || '—',
+                pam3: r.pam3 || '—',
+                pam4: r.pam4 || '—',
+                rfpc_tpn: r.rfpc_tpn || '—',
+                rfpc_sl_no: r.rfpc_sl_no || '—',
+                remarks: isFail ? failedRemarks : (getDefectFixedText(r) !== '—' ? getDefectFixedText(r) : (cleanDefectDescription(r.remarks) || '—')),
                 status: r.status || '—',
                 scanned_by: r.scanned_by || '—',
                 scanned_at: dateStr,
-                remarks: rowRemarks
+                is_reinspected: Boolean(r.is_reinspected)
             };
         });
 
@@ -1262,6 +1268,46 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
             : (isRecent ? 'RRH IPQC RECENT INSPECTIONS REPORT' : 'RRH IPQC SESSION REPORT');
         const section4Title = isFail ? 'FAILED INSPECTIONS HISTORY' : (isRecent ? 'RECENT INSPECTIONS HISTORY (PASSED)' : 'SCAN HISTORY');
         const filePrefix = isFail ? 'RRH_IPQC_Failed_Inspections' : (isRecent ? 'RRH_IPQC_Recent_Inspections' : 'RRH_IPQC_Session');
+
+        const columns = isFail ? [
+            { header: 'SL No', key: 'sl', width: 8, align: 'center' as const },
+            { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' as const },
+            { header: 'Physical Serial No', key: 'physical_serial_number', width: 22, align: 'left' as const },
+            { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' as const },
+            { header: 'Band', key: 'band', width: 12, align: 'center' as const },
+            { header: 'Inspection Date', key: 'inspection_date', width: 16, align: 'center' as const },
+            { header: 'E-Label', key: 'e_label', width: 16, align: 'center' as const },
+            { header: 'PAM TPN', key: 'pam_tpn', width: 16, align: 'left' as const },
+            { header: 'PAM 1', key: 'pam1', width: 18, align: 'left' as const },
+            { header: 'PAM 2', key: 'pam2', width: 18, align: 'left' as const },
+            { header: 'PAM 3', key: 'pam3', width: 18, align: 'left' as const },
+            { header: 'PAM 4', key: 'pam4', width: 18, align: 'left' as const },
+            { header: 'RFPC TPN', key: 'rfpc_tpn', width: 18, align: 'left' as const },
+            { header: 'RFPC SL NO.', key: 'rfpc_sl_no', width: 20, align: 'left' as const },
+            { header: 'Failed Stage Remarks', key: 'remarks', width: 30, align: 'left' as const },
+            { header: 'Status', key: 'status', width: 14, align: 'center' as const },
+            { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' as const },
+            { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' as const }
+        ] : [
+            { header: 'SL No', key: 'sl', width: 8, align: 'center' as const },
+            { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' as const },
+            { header: 'Physical Serial No', key: 'physical_serial_number', width: 22, align: 'left' as const },
+            { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' as const },
+            { header: 'Band', key: 'band', width: 12, align: 'center' as const },
+            { header: 'Inspection Date', key: 'inspection_date', width: 16, align: 'center' as const },
+            { header: 'E-Label', key: 'e_label', width: 16, align: 'center' as const },
+            { header: 'PAM TPN', key: 'pam_tpn', width: 16, align: 'left' as const },
+            { header: 'PAM 1', key: 'pam1', width: 18, align: 'left' as const },
+            { header: 'PAM 2', key: 'pam2', width: 18, align: 'left' as const },
+            { header: 'PAM 3', key: 'pam3', width: 18, align: 'left' as const },
+            { header: 'PAM 4', key: 'pam4', width: 18, align: 'left' as const },
+            { header: 'RFPC TPN', key: 'rfpc_tpn', width: 18, align: 'left' as const },
+            { header: 'RFPC SL NO.', key: 'rfpc_sl_no', width: 20, align: 'left' as const },
+            { header: 'Remarks / Defect Fixed', key: 'remarks', width: 30, align: 'left' as const },
+            { header: 'Status', key: 'status', width: 14, align: 'center' as const },
+            { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' as const },
+            { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' as const }
+        ];
 
         await sendRrhSessionExcel(res, `${filePrefix}_${session.work_order_id}.xlsx`, {
             title,
@@ -1289,18 +1335,7 @@ export const exportIpqcExcel = async (req: Request, res: Response) => {
                 yieldPercent: yieldPercent
             },
             section4Title,
-            columns: [
-                { header: 'SL No', key: 'sl', width: 8, align: 'center' },
-                { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' },
-                { header: 'Physical Serial No', key: 'physical_serial_number', width: 22, align: 'left' },
-                { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
-                { header: 'Band', key: 'band', width: 12, align: 'center' },
-                { header: 'Inspection Date', key: 'inspection_date', width: 16, align: 'center' },
-                { header: 'Status', key: 'status', width: 14, align: 'center' },
-                { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
-                { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' },
-                { header: isFail ? 'Failed Remarks' : (isRecent ? 'Remarks / Defect Fixed' : 'Remarks / Defect Details'), key: 'remarks', width: 30, align: 'left' }
-            ],
+            columns,
             rows: tableRows,
             sheetName: isFail ? 'Failed Inspections' : (isRecent ? 'Recent Inspections' : 'Session Report')
         });

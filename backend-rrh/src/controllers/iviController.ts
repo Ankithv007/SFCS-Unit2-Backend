@@ -63,12 +63,22 @@ export const getEligibleIviWorkOrders = async (req: Request, res: Response) => {
                 w.lot_quantity,
                 w.status,
                 w.created_at,
-                (
-                    SELECT ri.lot 
-                    FROM rrh_inventory ri 
-                    WHERE ri.import_id = w.active_import_id 
-                       OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
-                    LIMIT 1
+                COALESCE(
+                    (
+                        SELECT ri.lot 
+                        FROM rrh_inventory ri 
+                        WHERE ri.import_id = w.active_import_id 
+                           OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT rii.bat_lot_no 
+                        FROM rrh_ivi_inspections rii 
+                        WHERE UPPER(TRIM(rii.work_order_id)) = UPPER(TRIM(w.work_order_id)) 
+                          AND rii.bat_lot_no IS NOT NULL AND rii.bat_lot_no != '' 
+                        LIMIT 1
+                    ),
+                    '—'
                 ) as lot_number
             FROM rrh_work_orders w
             WHERE (w.is_deleted IS NULL OR w.is_deleted = false)
@@ -303,7 +313,7 @@ export const getIviSessionById = async (req: Request, res: Response) => {
         const total = row.total || 0;
         const pending = Math.max(0, lotQuantity - passed - scrapped);
         const remainingInward = Math.max(0, totalInwarded - passed - scrapped);
-        const yieldRate = total > 0 ? ((passed / total) * 100).toFixed(2) : '0.00';
+        const yieldRate = (lotQuantity > 0 ? (passed / lotQuantity) * 100 : (total > 0 ? (passed / total) * 100 : 100)).toFixed(2);
 
         return res.status(200).json({
             session,
@@ -1210,20 +1220,23 @@ export const exportIviExcel = async (req: Request, res: Response) => {
     try {
         const sessionRes = await pool.query(
             `SELECT s.*, 
-                    w.work_order_id, 
-                    w.lot_quantity, 
-                    COALESCE(w.work_order_date, w.date) as work_order_date,
-                    (
-                        SELECT ri.lot 
-                        FROM rrh_inventory ri 
-                        WHERE ri.import_id = w.active_import_id 
-                           OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id))
-                        LIMIT 1
+                    COALESCE(w.work_order_id, s.work_order_id) as work_order_id, 
+                    COALESCE(w.lot_quantity, 0) as lot_quantity, 
+                    COALESCE(
+                        w.work_order_date, 
+                        w.date, 
+                        (SELECT rii.wo_date FROM rrh_ivi_inspections rii WHERE rii.session_id = s.id AND rii.wo_date IS NOT NULL LIMIT 1)::date,
+                        s.created_at::date
+                    ) as work_order_date,
+                    COALESCE(
+                        (SELECT ri.lot FROM rrh_inventory ri WHERE ri.import_id = w.active_import_id OR (w.active_import_id IS NULL AND ri.import_id IN (SELECT id FROM rrh_excel_imports WHERE work_order_id = w.id)) LIMIT 1),
+                        (SELECT rii.bat_lot_no FROM rrh_ivi_inspections rii WHERE rii.session_id = s.id AND rii.bat_lot_no IS NOT NULL AND rii.bat_lot_no != '' LIMIT 1),
+                        '—'
                     ) as lot_number,
-                    w.status as wo_status
+                    COALESCE(w.status, 'In Progress') as wo_status
              FROM rrh_ivi_sessions s
              LEFT JOIN rrh_work_orders w ON UPPER(TRIM(w.work_order_id)) = UPPER(TRIM(s.work_order_id))
-             WHERE s.id = $1 AND s.is_deleted = false`,
+             WHERE s.id = $1`,
             [id]
         );
         const session = sessionRes.rows[0];
@@ -1269,12 +1282,12 @@ export const exportIviExcel = async (req: Request, res: Response) => {
         }
 
         if (isFailedOnly) {
-            query += ` AND rii.status = 'FAIL'
+            query += ` AND UPPER(TRIM(rii.status)) = 'FAIL'
               AND NOT EXISTS (
                   SELECT 1 FROM rrh_ivi_inspections p 
                   WHERE p.session_id = rii.session_id 
                     AND p.is_deleted = false 
-                    AND p.status = 'PASS' 
+                    AND UPPER(TRIM(p.status)) = 'PASS' 
                     AND (
                         (p.serial_number IS NOT NULL AND rii.serial_number IS NOT NULL AND UPPER(TRIM(p.serial_number)) = UPPER(TRIM(rii.serial_number)))
                         OR (p.band_serial_no IS NOT NULL AND rii.band_serial_no IS NOT NULL AND UPPER(TRIM(p.band_serial_no)) = UPPER(TRIM(rii.band_serial_no)))
@@ -1282,10 +1295,11 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                         OR (p.band_serial_no IS NOT NULL AND rii.serial_number IS NOT NULL AND UPPER(TRIM(p.band_serial_no)) = UPPER(TRIM(rii.serial_number)))
                     )
               )`;
-        } else if (isPassOnly) {
-            query += ` AND rii.status = 'PASS'`;
         } else if (isScrapOnly) {
-            query += ` AND rii.status = 'SCRAP'`;
+            query += ` AND UPPER(TRIM(rii.status)) = 'SCRAP'`;
+        } else {
+            // Default (including recent inspections and work order selection download): ONLY show passed!
+            query += ` AND UPPER(TRIM(rii.status)) = 'PASS'`;
         }
 
         query += ` ORDER BY rii.scanned_at DESC, rii.id DESC`;
@@ -1343,9 +1357,11 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 bat_lot_no: r.bat_lot_no || session?.lot_number || '—',
                 duplexer_main: r.duplexer_main || '—',
                 duplexer_part_no: r.duplexer_part_no || '—',
-                duplexer_sl_no: r.duplexer_sl_no || '—',
+                duplexer_sl_no: r.duplexer_sl_no || r.duplexer_sno || '—',
                 rrh_unit: defectText,
                 status: r.status || '—',
+                photos: r.image_urls,
+                image_urls: r.image_urls,
                 scanned_by: r.scanned_by || '—',
                 scanned_at: dateStr,
                 remarks: r.remarks || '—',
@@ -1355,9 +1371,30 @@ export const exportIviExcel = async (req: Request, res: Response) => {
 
         const title = isFailedOnly 
             ? 'RRH IVI FAILED INSPECTIONS REPORT' 
-            : (isPassOnly ? 'RRH IVI RECENT INSPECTIONS REPORT' : (isScrapOnly ? 'RRH IVI SCRAP INSPECTIONS REPORT' : 'RRH IVI SESSION REPORT'));
-        const section4Title = isFailedOnly ? 'FAILED INSPECTIONS HISTORY' : (isPassOnly ? 'RECENT INSPECTIONS HISTORY (PASSED)' : (isScrapOnly ? 'SCRAP INSPECTIONS HISTORY' : 'SCAN HISTORY'));
-        const filePrefix = isFailedOnly ? 'RRH_IVI_Failed_Inspections' : (isPassOnly ? 'RRH_IVI_Recent_Inspections' : (isScrapOnly ? 'RRH_IVI_Scrap_Inspections' : 'RRH_IVI_Session'));
+            : (isPassOnly ? 'RRH IVI RECENT INSPECTIONS REPORT' : (isScrapOnly ? 'RRH IVI SCRAP INSPECTIONS REPORT' : 'RRH IVI PASSED INSPECTIONS REPORT'));
+        const section4Title = isFailedOnly 
+            ? 'FAILED INSPECTIONS HISTORY' 
+            : (isPassOnly ? 'RECENT INSPECTIONS HISTORY (PASSED)' : (isScrapOnly ? 'SCRAP INSPECTIONS HISTORY' : 'PASSED INSPECTIONS HISTORY'));
+        const filePrefix = isFailedOnly 
+            ? 'RRH_IVI_Failed_Inspections' 
+            : (isPassOnly ? 'RRH_IVI_Recent_Inspections' : (isScrapOnly ? 'RRH_IVI_Scrap_Inspections' : 'RRH_IVI_Passed_Inspections'));
+
+        const columns = [
+            { header: 'SL No', key: 'sl', width: 8, align: 'center' as const },
+            { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' as const },
+            { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' as const },
+            { header: 'Band', key: 'band', width: 12, align: 'center' as const },
+            { header: 'BAT Lot No', key: 'bat_lot_no', width: 16, align: 'center' as const },
+            { header: 'Duplexer Make', key: 'duplexer_main', width: 18, align: 'left' as const },
+            { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 20, align: 'left' as const },
+            { header: 'Duplexer SL.No', key: 'duplexer_sl_no', width: 20, align: 'left' as const },
+            { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect / Fixed', key: 'rrh_unit', width: 28, align: 'left' as const },
+            { header: 'Status', key: 'status', width: 14, align: 'center' as const },
+            { header: 'Defect Images', key: 'photos', width: 28, align: 'center' as const },
+            { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' as const },
+            { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' as const },
+            { header: 'Remarks', key: 'remarks', width: 26, align: 'left' as const }
+        ];
 
         await sendRrhSessionExcel(res, `${filePrefix}_${woId}.xlsx`, {
             title,
@@ -1385,21 +1422,7 @@ export const exportIviExcel = async (req: Request, res: Response) => {
                 yieldPercent: yieldPercent
             },
             section4Title,
-            columns: [
-                { header: 'SL No', key: 'sl', width: 8, align: 'center' },
-                { header: 'Band Serial No', key: 'band_serial_no', width: 22, align: 'left' },
-                { header: 'Physical TPN', key: 'physical_tpn', width: 20, align: 'left' },
-                { header: 'Band', key: 'band', width: 12, align: 'center' },
-                { header: 'BAT Lot No', key: 'bat_lot_no', width: 16, align: 'center' },
-                { header: 'Duplexer Make', key: 'duplexer_main', width: 18, align: 'left' },
-                { header: 'Duplexer Part No', key: 'duplexer_part_no', width: 20, align: 'left' },
-                { header: 'Duplexer SL.No', key: 'duplexer_sl_no', width: 20, align: 'left' },
-                { header: isFailedOnly ? 'Failed Stage Remarks' : 'RRH Unit Defect / Fixed', key: 'rrh_unit', width: 28, align: 'left' },
-                { header: 'Status', key: 'status', width: 14, align: 'center' },
-                { header: 'Scanned By', key: 'scanned_by', width: 20, align: 'left' },
-                { header: 'Date & Time', key: 'scanned_at', width: 24, align: 'center' },
-                { header: 'Remarks', key: 'remarks', width: 26, align: 'left' }
-            ],
+            columns,
             rows: tableRows,
             sheetName: isFailedOnly ? 'Failed Inspections' : (isPassOnly ? 'Recent Inspections' : (isScrapOnly ? 'Scrapped Inspections' : 'Session Report'))
         });
@@ -1866,4 +1889,106 @@ export const passToNextStage = async (req: Request, res: Response) => {
         return res.status(500).json({ message: 'Failed to pass unit to next stage.', error: err.message });
     }
 };
+
+/**
+ * POST /api/rrh/ivi/inspections/:id/images
+ * Add additional photos to an existing IVI inspection
+ */
+export const addInspectionImages = async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
+        return res.status(400).json({ message: 'No images uploaded.' });
+    }
+
+    try {
+        const findRes = await pool.query(
+            `SELECT id, work_order_id, serial_number, band_serial_no, image_urls 
+             FROM rrh_ivi_inspections 
+             WHERE id = $1 AND is_deleted = false`,
+            [id]
+        );
+
+        if (findRes.rows.length === 0) {
+            for (const f of req.files) {
+                try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch { }
+            }
+            return res.status(404).json({ message: 'Inspection record not found.' });
+        }
+
+        const inspection = findRes.rows[0];
+
+        // Validate file size under 600 KB
+        for (const file of req.files) {
+            if (file.size > 600 * 1024) {
+                for (const f of req.files) {
+                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch { }
+                }
+                return res.status(400).json({ message: 'Upload image under 600 KB.' });
+            }
+        }
+
+        // Parse existing images
+        let existingImages: string[] = [];
+        const rawImgs = inspection.image_urls;
+        if (Array.isArray(rawImgs)) {
+            existingImages = [...rawImgs];
+        } else if (typeof rawImgs === 'string') {
+            try {
+                const parsed = JSON.parse(rawImgs);
+                if (Array.isArray(parsed)) existingImages = parsed;
+                else if (rawImgs.trim()) existingImages = [rawImgs.trim()];
+            } catch {
+                if (rawImgs.trim()) existingImages = [rawImgs.trim()];
+            }
+        }
+
+        const cleanBandNo = (inspection.band_serial_no || inspection.serial_number || 'BAND').toUpperCase().trim();
+        const safeBandNo = cleanBandNo.replace(/[/\\?%*:|"<>]/g, '_');
+        const bandDir = path.join(getUploadsDir(), 'rrh', 'ivi', safeBandNo);
+        if (!fs.existsSync(bandDir)) {
+            fs.mkdirSync(bandDir, { recursive: true });
+        }
+
+        const newImageUrls: string[] = [];
+        for (let idx = 0; idx < req.files.length; idx++) {
+            const file = req.files[idx];
+            const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+            const order = existingImages.length + idx + 1;
+            const fileName = `${order}_${Date.now()}${ext}`;
+            const targetPath = path.join(bandDir, fileName);
+            fs.copyFileSync(file.path, targetPath);
+            try { fs.unlinkSync(file.path); } catch { }
+            newImageUrls.push(`/uploads/rrh/ivi/${safeBandNo}/${fileName}`);
+        }
+
+        const updatedImages = [...existingImages, ...newImageUrls];
+
+        const updateRes = await pool.query(
+            `UPDATE rrh_ivi_inspections
+             SET image_urls = $1
+             WHERE id = $2
+             RETURNING *`,
+            [JSON.stringify(updatedImages), id]
+        );
+
+        logger.info(`Added ${newImageUrls.length} images to inspection ID ${id} (${cleanBandNo})`);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Images added successfully.',
+            image_urls: updatedImages,
+            inspection: updateRes.rows[0]
+        });
+    } catch (err: any) {
+        logger.error(`Error in addInspectionImages: ${err.message}`);
+        if (req.files && Array.isArray(req.files)) {
+            for (const f of req.files) {
+                try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch { }
+            }
+        }
+        return res.status(500).json({ message: 'Failed to add images to inspection.', error: err.message });
+    }
+};
+
 

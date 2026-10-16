@@ -1,8 +1,39 @@
 import ExcelJS from 'exceljs';
 import { Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import { createLogger } from './logger';
+import { getUploadsDir } from './uploads';
 
 const logger = createLogger('RrhExcelGenerator');
+
+const resolveImageDiskPath = (imgUrl: string): string | null => {
+    if (!imgUrl || typeof imgUrl !== 'string') return null;
+    const cleanUrl = imgUrl.trim();
+    if (!cleanUrl) return null;
+
+    const relWithoutUploads = cleanUrl.replace(/^\/+/, '').replace(/^uploads\/+/i, '');
+    const filename = path.basename(cleanUrl);
+    const uploadsDir = getUploadsDir();
+
+    const candidates = [
+        path.join(uploadsDir, relWithoutUploads),
+        path.join('/app/uploads', relWithoutUploads),
+        path.join(process.cwd(), 'uploads', relWithoutUploads),
+        path.join(uploadsDir, 'rrh', 'ivi', filename),
+        path.join('/app/uploads/rrh/ivi', filename),
+        path.join(process.cwd(), 'uploads', 'rrh', 'ivi', filename),
+        path.resolve(cleanUrl)
+    ];
+    for (const p of candidates) {
+        try {
+            if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+                return p;
+            }
+        } catch { }
+    }
+    return null;
+};
 
 export interface RrhExcelReportOptions {
     title: string;
@@ -76,11 +107,42 @@ export function buildRrhSessionExcel(options: RrhExcelReportOptions): ExcelJS.Wo
     const numCols = Math.max(7, options.columns.length);
     const endColLetter = String.fromCharCode(64 + Math.min(26, numCols));
 
-    // Column widths setup
-    ws.columns = options.columns.map((col, idx) => ({
-        key: col.key || `col_${idx}`,
-        width: col.width || 20
-    }));
+    // Column widths setup - dynamically adjust photo column width to fit all horizontal photos with padding
+    const calculatedColumns = options.columns.map((col, idx) => {
+        let colWidth = col.width || 20;
+        if (col.key === 'photos' || col.key === 'images' || col.key === 'image_urls') {
+            let maxImgs = 0;
+            options.rows.forEach(r => {
+                const raw = r.image_urls || r.photos;
+                let count = 0;
+                if (Array.isArray(raw)) count = raw.length;
+                else if (typeof raw === 'string') {
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) count = parsed.length;
+                        else if (raw.trim()) count = 1;
+                    } catch {
+                        if (raw.trim()) count = 1;
+                    }
+                }
+                if (count > maxImgs) maxImgs = count;
+            });
+
+            if (maxImgs > 0) {
+                const imgW = 75;
+                const imgGap = 8;
+                const leftPad = 8;
+                const totalPx = leftPad * 2 + maxImgs * imgW + (maxImgs - 1) * imgGap;
+                colWidth = Math.max(colWidth, Math.ceil(totalPx / 7.2) + 2);
+            }
+        }
+        return {
+            key: col.key || `col_${idx}`,
+            width: colWidth
+        };
+    });
+
+    ws.columns = calculatedColumns;
 
     const addSectionHeader = (label: string, fill: ExcelJS.Fill, startRow: number) => {
         const row = ws.getRow(startRow);
@@ -233,6 +295,8 @@ export function buildRrhSessionExcel(options: RrhExcelReportOptions): ExcelJS.Wo
                 fgColor: { argb: idx % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFC' }
             };
 
+            let rowHasImages = false;
+
             options.columns.forEach((col, cIdx) => {
                 const colLetter = String.fromCharCode(65 + cIdx);
                 const cell = ws.getCell(`${colLetter}${r}`);
@@ -248,6 +312,78 @@ export function buildRrhSessionExcel(options: RrhExcelReportOptions): ExcelJS.Wo
                     indent: (col.align === 'center' || cIdx === 0) ? 0 : 1,
                     wrapText: true
                 };
+
+                // Embed images if column is for photos / images
+                if (col.key === 'photos' || col.key === 'images' || col.key === 'image_urls') {
+                    const rawImgs = rowObj.image_urls || rowObj.photos;
+                    let imgs: string[] = [];
+                    if (Array.isArray(rawImgs)) imgs = rawImgs;
+                    else if (typeof rawImgs === 'string') {
+                        try {
+                            const parsed = JSON.parse(rawImgs);
+                            if (Array.isArray(parsed)) imgs = parsed;
+                        } catch { }
+                    }
+
+                    if (imgs.length > 0) {
+                        const validImgPaths: string[] = [];
+                        for (const imgUrl of imgs) {
+                            const diskPath = resolveImageDiskPath(imgUrl);
+                            if (diskPath) validImgPaths.push(diskPath);
+                        }
+
+                        if (validImgPaths.length > 0) {
+                            const numImgs = validImgPaths.length;
+                            const imgW = 75;
+                            const imgH = 50;
+                            const leftPad = 8;
+                            const imgGap = 8;
+                            const topPad = 5;
+                            const rowIdx0 = r - 1; // 0-based row index in ExcelJS
+
+                            validImgPaths.forEach((imgDiskPath, imgIdx) => {
+                                try {
+                                    const extRaw = path.extname(imgDiskPath).toLowerCase().replace('.', '');
+                                    const extension = (extRaw === 'png' ? 'png' : extRaw === 'gif' ? 'gif' : 'jpeg') as any;
+                                    const imageId = workbook.addImage({
+                                        filename: imgDiskPath,
+                                        extension
+                                    });
+                                    const colOffsetPx = leftPad + (imgIdx * (imgW + imgGap));
+                                    const colOffsetEmu = Math.round(colOffsetPx * 9525);
+                                    const rowOffsetEmu = Math.round(topPad * 9525);
+
+                                    ws.addImage(imageId, {
+                                        tl: {
+                                            col: cIdx,
+                                            row: rowIdx0,
+                                            nativeCol: cIdx,
+                                            nativeColOff: colOffsetEmu,
+                                            nativeRow: rowIdx0,
+                                            nativeRowOff: rowOffsetEmu
+                                        } as any,
+                                        ext: { width: imgW, height: imgH },
+                                        editAs: 'oneCell'
+                                    });
+                                    rowHasImages = true;
+                                } catch (e: any) {
+                                    logger.warn(`Failed to embed Excel image in row ${r}: ${e.message}`);
+                                }
+                            });
+
+                            if (rowHasImages) {
+                                dataRow.height = 58;
+                                cell.value = '';
+                            }
+                        }
+                    }
+
+                    if (!rowHasImages) {
+                        cell.value = (imgs && imgs.length > 0) ? 'Photo Attached' : '-';
+                        cell.font = { name: 'Calibri', size: 10, color: { argb: 'FF94A3B8' } };
+                        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+                    }
+                }
 
                 // Badge styling for status
                 if (col.key === 'status' || col.key === 'result') {
