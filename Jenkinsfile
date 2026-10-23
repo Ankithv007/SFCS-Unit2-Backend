@@ -11,11 +11,11 @@ pipeline {
 
     environment {
         DOCKERHUB_USER  = 'ankithbv007'
-        DOCKERHUB_CREDS = 'dockerhub-creds'
+        DOCKERHUB_CREDS = 'dockerhub-token'
 
-        IMAGE_PREFIX = 'ankithbv007/new-sfcs-unit2-backend'
+        IMAGE_PREFIX = 'ankithbv007/sfcs-unit2-backend'
 
-        LOCAL_IMAGE_PREFIX = 'new-sfcs-unit2-backend'
+        LOCAL_IMAGE_PREFIX = 'sfcs-unit2-backend'
     }
 
     stages {
