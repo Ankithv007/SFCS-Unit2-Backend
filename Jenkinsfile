@@ -1,4 +1,3 @@
-```groovy
 pipeline {
     agent any
 
@@ -408,4 +407,3 @@ REMOTE_SCRIPT
         }
     }
 }
-```
