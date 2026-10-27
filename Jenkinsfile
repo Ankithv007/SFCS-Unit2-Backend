@@ -1,3 +1,4 @@
+```groovy
 pipeline {
     agent any
 
@@ -16,7 +17,6 @@ pipeline {
         LOCAL_IMAGE_PREFIX = 'sfcs-unit2-backend'
 
         DEPLOY_HOST = '139.84.217.224'
-        DEPLOY_USER = 'root'
         DEPLOY_DIR  = '/opt/sfcs-unit2'
 
         SSH_CREDENTIALS_ID = 'sfcs-production-ssh'
@@ -26,9 +26,6 @@ pipeline {
 
     stages {
 
-        // --------------------------------------------------
-        // 1. CHECKOUT
-        // --------------------------------------------------
         stage('Checkout') {
             steps {
                 checkout scm
@@ -42,37 +39,30 @@ pipeline {
                     env.IMAGE_TAG = env.GIT_COMMIT_FULL.take(12)
                 }
 
-                echo "Full Git commit: ${env.GIT_COMMIT_FULL}"
+                echo "Git commit: ${env.GIT_COMMIT_FULL}"
                 echo "Docker image tag: ${env.IMAGE_TAG}"
 
                 sh '''
                     set -eu
 
-                    git rev-parse --verify HEAD
-
                     if ! printf '%s' "$IMAGE_TAG" |
                         grep -Eq '^[0-9a-f]{12}$'; then
-                        echo "ERROR: Invalid Docker image tag."
+                        echo "ERROR: Invalid Git commit image tag."
                         exit 1
                     fi
 
-                    echo "Git checkout and image tag validation successful."
+                    git rev-parse --verify HEAD
+                    echo "Checkout successful."
                 '''
             }
         }
 
-        // --------------------------------------------------
-        // 2. CHECK DOCKER
-        // --------------------------------------------------
         stage('Check Docker') {
             steps {
                 sh '''
                     set -eu
 
-                    echo "Checking Docker CLI..."
                     docker --version
-
-                    echo "Checking Docker daemon..."
                     docker info >/dev/null
 
                     echo "Docker is available."
@@ -80,23 +70,18 @@ pipeline {
             }
         }
 
-        // --------------------------------------------------
-        // 3. BUILD ALL EIGHT BACKEND IMAGES
-        // --------------------------------------------------
         stage('Build All Backend Images') {
             steps {
                 sh '''
                     set -eu
 
                     for service in $BACKEND_SERVICES; do
-
                         echo "========================================"
-                        echo "Building: $service"
-                        echo "Image tag: $IMAGE_TAG"
+                        echo "Building $service:$IMAGE_TAG"
                         echo "========================================"
 
                         if [ ! -f "$service/Dockerfile" ]; then
-                            echo "ERROR: Dockerfile missing for $service"
+                            echo "ERROR: Dockerfile missing: $service/Dockerfile"
                             exit 1
                         fi
 
@@ -105,7 +90,6 @@ pipeline {
                             -t "${LOCAL_IMAGE_PREFIX}-${service}:${IMAGE_TAG}" \
                             -f "$service/Dockerfile" \
                             "$service/"
-
                     done
 
                     echo "All eight backend images built successfully."
@@ -113,9 +97,6 @@ pipeline {
             }
         }
 
-        // --------------------------------------------------
-        // 4. PUSH ALL EIGHT IMAGES TO DOCKER HUB
-        // --------------------------------------------------
         stage('Push Images to Docker Hub') {
             steps {
                 withCredentials([
@@ -128,7 +109,6 @@ pipeline {
                     sh '''
                         set -eu
 
-                        # Keep Docker credentials in a temporary directory.
                         export DOCKER_CONFIG="$(mktemp -d)"
                         trap 'docker logout >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
 
@@ -140,30 +120,23 @@ pipeline {
                                 --password-stdin
 
                         for service in $BACKEND_SERVICES; do
-
                             LOCAL_IMAGE="${LOCAL_IMAGE_PREFIX}-${service}:${IMAGE_TAG}"
                             REMOTE_IMAGE="${IMAGE_PREFIX}-${service}:${IMAGE_TAG}"
 
-                            echo "Tagging image: $REMOTE_IMAGE"
-
+                            echo "Tagging $REMOTE_IMAGE"
                             docker tag "$LOCAL_IMAGE" "$REMOTE_IMAGE"
 
-                            echo "Pushing image: $REMOTE_IMAGE"
-
+                            echo "Pushing $REMOTE_IMAGE"
                             docker push "$REMOTE_IMAGE"
-
                         done
 
-                        echo "All eight backend images pushed successfully."
+                        echo "All eight images pushed successfully."
                     '''
                 }
             }
         }
 
-        // --------------------------------------------------
-        // 5. DEPLOY TO PRODUCTION
-        // --------------------------------------------------
-        stage('Deploy to Production') {
+        stage('Verify Docker Hub Images') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -172,76 +145,112 @@ pipeline {
                         passwordVariable: 'DOCKERHUB_TOKEN'
                     )
                 ]) {
-                    sshagent(credentials: ["${SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        set -eu
 
-                        sh '''
-                            set -eu
+                        export DOCKER_CONFIG="$(mktemp -d)"
+                        trap 'docker logout >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
 
-                            SSH_OPTIONS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+                        printf '%s' "$DOCKERHUB_TOKEN" |
+                            docker login \
+                                --username "$DOCKERHUB_USERNAME" \
+                                --password-stdin
 
-                            echo "Connecting to production server..."
+                        for service in $BACKEND_SERVICES; do
+                            IMAGE="${IMAGE_PREFIX}-${service}:${IMAGE_TAG}"
 
-                            # Remove the temporary remote Docker login when this
-                            # deployment stage exits.
-                            trap 'ssh $SSH_OPTIONS "$DEPLOY_USER@$DEPLOY_HOST" "docker logout" >/dev/null 2>&1 || true' EXIT
+                            echo "Verifying $IMAGE"
+                            docker manifest inspect "$IMAGE" >/dev/null
+                            echo "Verified: $IMAGE"
+                        done
 
-                            # Authenticate remotely so private Docker Hub images
-                            # can be pulled if required.
-                            printf '%s' "$DOCKERHUB_TOKEN" |
-                                ssh $SSH_OPTIONS "$DEPLOY_USER@$DEPLOY_HOST" \
-                                    "docker login --username '$DOCKERHUB_USERNAME' --password-stdin"
+                        echo "All eight Docker Hub images verified."
+                    '''
+                }
+            }
+        }
 
-                            # Deploy the exact commit-tagged images built above.
-                            ssh $SSH_OPTIONS "$DEPLOY_USER@$DEPLOY_HOST" \
-                                "DEPLOY_DIR='$DEPLOY_DIR' BACKEND_TAG='$IMAGE_TAG' bash -s" <<'REMOTE_SCRIPT'
+        stage('Deploy to Production') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: "${SSH_CREDENTIALS_ID}",
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    usernamePassword(
+                        credentialsId: "${DOCKERHUB_CREDS}",
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
 
-                            set -Eeuo pipefail
+                        SSH_OPTIONS="-i $SSH_KEY -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
 
-                            cd "$DEPLOY_DIR"
+                        echo "Connecting to production server..."
 
-                            echo "Production directory: $DEPLOY_DIR"
-                            echo "Backend image tag: $BACKEND_TAG"
+                        # Authenticate to Docker Hub on the production server.
+                        printf '%s' "$DOCKERHUB_TOKEN" |
+                            ssh $SSH_OPTIONS "$SSH_USER@$DEPLOY_HOST" \
+                            "docker login --username '$DOCKERHUB_USERNAME' --password-stdin"
 
-                            if [ ! -f .env ]; then
-                                echo "ERROR: Production .env file not found."
-                                exit 1
-                            fi
+                        # Deploy the images created from this Git commit.
+                        ssh $SSH_OPTIONS "$SSH_USER@$DEPLOY_HOST" \
+                            "DEPLOY_DIR='$DEPLOY_DIR' BACKEND_TAG='$IMAGE_TAG' bash -s" <<'REMOTE_SCRIPT'
 
-                            if ! printf '%s' "$BACKEND_TAG" |
+                        set -Eeuo pipefail
+
+                        cd "$DEPLOY_DIR"
+
+                        echo "Deploy directory: $DEPLOY_DIR"
+                        echo "New backend tag: $BACKEND_TAG"
+
+                        if [ ! -f .env ]; then
+                            echo "ERROR: Production .env file not found."
+                            exit 1
+                        fi
+
+                        if ! printf '%s' "$BACKEND_TAG" |
+                            grep -Eq '^[0-9a-f]{12}$'; then
+                            echo "ERROR: Invalid image tag."
+                            exit 1
+                        fi
+
+                        BACKUP_FILE="$(mktemp)"
+                        cp .env "$BACKUP_FILE"
+
+                        OLD_TAG="$(
+                            grep '^BACKEND_TAG=' .env |
+                            tail -n 1 |
+                            cut -d '=' -f 2- || true
+                        )"
+
+                        rollback() {
+                            STATUS=$?
+                            trap - ERR
+
+                            echo "Deployment failed. Restoring previous .env."
+                            cp "$BACKUP_FILE" .env
+
+                            if printf '%s' "$OLD_TAG" |
                                 grep -Eq '^[0-9a-f]{12}$'; then
-                                echo "ERROR: Invalid backend image tag."
-                                exit 1
-                            fi
 
-                            # Confirm Docker Compose can find the project.
-                            docker compose version
+                                echo "Attempting rollback to $OLD_TAG"
+                                export BACKEND_TAG="$OLD_TAG"
 
-                            # Save the current configuration for rollback.
-                            BACKUP_FILE="$(mktemp)"
-                            cp .env "$BACKUP_FILE"
+                                if docker compose pull \
+                                    backend-backend \
+                                    backend-inventory \
+                                    backend-login \
+                                    backend-pretest \
+                                    backend-qc-inspection \
+                                    backend-rrh \
+                                    backend-smt \
+                                    backend-vacuum-leak-test; then
 
-                            OLD_BACKEND_TAG="$(
-                                grep '^BACKEND_TAG=' .env |
-                                tail -n 1 |
-                                cut -d '=' -f 2- || true
-                            )"
-
-                            rollback_deployment() {
-                                STATUS=$?
-                                trap - ERR
-
-                                echo "Deployment failed. Restoring previous .env..."
-
-                                cp "$BACKUP_FILE" .env
-
-                                if printf '%s' "$OLD_BACKEND_TAG" |
-                                    grep -Eq '^[0-9a-f]{12}$'; then
-
-                                    echo "Attempting rollback to $OLD_BACKEND_TAG"
-
-                                    export BACKEND_TAG="$OLD_BACKEND_TAG"
-
-                                    if docker compose pull \
+                                    docker compose up -d --no-deps \
                                         backend-backend \
                                         backend-inventory \
                                         backend-login \
@@ -249,123 +258,108 @@ pipeline {
                                         backend-qc-inspection \
                                         backend-rrh \
                                         backend-smt \
-                                        backend-vacuum-leak-test; then
-
-                                        docker compose up -d --no-deps \
-                                            backend-backend \
-                                            backend-inventory \
-                                            backend-login \
-                                            backend-pretest \
-                                            backend-qc-inspection \
-                                            backend-rrh \
-                                            backend-smt \
-                                            backend-vacuum-leak-test || true
-                                    fi
-                                else
-                                    echo "No valid previous commit tag found; automatic image rollback is unavailable."
+                                        backend-vacuum-leak-test || true
                                 fi
-
-                                rm -f "$BACKUP_FILE"
-                                exit "$STATUS"
-                            }
-
-                            trap rollback_deployment ERR
-
-                            # Update BACKEND_TAG while preserving the other
-                            # production environment variables.
-                            if grep -q '^BACKEND_TAG=' .env; then
-                                sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=$BACKEND_TAG/" .env
                             else
-                                printf '\\nBACKEND_TAG=%s\\n' "$BACKEND_TAG" >> .env
+                                echo "No valid previous commit tag available for automatic rollback."
                             fi
 
-                            export BACKEND_TAG
-
-                            echo "Validating Docker Compose configuration..."
-
-                            docker compose config -q
-
-                            echo "Pulling the new backend images..."
-
-                            docker compose pull \
-                                backend-backend \
-                                backend-inventory \
-                                backend-login \
-                                backend-pretest \
-                                backend-qc-inspection \
-                                backend-rrh \
-                                backend-smt \
-                                backend-vacuum-leak-test
-
-                            echo "Recreating backend containers..."
-
-                            docker compose up -d --no-deps \
-                                backend-backend \
-                                backend-inventory \
-                                backend-login \
-                                backend-pretest \
-                                backend-qc-inspection \
-                                backend-rrh \
-                                backend-smt \
-                                backend-vacuum-leak-test
-
-                            echo "Verifying backend containers are running..."
-
-                            for service in \
-                                backend-backend \
-                                backend-inventory \
-                                backend-login \
-                                backend-pretest \
-                                backend-qc-inspection \
-                                backend-rrh \
-                                backend-smt \
-                                backend-vacuum-leak-test
-                            do
-                                RUNNING_CONTAINER="$(
-                                    docker compose ps --status running -q "$service"
-                                )"
-
-                                if [ -z "$RUNNING_CONTAINER" ]; then
-                                    echo "ERROR: $service is not running."
-                                    false
-                                fi
-
-                                echo "OK: $service is running."
-                            done
-
-                            trap - ERR
                             rm -f "$BACKUP_FILE"
+                            exit "$STATUS"
+                        }
 
-                            echo "Production backend deployment completed successfully."
+                        trap rollback ERR
 
-                            REMOTE_SCRIPT
+                        # Update BACKEND_TAG without replacing other .env settings.
+                        if grep -q '^BACKEND_TAG=' .env; then
+                            sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=$BACKEND_TAG/" .env
+                        else
+                            printf '\\nBACKEND_TAG=%s\\n' "$BACKEND_TAG" >> .env
+                        fi
 
-                            echo "Deployment command completed."
-                        '''
-                    }
+                        export BACKEND_TAG
+
+                        echo "Validating Compose configuration..."
+                        docker compose config -q
+
+                        echo "Pulling new backend images..."
+                        docker compose pull \
+                            backend-backend \
+                            backend-inventory \
+                            backend-login \
+                            backend-pretest \
+                            backend-qc-inspection \
+                            backend-rrh \
+                            backend-smt \
+                            backend-vacuum-leak-test
+
+                        echo "Recreating backend services..."
+                        docker compose up -d --no-deps \
+                            backend-backend \
+                            backend-inventory \
+                            backend-login \
+                            backend-pretest \
+                            backend-qc-inspection \
+                            backend-rrh \
+                            backend-smt \
+                            backend-vacuum-leak-test
+
+                        echo "Checking backend containers..."
+
+                        for service in \
+                            backend-backend \
+                            backend-inventory \
+                            backend-login \
+                            backend-pretest \
+                            backend-qc-inspection \
+                            backend-rrh \
+                            backend-smt \
+                            backend-vacuum-leak-test
+                        do
+                            CONTAINER_ID="$(
+                                docker compose ps --status running -q "$service"
+                            )"
+
+                            if [ -z "$CONTAINER_ID" ]; then
+                                echo "ERROR: $service is not running."
+                                false
+                            fi
+
+                            echo "OK: $service is running."
+                        done
+
+                        trap - ERR
+                        rm -f "$BACKUP_FILE"
+
+                        echo "Production backend deployment completed successfully."
+
+                        REMOTE_SCRIPT
+
+                        # Log out of Docker Hub on the server.
+                        ssh $SSH_OPTIONS "$SSH_USER@$DEPLOY_HOST" \
+                            "docker logout" || true
+
+                        echo "Deployment stage completed."
+                    '''
                 }
             }
         }
     }
 
-    // --------------------------------------------------
-    // 6. POST ACTIONS
-    // --------------------------------------------------
     post {
         success {
             echo """
-            SUCCESS: Backend pipeline completed.
+            SUCCESS: SFCS backend CI/CD completed.
 
             Git commit: ${env.GIT_COMMIT_FULL}
-            Image tag:  ${env.IMAGE_TAG}
+            Docker tag: ${env.IMAGE_TAG}
 
-            All eight backend images were pushed to Docker Hub.
-            Production deployment completed successfully.
+            All eight backend images were pushed and production deployment succeeded.
             """
         }
 
         failure {
-            echo 'Backend pipeline failed. Check the first failed stage in Console Output.'
+            echo 'Pipeline failed. Review the first error in Console Output.'
 
             sh '''
                 set +e
@@ -376,12 +370,13 @@ pipeline {
                         >/dev/null 2>&1
                 done
 
-                echo "Local build image cleanup attempted."
+                echo "Local image cleanup attempted."
             '''
         }
 
         always {
-            echo 'Backend CI/CD pipeline execution completed.'
+            echo 'SFCS backend CI/CD pipeline execution completed.'
         }
     }
 }
+```
