@@ -1,0 +1,47 @@
+import { Router, Request, Response } from 'express';
+import { authMiddleware } from '../../middleware/auth';
+import {
+    getEligibleIpqcWorkOrders,
+    getWorkOrderIviDetails,
+    createIpqcSession,
+    getIpqcSessions,
+    getIpqcSessionById,
+    updateIpqcSessionStatus,
+    deleteIpqcSession,
+    getRemainingIviMasterData,
+    lookupSerialDetails,
+    submitInspection,
+    getScannedInspections,
+    getFailedInspections,
+    exportIpqcExcel,
+    exportUnscannedExcel,
+    getIpqcMasterData,
+    createIpqcMasterData,
+    deleteIpqcMasterData
+} from '../../controllers/ecn/ecnIpqcController';
+
+const router = Router();
+
+router.get('/master-data', authMiddleware, getIpqcMasterData as (req: Request, res: Response) => void);
+router.post('/master-data', authMiddleware, createIpqcMasterData as (req: Request, res: Response) => void);
+router.delete('/master-data/:id', authMiddleware, deleteIpqcMasterData as (req: Request, res: Response) => void);
+
+router.get('/eligible-work-orders', authMiddleware, getEligibleIpqcWorkOrders as (req: Request, res: Response) => void);
+router.get('/work-orders/:woId/ivi-details', authMiddleware, getWorkOrderIviDetails as (req: Request, res: Response) => void);
+router.get('/lookup', authMiddleware, lookupSerialDetails as (req: Request, res: Response) => void);
+
+router.post('/sessions', authMiddleware, createIpqcSession as (req: Request, res: Response) => void);
+router.get('/sessions', authMiddleware, getIpqcSessions as (req: Request, res: Response) => void);
+router.get('/sessions/:id', authMiddleware, getIpqcSessionById as (req: Request, res: Response) => void);
+router.patch('/sessions/:id/status', authMiddleware, updateIpqcSessionStatus as (req: Request, res: Response) => void);
+router.delete('/sessions/:id', authMiddleware, deleteIpqcSession as (req: Request, res: Response) => void);
+
+router.get('/sessions/:id/remaining-master-data', authMiddleware, getRemainingIviMasterData as (req: Request, res: Response) => void);
+router.post('/sessions/:id/inspections', authMiddleware, submitInspection as (req: Request, res: Response) => void);
+router.get('/sessions/:id/inspections', authMiddleware, getScannedInspections as (req: Request, res: Response) => void);
+router.get('/sessions/:id/failed-inspections', authMiddleware, getFailedInspections as (req: Request, res: Response) => void);
+router.get('/sessions/:id/export', authMiddleware, exportIpqcExcel as (req: Request, res: Response) => void);
+router.get('/sessions/:id/export-unscanned', authMiddleware, exportUnscannedExcel as (req: Request, res: Response) => void);
+
+export default router;
+

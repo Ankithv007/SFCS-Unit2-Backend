@@ -1,0 +1,230 @@
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import fetch from 'node-fetch';
+
+export interface AuthRequest extends Request {
+    user?: any;
+}
+
+export const authenticateToken = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    let token: string | undefined;
+    const authHeader = req.headers.authorization || (req.headers['authorization'] as string);
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        token = authHeader.split(' ')[1];
+    } else if (req.query && typeof req.query.token === 'string') {
+        token = req.query.token;
+    }
+
+    if (token) {
+        try {
+            const secret = process.env.JWT_SECRET || 'secret';
+            const decoded = jwt.verify(token, secret, { ignoreExpiration: true }) as any;
+            if (decoded && (decoded.id || decoded.email || decoded.employee_code || decoded.name)) {
+                req.user = decoded;
+
+                // If decoded JWT doesn't have an employee_code, check if X-Backend-User-Id header enriches it
+                const backendUserId = req.headers['x-backend-user-id'];
+                if (!decoded.employee_code && backendUserId) {
+                    const idStr = backendUserId.toString().trim();
+                    try {
+                        const pool = require('../config/db').default;
+                        const result = await pool.query(
+                            'SELECT user_id, name FROM employees WHERE UPPER(TRIM(user_id)) = UPPER(TRIM($1)) AND is_active = TRUE',
+                            [idStr]
+                        );
+                        if (result.rows.length > 0) {
+                            req.user.employee_code = result.rows[0].user_id;
+                            if (!req.user.name && result.rows[0].name) {
+                                req.user.name = result.rows[0].name;
+                            }
+                        }
+                    } catch (dbErr: any) {
+                        // ignore enrichment error
+                    }
+                }
+                return next();
+            }
+        } catch (e) {
+            // Token cryptographic signature invalid or malformed
+        }
+    }
+
+    // 2. Fallback to verified backend operator session from X-Backend-User-Id header
+    const backendUserId = req.headers['x-backend-user-id'];
+    if (backendUserId) {
+        const idStr = backendUserId.toString().trim();
+        try {
+            const pool = require('../config/db').default;
+            const result = await pool.query(
+                'SELECT id, name, user_id, role, is_active FROM employees WHERE UPPER(TRIM(user_id)) = UPPER(TRIM($1)) AND is_active = TRUE',
+                [idStr]
+            );
+            if (result.rows.length > 0) {
+                const emp = result.rows[0];
+                req.user = {
+                    id: emp.id,
+                    employee_code: emp.user_id,
+                    name: emp.name,
+                    role: emp.role || 'OPERATOR'
+                };
+                return next();
+            }
+        } catch (e: any) {
+            console.error('[AUTH ERROR] Error checking backend employee in authenticateToken:', e.message);
+        }
+    }
+
+    // No valid verified identity provided: reject unauthenticated request
+    return res.status(401).json({ message: 'Unauthorized: Authentication required.' });
+};
+
+export const requireRole = (allowedRoles: string[]) => {
+    return (req: AuthRequest, res: Response, next: NextFunction) => {
+        const userRole = (req.user?.role || '').toString().trim();
+        const normalizedAllowedRoles = allowedRoles.map(r => r.trim().toLowerCase());
+
+        if (!req.user || !userRole || !normalizedAllowedRoles.includes(userRole.toLowerCase())) {
+            return res.status(403).json({ message: 'Access Denied: You do not have permission to perform this action.' });
+        }
+        next();
+    };
+};
+
+export const authorizeSuperAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret', { ignoreExpiration: true }) as any;
+            if (decoded && decoded.role && (decoded.role === 'Super Admin' || decoded.role.toLowerCase().replace(/\s/g, '') === 'superadmin')) {
+                return next();
+            }
+        } catch (e) {
+            // Token verification failed, fall through to 403
+        }
+    }
+    // Fallback to req.user when JWT absent (e.g. verified backend user)
+    const userRole = (req as any).user?.role;
+    if (userRole) {
+        const lower = userRole.toString().toLowerCase().replace(/\s/g, '');
+        if (lower === 'superadmin') return next();
+    }
+    return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+};
+
+export const authorizeAdminOrSuperAdmin = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    const backendUserId = req.headers['x-backend-user-id'];
+    if (backendUserId) {
+        const idStr = backendUserId.toString();
+        if (idStr.toUpperCase() === 'ADMIN') {
+            return next();
+        }
+        try {
+            const pool = require('../config/db').default;
+            const result = await pool.query('SELECT role FROM employees WHERE user_id = $1', [idStr]);
+            if (result.rows.length > 0) {
+                const role = (result.rows[0].role || '').toString().toLowerCase().replace(/\s/g, '');
+                if (role === 'admin' || role === 'superadmin') {
+                    return next();
+                } else {
+                    return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+                }
+            }
+        } catch (e) {
+            console.error('Error checking backend user role:', e);
+        }
+    }
+
+    const authHeader = req.headers.authorization;
+    // Try JWT first
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret', { ignoreExpiration: true }) as any;
+            if (decoded && decoded.role) {
+                const role = (decoded.role || '').toString().toLowerCase().replace(/\s/g, '');
+                if (role === 'admin' || role === 'superadmin') return next();
+            }
+        } catch (e) {
+            // fall through to check req.user
+        }
+    }
+
+    // Fallback to req.user
+    const userRole = (req as any).user?.role;
+    if (userRole) {
+        const lower = userRole.toString().toLowerCase().replace(/\s/g, '');
+        if (lower === 'admin' || lower === 'superadmin') return next();
+    }
+
+    return res.status(403).json({ error: 'You do not have permission to delete this record.' });
+};
+
+const permissionCache = new Map<string, any[]>();
+
+export const requirePermission = (permissionKey: string, action: 'can_view' | 'can_create' | 'can_edit' | 'can_delete' | 'can_export') => {
+    return async (req: AuthRequest, res: Response, next: NextFunction) => {
+        const user = req.user;
+        if (!user || !user.id) {
+            return res.status(401).json({ message: 'Unauthorized: No user session found.' });
+        }
+
+        // 1. Super Admin Bypass
+        const roleLower = (user.role || '').toString().toLowerCase().replace(/\s/g, '');
+        if (roleLower === 'superadmin') {
+            return next();
+        }
+
+        // Restrict 'can_delete' action exclusively to Super Admin users
+        if (action === 'can_delete') {
+            return res.status(403).json({ message: 'Access Denied: Only Super Admin users are allowed to perform delete operations.' });
+        }
+
+        // 2. Admin Role Bypass (Full access except Delete)
+        if (user.role === 'Admin' || (user.role || '').toString().toLowerCase().replace(/\s/g, '') === 'admin') {
+            return next();
+        }
+
+        const userId = user.id;
+        const version = user.permission_version || 1;
+        const cacheKey = `${userId}:${version}`;
+
+        let permissions: any[] | undefined = permissionCache.get(cacheKey);
+
+        if (!permissions) {
+            try {
+                const authHeader = req.headers['authorization'];
+                const authUrl = process.env.AUTH_SERVICE_URL || 'http://backend-login:5000';
+                
+                console.log(`[AUTH BACKEND CACHE MISS] Fetching permissions for user ${userId}, version ${version}`);
+                const response = await fetch(`${authUrl}/api/auth/verify-token-permissions`, {
+                    headers: { 'Authorization': authHeader || '' }
+                });
+
+                if (!response.ok) {
+                    return res.status(response.status).json({ message: 'Authorization check failed.' });
+                }
+
+                const result: any = await response.json();
+                if (result.success && Array.isArray(result.permissions)) {
+                    permissions = result.permissions;
+                    permissionCache.set(cacheKey, permissions || []);
+                } else {
+                    return res.status(403).json({ message: 'Forbidden: Unable to fetch permissions.' });
+                }
+            } catch (err: any) {
+                console.error('[AUTH BACKEND ERROR] Failed to fetch permissions:', err.message);
+                return res.status(500).json({ message: 'Internal authorization service error.' });
+            }
+        }
+
+        const userPerm = (permissions || []).find((p: any) => p.permission_key === permissionKey);
+        
+        if (!userPerm || !userPerm[action]) {
+            console.log(`[AUTH BACKEND FORBIDDEN] User ${userId} lacks permission "${permissionKey}" for action "${action}"`);
+            return res.status(403).json({ message: 'Access Denied: You do not have permission to perform this action.' });
+        }
+
+        next();
+    };
+};

@@ -1,0 +1,14 @@
+**/node_modules/
+**/dist/
+**/.env
+.env
+.DS_Store
+coverage/
+.vscode/
+uploads/
+docker-compose.yml
+nginx.conf
+init-db.sql
+Gateway.Dockerfile
+README.md
+SFCS-Unit2-Backend/
